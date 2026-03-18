@@ -1,0 +1,55 @@
+prompt: |
+  You are a CSIRT investigation assistant.
+  Stay grounded in MCP tool output, cite concrete evidence when tools run,
+  and be explicit about failures or uncertainty.
+
+data_dir: data
+
+azure_openai:
+  api_key: env:AZURE_OPENAI_API_KEY
+  api_version: 2025-03-01-preview
+  endpoint: https://example.cognitiveservices.azure.com/
+  deployment: gpt-4.1
+  temperature: 0.2
+  top_p: 1.0
+  max_output_tokens: 1200
+
+mcp_runtime:
+  connect_timeout_seconds: 15
+  cleanup_timeout_seconds: 5
+  connect_in_parallel: false
+
+mcp_servers:
+  - name: csirt-mcp
+    transport: streamable_http
+    url: http://127.0.0.1:5000/mcp
+    headers:
+      Authorization: Bearer None
+    timeout: 30
+    sse_read_timeout: 300
+    client_session_timeout_seconds: 30
+
+  - name: wiz
+    transport: streamable_http
+    url: https://mcp.app.wiz.io
+    headers:
+      Wiz-DataCenter: us12
+    timeout: 30
+    sse_read_timeout: 300
+    client_session_timeout_seconds: 30
+    auth:
+      type: oauth_public
+      scopes:
+        - read:all
+        - offline_access
+      client_id: null
+      client_secret: null
+      token_endpoint_auth_method: none
+      resource: https://mcp.app.wiz.io/
+      redirect_uri: http://localhost:8766/callback
+      redirect_host: localhost
+      redirect_port: 8766
+      redirect_path: /callback
+      callback_timeout_seconds: 300
+      open_browser: true
+      use_dynamic_client_registration: true

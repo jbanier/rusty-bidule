@@ -1,11 +1,7 @@
-use std::{io, time::Duration};
+use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     DefaultTerminal, Frame,
@@ -15,6 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     orchestrator::Orchestrator,
@@ -41,6 +38,14 @@ pub struct App {
     should_quit: bool,
 }
 
+struct TerminalRestoreGuard;
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
 impl App {
     pub async fn new(orchestrator: Orchestrator) -> Result<Self> {
         let current_conversation_id = orchestrator.ensure_default_conversation().await?;
@@ -49,6 +54,11 @@ impl App {
             .load(&current_conversation_id)?
             .messages;
         let (ui_tx, ui_rx) = unbounded_channel();
+        info!(
+            %current_conversation_id,
+            message_count = messages.len(),
+            "initialized TUI application state"
+        );
 
         Ok(Self {
             orchestrator,
@@ -70,16 +80,13 @@ impl App {
     }
 
     pub async fn run(mut self) -> Result<()> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        info!("entering TUI alternate screen");
+        let _terminal_guard = TerminalRestoreGuard;
         let terminal = ratatui::init();
 
         let result = self.run_loop(terminal).await;
 
-        disable_raw_mode()?;
-        execute!(io::stdout(), LeaveAlternateScreen)?;
-        ratatui::restore();
+        info!("restored terminal and exited TUI");
         result
     }
 
@@ -271,6 +278,7 @@ impl App {
         }
 
         if self.inflight {
+            warn!("ignored submission while engine was busy");
             self.activities
                 .push("Engine busy. Wait for the current run to finish.".to_string());
             return Ok(());
@@ -302,6 +310,7 @@ impl App {
     }
 
     async fn handle_command(&mut self, command: &str) -> Result<()> {
+        debug!(command, "handling TUI command");
         let mut parts = command.split_whitespace();
         match parts.next().unwrap_or_default() {
             "/new" => {
@@ -376,16 +385,19 @@ impl App {
                     self.status = format!("Logging into {server_name}");
                     self.activities
                         .push(format!("Starting OAuth login for {server_name}"));
+                    info!(server = server_name, "starting MCP login from TUI");
                     match self.orchestrator.login_mcp_server(server_name).await {
                         Ok(()) => {
                             self.status = format!("Logged into {server_name}");
                             self.activities
                                 .push(format!("OAuth login completed for {server_name}"));
+                            info!(server = server_name, "completed MCP login from TUI");
                         }
                         Err(err) => {
                             self.status = "Login failed".to_string();
                             self.activities
                                 .push(format!("OAuth login failed for {server_name}: {err}"));
+                            warn!(server = server_name, error = %err, "MCP login failed from TUI");
                         }
                     }
                 } else {
@@ -401,6 +413,7 @@ impl App {
             }
             "/exit" | "/quit" => {
                 self.status = "Restoring terminal".to_string();
+                info!("received exit command from TUI");
                 self.should_quit = true;
             }
             other => {
@@ -465,6 +478,11 @@ impl App {
                     Err(err) => {
                         self.status = "Run failed".to_string();
                         self.activities.push(format!("ERROR // {err}"));
+                        error!(
+                            conversation_id = %self.current_conversation_id,
+                            error = %err,
+                            "conversation turn failed in TUI"
+                        );
                     }
                 }
             }

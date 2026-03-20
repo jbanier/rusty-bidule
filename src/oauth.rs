@@ -17,6 +17,7 @@ use tokio::{
     net::TcpListener,
     time::timeout,
 };
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::config::{McpAuthConfig, McpOauthPublicConfig, McpServerConfig};
@@ -59,6 +60,7 @@ impl OAuthProvider {
         let storage_root = data_dir.as_ref().join("oauth");
         fs::create_dir_all(&storage_root)
             .with_context(|| format!("failed to create {}", storage_root.display()))?;
+        info!(storage_root = %storage_root.display(), "initialized OAuth token storage");
         Ok(Self {
             client: Client::new(),
             storage_root,
@@ -72,9 +74,11 @@ impl OAuthProvider {
         let Some(McpAuthConfig::OauthPublic(auth)) = &server.auth else {
             return Ok(None);
         };
+        debug!(server = %server.name, "authorizing MCP server through OAuth");
 
         if let Some(token) = self.load_token(&server.name)? {
             if !token_is_expired(&token) {
+                debug!(server = %server.name, "reusing cached OAuth token");
                 return Ok(Some(OAuthAuthorization {
                     access_token: token.access_token,
                 }));
@@ -82,14 +86,17 @@ impl OAuthProvider {
 
             if let Some(refreshed) = self.try_refresh_token(server, auth, &token).await? {
                 self.save_token(&server.name, &refreshed)?;
+                info!(server = %server.name, "refreshed OAuth token");
                 return Ok(Some(OAuthAuthorization {
                     access_token: refreshed.access_token,
                 }));
             }
+            warn!(server = %server.name, "cached OAuth token refresh failed");
         }
 
         let token = self.run_authorization_code_flow(server, auth).await?;
         self.save_token(&server.name, &token)?;
+        info!(server = %server.name, "completed OAuth authorization flow");
         Ok(Some(OAuthAuthorization {
             access_token: token.access_token,
         }))
@@ -100,6 +107,7 @@ impl OAuthProvider {
         server: &McpServerConfig,
         auth: &McpOauthPublicConfig,
     ) -> Result<OAuthTokenStore> {
+        info!(server = %server.name, "starting OAuth authorization code flow");
         let metadata = self.fetch_metadata(server).await?;
         let registration = self
             .resolve_client_registration(server, auth, &metadata)
@@ -133,10 +141,12 @@ impl OAuthProvider {
         }
 
         if auth.open_browser {
+            info!(server = %server.name, "opening browser for OAuth authorization");
             webbrowser::open(authorize_url.as_str())
                 .with_context(|| format!("failed to open browser for {}", authorize_url))?;
         } else {
             eprintln!("Open this URL to authorize MCP access: {authorize_url}");
+            info!(server = %server.name, "browser auto-open disabled; printed OAuth URL");
         }
 
         let callback = wait_for_callback(auth, &state).await?;
@@ -197,6 +207,7 @@ impl OAuthProvider {
             })?;
 
         if !response.status().is_success() {
+            warn!(server = %server.name, "refresh token request rejected");
             return Ok(None);
         }
 
@@ -218,6 +229,7 @@ impl OAuthProvider {
         code: &str,
         code_verifier: &str,
     ) -> Result<OAuthTokenStore> {
+        debug!(token_endpoint = %metadata.token_endpoint, "exchanging authorization code for access token");
         let mut form = vec![
             ("grant_type", "authorization_code".to_string()),
             ("code", code.to_string()),
@@ -280,6 +292,7 @@ impl OAuthProvider {
         if !status.is_success() {
             bail!("OAuth metadata endpoint returned HTTP {}: {}", status, text);
         }
+        debug!(server = %server.name, metadata_url = %metadata_url, "fetched OAuth authorization metadata");
         serde_json::from_str(&text)
             .with_context(|| format!("failed to parse OAuth metadata body: {text}"))
     }
@@ -291,6 +304,7 @@ impl OAuthProvider {
         metadata: &AuthorizationServerMetadata,
     ) -> Result<DynamicClientRegistration> {
         if let Some(client_id) = &auth.client_id {
+            debug!(server = %server.name, "using statically configured OAuth client");
             return Ok(DynamicClientRegistration {
                 client_id: client_id.clone(),
                 client_secret: auth.client_secret.clone(),
@@ -298,6 +312,7 @@ impl OAuthProvider {
         }
 
         if let Some(existing) = self.load_registration(&server.name)? {
+            debug!(server = %server.name, "reusing persisted OAuth client registration");
             return Ok(existing);
         }
 
@@ -353,6 +368,7 @@ impl OAuthProvider {
                 .map(str::to_string),
         };
         self.save_registration(&server.name, &registration)?;
+        info!(server = %server.name, "completed dynamic OAuth client registration");
         Ok(registration)
     }
 
@@ -402,6 +418,7 @@ async fn wait_for_callback(
     let listener = TcpListener::bind((host, port))
         .await
         .with_context(|| format!("failed to bind OAuth callback listener on {host}:{port}"))?;
+    info!(host, port, "waiting for OAuth callback");
     let timeout_window = Duration::from_secs(auth.callback_timeout_seconds);
     let (mut stream, _) = timeout(timeout_window, listener.accept())
         .await
@@ -437,6 +454,7 @@ async fn wait_for_callback(
         if state != expected_state {
             bail!("OAuth callback state did not match the original authorization request");
         }
+        info!("received valid OAuth callback");
         write_callback_response(&mut stream, true).await?;
         CallbackResponse { code }
     } else {

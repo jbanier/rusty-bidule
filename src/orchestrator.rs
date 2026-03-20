@@ -3,17 +3,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     azure::{AzureClient, AzureTool},
     config::AppConfig,
     conversation_store::ConversationStore,
-    mcp_runtime::McpManager,
+    mcp_runtime::{McpManager, McpTool},
     tool_evidence::ToolEvidenceWriter,
     types::{ProgressEvent, RunTurnResult, UiEvent},
 };
 
 const MAX_AGENT_ITERATIONS: usize = 10;
+const MAX_AZURE_TOOL_COUNT: usize = 128;
 
 #[derive(Clone)]
 pub struct Orchestrator {
@@ -40,6 +42,11 @@ impl Orchestrator {
             config.mcp_runtime.clone(),
             config.mcp_servers.clone(),
         )?;
+        info!(
+            mcp_server_count = config.mcp_servers.len(),
+            data_dir = %data_dir.display(),
+            "initialized orchestrator"
+        );
         Ok(Self {
             inner: Arc::new(OrchestratorInner {
                 config,
@@ -56,6 +63,7 @@ impl Orchestrator {
     }
 
     pub async fn login_mcp_server(&self, server_name: &str) -> Result<()> {
+        info!(server = server_name, "triggering MCP OAuth login");
         let mut manager = self.inner.mcp.lock().await;
         manager.login_server(server_name).await
     }
@@ -75,6 +83,7 @@ impl Orchestrator {
         user_message: String,
         ui_tx: UnboundedSender<UiEvent>,
     ) -> Result<RunTurnResult> {
+        info!(%conversation_id, "starting conversation turn");
         self.emit(&ui_tx, "turn_started", "Recording user message", None, None);
         self.inner
             .store
@@ -94,19 +103,41 @@ impl Orchestrator {
         };
 
         if let Some(error) = mcp_error.as_deref() {
+            warn!(%conversation_id, error, "MCP discovery degraded");
             self.inner
                 .store
                 .append_log(conversation_id, &format!("MCP discovery degraded: {error}"))?;
         }
 
-        let azure_tools: Vec<AzureTool> = mcp_tools
-            .iter()
-            .map(|tool| AzureTool {
-                name: tool.external_name.clone(),
-                description: format!("{} (server: {})", tool.description, tool.server_name),
-                parameters: tool.input_schema.clone(),
-            })
-            .collect();
+        let (azure_tools, omitted_tool_count) = build_azure_tools(&mcp_tools);
+        if omitted_tool_count > 0 {
+            warn!(
+                %conversation_id,
+                total_tools = mcp_tools.len(),
+                advertised_tools = azure_tools.len(),
+                omitted_tool_count,
+                "truncated MCP tools to satisfy Azure limit"
+            );
+            self.emit(
+                &ui_tx,
+                "tool_limit",
+                &format!(
+                    "Azure tool limit reached: advertising {} of {} tools",
+                    azure_tools.len(),
+                    mcp_tools.len()
+                ),
+                None,
+                None,
+            );
+            self.inner.store.append_log(
+                conversation_id,
+                &format!(
+                    "tool advertisement truncated for Azure: {} of {} tools included",
+                    azure_tools.len(),
+                    mcp_tools.len()
+                ),
+            )?;
+        }
 
         let mut messages = build_messages(
             self.inner.config.prompt.as_deref(),
@@ -117,6 +148,13 @@ impl Orchestrator {
 
         for iteration in 0..MAX_AGENT_ITERATIONS {
             let context_chars = estimate_context_chars(&messages);
+            debug!(
+                %conversation_id,
+                iteration,
+                context_chars,
+                message_count = messages.len(),
+                "preparing LLM iteration"
+            );
             self.emit(
                 &ui_tx,
                 "context_size",
@@ -140,12 +178,23 @@ impl Orchestrator {
                 Some(tool_call_count),
             );
 
-            let completion = self
+            let completion = match self
                 .inner
                 .azure
                 .chat_completion(&messages, &azure_tools)
                 .await
-                .context("Azure completion failed")?;
+            {
+                Ok(completion) => completion,
+                Err(err) => {
+                    error!(
+                        %conversation_id,
+                        iteration,
+                        error = %err,
+                        "Azure completion failed"
+                    );
+                    return Err(err).context("Azure completion failed");
+                }
+            };
 
             if !completion.tool_calls.is_empty() {
                 messages.push(json!({
@@ -165,6 +214,12 @@ impl Orchestrator {
 
                 for tool_call in completion.tool_calls {
                     tool_call_count += 1;
+                    info!(
+                        %conversation_id,
+                        tool = %tool_call.name,
+                        tool_call_count,
+                        "executing MCP tool call"
+                    );
                     self.emit(
                         &ui_tx,
                         "tool_start",
@@ -214,6 +269,12 @@ impl Orchestrator {
                 conversation_id,
                 &format!("assistant reply stored ({} chars)", reply.len()),
             )?;
+            info!(
+                %conversation_id,
+                tool_call_count,
+                reply_len = reply.len(),
+                "conversation turn finished"
+            );
             self.emit(
                 &ui_tx,
                 "turn_finished",
@@ -247,6 +308,12 @@ impl Orchestrator {
                 serde_json::to_string(&arguments)?
             ),
         )?;
+        debug!(
+            %conversation_id,
+            tool = tool_name,
+            arguments = %serde_json::to_string(&arguments)?,
+            "tool call started"
+        );
 
         let result = {
             let mut manager = self.inner.mcp.lock().await;
@@ -266,6 +333,7 @@ impl Orchestrator {
                     conversation_id,
                     &format!("tool call finished: {}", tool_name),
                 )?;
+                info!(%conversation_id, tool = tool_name, "tool call succeeded");
                 Ok(output)
             }
             Err(err) => {
@@ -281,6 +349,7 @@ impl Orchestrator {
                     conversation_id,
                     &format!("tool call failed: {} error={}", tool_name, failure),
                 )?;
+                warn!(%conversation_id, tool = tool_name, error = %failure, "tool call failed");
                 Err(anyhow!(failure))
             }
         }
@@ -335,6 +404,48 @@ fn estimate_context_chars(messages: &[Value]) -> usize {
     messages.iter().map(json_value_len).sum()
 }
 
+fn build_azure_tools(mcp_tools: &[McpTool]) -> (Vec<AzureTool>, usize) {
+    let azure_tools = mcp_tools
+        .iter()
+        .take(MAX_AZURE_TOOL_COUNT)
+        .map(|tool| AzureTool {
+            name: tool.external_name.clone(),
+            description: format!("{} (server: {})", tool.description, tool.server_name),
+            parameters: sanitize_azure_tool_schema(tool.input_schema.clone()),
+        })
+        .collect::<Vec<_>>();
+    let omitted_tool_count = mcp_tools.len().saturating_sub(azure_tools.len());
+    (azure_tools, omitted_tool_count)
+}
+
+fn sanitize_azure_tool_schema(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(sanitize_azure_tool_schema)
+                .collect::<Vec<_>>(),
+        ),
+        Value::Object(mut map) => {
+            let keys = map.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                if let Some(entry) = map.remove(&key) {
+                    map.insert(key, sanitize_azure_tool_schema(entry));
+                }
+            }
+
+            let is_object_schema = map.get("type").and_then(Value::as_str) == Some("object");
+            let has_properties = map.get("properties").is_some();
+            if is_object_schema && !has_properties {
+                map.insert("properties".to_string(), json!({}));
+            }
+
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
 fn json_value_len(value: &Value) -> usize {
     match value {
         Value::Null => 0,
@@ -353,7 +464,11 @@ fn json_value_len(value: &Value) -> usize {
 mod tests {
     use serde_json::json;
 
-    use super::estimate_context_chars;
+    use crate::mcp_runtime::McpTool;
+
+    use super::{
+        MAX_AZURE_TOOL_COUNT, build_azure_tools, estimate_context_chars, sanitize_azure_tool_schema,
+    };
 
     #[test]
     fn estimates_context_chars_from_nested_messages() {
@@ -370,5 +485,44 @@ mod tests {
                     .chars()
                     .count()
         );
+    }
+
+    #[test]
+    fn caps_advertised_tools_to_azure_limit() {
+        let mcp_tools = (0..(MAX_AZURE_TOOL_COUNT + 5))
+            .map(|index| McpTool {
+                server_name: "demo".to_string(),
+                original_name: format!("tool_{index}"),
+                external_name: format!("demo__tool_{index}"),
+                description: format!("tool {index}"),
+                input_schema: json!({"type": "object"}),
+            })
+            .collect::<Vec<_>>();
+
+        let (azure_tools, omitted_tool_count) = build_azure_tools(&mcp_tools);
+
+        assert_eq!(azure_tools.len(), MAX_AZURE_TOOL_COUNT);
+        assert_eq!(omitted_tool_count, 5);
+        assert_eq!(azure_tools[0].name, "demo__tool_0");
+        assert_eq!(
+            azure_tools.last().map(|tool| tool.name.as_str()),
+            Some("demo__tool_127")
+        );
+    }
+
+    #[test]
+    fn fills_missing_object_properties_for_azure_tools() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object"
+                }
+            }
+        });
+
+        let sanitized = sanitize_azure_tool_schema(schema);
+
+        assert_eq!(sanitized["properties"]["nested"]["properties"], json!({}));
     }
 }

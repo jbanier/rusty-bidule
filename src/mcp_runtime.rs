@@ -6,6 +6,7 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
 };
 use serde_json::{Value, json};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::{McpRuntimeConfig, McpServerConfig},
@@ -50,6 +51,7 @@ impl McpManager {
             .build()
             .context("failed to build HTTP client")?;
         let oauth = OAuthProvider::new(data_dir)?;
+        info!(server_count = servers.len(), "initialized MCP runtime");
 
         Ok(Self {
             client,
@@ -69,6 +71,7 @@ impl McpManager {
     }
 
     pub async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
+        debug!("listing MCP tools across configured servers");
         let mut all_tools = Vec::new();
         self.tool_index.clear();
         let mut last_error = None;
@@ -88,6 +91,7 @@ impl McpManager {
                 }
                 Ok(Err(err)) => last_error = Some(err),
                 Err(_) => {
+                    warn!(server = %self.servers[index].config.name, "timed out while listing tools");
                     last_error = Some(anyhow!(
                         "timed out while listing tools from server '{}'",
                         self.servers[index].config.name
@@ -112,12 +116,14 @@ impl McpManager {
             .position(|server| server.config.name == server_name)
             .ok_or_else(|| anyhow!("unknown MCP server '{server_name}'"))?;
 
+        info!(server = server_name, "starting explicit MCP login");
         let server = &self.servers[index];
         let auth = self.oauth.authorize_server(&server.config).await?;
         if auth.is_none() {
             bail!("server '{server_name}' is not configured for OAuth login");
         }
 
+        info!(server = server_name, "MCP login completed");
         Ok(())
     }
 
@@ -147,6 +153,7 @@ impl McpManager {
 
     async fn list_server_tools(&mut self, server_index: usize) -> Result<Vec<McpTool>> {
         self.ensure_initialized(server_index).await?;
+        debug!(server = %self.servers[server_index].config.name, "requesting tools/list");
         let request = json!({
             "jsonrpc": "2.0",
             "id": self.next_request_id(),
@@ -188,6 +195,7 @@ impl McpManager {
             });
         }
 
+        info!(server = %server_name, tool_count = mapped.len(), "listed MCP tools");
         Ok(mapped)
     }
 
@@ -195,6 +203,7 @@ impl McpManager {
         if self.servers[server_index].initialized {
             return Ok(());
         }
+        info!(server = %self.servers[server_index].config.name, "initializing MCP server session");
 
         let request = json!({
             "jsonrpc": "2.0",
@@ -218,6 +227,7 @@ impl McpManager {
         });
         self.post_notification(server_index, &notify).await?;
         self.servers[server_index].initialized = true;
+        info!(server = %self.servers[server_index].config.name, "MCP server initialized");
         Ok(())
     }
 
@@ -245,6 +255,12 @@ impl McpManager {
     async fn post(&self, server_index: usize, body: &Value) -> Result<(HeaderMap, Value)> {
         let server = &self.servers[server_index];
         let auth = self.oauth.authorize_server(&server.config).await?;
+        debug!(
+            server = %server.config.name,
+            authenticated = auth.is_some(),
+            has_session = server.session_id.is_some(),
+            "issuing MCP POST request"
+        );
         let mut request = self
             .client
             .post(&server.config.url)
@@ -270,6 +286,7 @@ impl McpManager {
         let headers = response.headers().clone();
         let text = response.text().await?;
         if !status.is_success() {
+            warn!(server = %server.config.name, %status, "MCP server returned non-success status");
             bail!(
                 "MCP server '{}' returned HTTP {}: {}",
                 server.config.name,
@@ -283,6 +300,7 @@ impl McpManager {
             parse_mcp_response_body(&text)
                 .with_context(|| format!("failed to parse MCP response body: {text}"))?
         };
+        debug!(server = %server.config.name, %status, "parsed MCP response body");
         Ok((headers, value))
     }
 
@@ -303,6 +321,7 @@ impl McpManager {
             .map(str::to_string);
         if let Some(session_id) = session_id {
             self.servers[server_index].session_id = Some(session_id);
+            debug!(server = %self.servers[server_index].config.name, "captured MCP session id");
         }
     }
 

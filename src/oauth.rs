@@ -183,14 +183,13 @@ impl OAuthProvider {
         if let Some(resource) = &auth.resource {
             form.push(("resource", resource.clone()));
         }
-        if auth.token_endpoint_auth_method != "none" {
-            if let Some(secret) = registration
+        if auth.token_endpoint_auth_method != "none"
+            && let Some(secret) = registration
                 .client_secret
                 .clone()
                 .or_else(|| auth.client_secret.clone())
-            {
-                form.push(("client_secret", secret));
-            }
+        {
+            form.push(("client_secret", secret));
         }
 
         let response = self
@@ -240,14 +239,13 @@ impl OAuthProvider {
         if let Some(resource) = &auth.resource {
             form.push(("resource", resource.clone()));
         }
-        if auth.token_endpoint_auth_method != "none" {
-            if let Some(secret) = registration
+        if auth.token_endpoint_auth_method != "none"
+            && let Some(secret) = registration
                 .client_secret
                 .clone()
                 .or_else(|| auth.client_secret.clone())
-            {
-                form.push(("client_secret", secret));
-            }
+        {
+            form.push(("client_secret", secret));
         }
 
         let response = self

@@ -98,12 +98,11 @@ impl App {
 
             terminal.draw(|frame| self.render(frame))?;
 
-            if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        self.handle_key_event(key).await?;
-                    }
-                }
+            if event::poll(Duration::from_millis(100))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                self.handle_key_event(key).await?;
             }
 
             if self.inflight {
@@ -132,7 +131,7 @@ impl App {
             ),
             Span::raw("  //  "),
             Span::styled(
-                format!("{}", self.current_conversation_id),
+                self.current_conversation_id.to_string(),
                 Style::default().fg(Color::Cyan),
             ),
             Span::raw("  //  "),
@@ -212,7 +211,7 @@ impl App {
                     _ => Style::default().fg(Color::Yellow),
                 };
                 let mut lines = vec![Line::from(vec![
-                    Span::styled(format!("{}", message.role.to_uppercase()), role_style),
+                    Span::styled(message.role.to_uppercase().to_string(), role_style),
                     Span::raw("  "),
                     Span::styled(
                         message.timestamp.format("%H:%M:%S").to_string(),
@@ -580,7 +579,7 @@ fn build_scroll_indicator_lines(
         .collect()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct MarkdownRenderer {
     lines: Vec<Line<'static>>,
     current_spans: Vec<Span<'static>>,
@@ -610,25 +609,6 @@ fn render_markdown(content: &str) -> Vec<Line<'static>> {
     let mut renderer = MarkdownRenderer::default();
     renderer.render(parser);
     renderer.finish()
-}
-
-impl Default for MarkdownRenderer {
-    fn default() -> Self {
-        Self {
-            lines: Vec::new(),
-            current_spans: Vec::new(),
-            strong_depth: 0,
-            emphasis_depth: 0,
-            strikethrough_depth: 0,
-            code_block: false,
-            code_block_language: None,
-            heading_level: None,
-            quote_depth: 0,
-            list_stack: Vec::new(),
-            link_href: None,
-            pending_item_prefix: None,
-        }
-    }
 }
 
 impl MarkdownRenderer {

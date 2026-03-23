@@ -100,10 +100,10 @@ impl McpManager {
             }
         }
 
-        if all_tools.is_empty() {
-            if let Some(err) = last_error {
-                bail!("no MCP tools available: {err}");
-            }
+        if all_tools.is_empty()
+            && let Some(err) = last_error
+        {
+            bail!("no MCP tools available: {err}");
         }
 
         Ok(all_tools)

@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::types::{Conversation, ConversationSummary, Message, MessageMetadata};
@@ -73,7 +73,7 @@ impl ConversationStore {
 
     pub fn load(&self, conversation_id: &str) -> Result<Conversation> {
         let path = self
-            .conversation_dir(conversation_id)
+            .conversation_dir(conversation_id)?
             .join("conversation.json");
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -85,7 +85,7 @@ impl ConversationStore {
     pub fn save(&self, conversation: &Conversation) -> Result<()> {
         self.ensure_layout(&conversation.conversation_id)?;
         let path = self
-            .conversation_dir(&conversation.conversation_id)
+            .conversation_dir(&conversation.conversation_id)?
             .join("conversation.json");
         let payload = serde_json::to_string_pretty(conversation)?;
         fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
@@ -122,7 +122,7 @@ impl ConversationStore {
     }
 
     pub fn delete(&self, conversation_id: &str) -> Result<()> {
-        let dir = self.conversation_dir(conversation_id);
+        let dir = self.conversation_dir(conversation_id)?;
         if dir.exists() {
             fs::remove_dir_all(&dir)
                 .with_context(|| format!("failed to remove {}", dir.display()))?;
@@ -133,7 +133,7 @@ impl ConversationStore {
     pub fn append_log(&self, conversation_id: &str, line: &str) -> Result<()> {
         self.ensure_layout(conversation_id)?;
         let path = self
-            .conversation_dir(conversation_id)
+            .conversation_dir(conversation_id)?
             .join("logs/conversation.log");
         let mut file = OpenOptions::new()
             .create(true)
@@ -144,12 +144,13 @@ impl ConversationStore {
         Ok(())
     }
 
-    pub fn conversation_dir(&self, conversation_id: &str) -> PathBuf {
-        self.root.join(conversation_id)
+    pub fn conversation_dir(&self, conversation_id: &str) -> Result<PathBuf> {
+        validate_conversation_id(conversation_id)?;
+        Ok(self.root.join(conversation_id))
     }
 
     pub fn ensure_layout(&self, conversation_id: &str) -> Result<()> {
-        let dir = self.conversation_dir(conversation_id);
+        let dir = self.conversation_dir(conversation_id)?;
         fs::create_dir_all(dir.join("tool_output"))?;
         fs::create_dir_all(dir.join("logs"))?;
         fs::create_dir_all(dir.join("compactions"))?;
@@ -165,7 +166,7 @@ impl ConversationStore {
     ) -> Result<()> {
         self.ensure_layout(conversation_id)?;
         let path = self
-            .conversation_dir(conversation_id)
+            .conversation_dir(conversation_id)?
             .join("compactions")
             .join(format!("{checkpoint_id}.json"));
         let payload = serde_json::to_string_pretty(&serde_json::json!({
@@ -183,23 +184,34 @@ impl ConversationStore {
     }
 
     /// Load the summary text for a compaction checkpoint.
-    pub fn load_compaction(
-        &self,
-        conversation_id: &str,
-        checkpoint_id: &str,
-    ) -> Result<String> {
+    pub fn load_compaction(&self, conversation_id: &str, checkpoint_id: &str) -> Result<String> {
         let path = self
-            .conversation_dir(conversation_id)
+            .conversation_dir(conversation_id)?
             .join("compactions")
             .join(format!("{checkpoint_id}.json"));
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read compaction {}", path.display()))?;
         let value: serde_json::Value = serde_json::from_str(&raw)?;
-        Ok(value["summary"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string())
+        Ok(value["summary"].as_str().unwrap_or_default().to_string())
     }
+}
+
+fn validate_conversation_id(conversation_id: &str) -> Result<()> {
+    if conversation_id.is_empty() {
+        bail!("conversation id must not be empty");
+    }
+    if conversation_id.len() > 128 {
+        bail!("conversation id is too long");
+    }
+    if !conversation_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        bail!(
+            "invalid conversation id '{conversation_id}'; allowed characters are ASCII letters, digits, '-' and '_'"
+        );
+    }
+    Ok(())
 }
 
 fn generate_conversation_id(now: chrono::DateTime<Utc>) -> String {
@@ -209,6 +221,8 @@ fn generate_conversation_id(now: chrono::DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use tempfile::tempdir;
 
     use super::ConversationStore;
@@ -225,5 +239,39 @@ mod tests {
         let loaded = store.load(&conversation.conversation_id).unwrap();
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn rejects_invalid_conversation_ids() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path());
+
+        for invalid in ["", "..", "../escape", "nested/id", "/tmp/x", "with space"] {
+            assert!(
+                store.load(invalid).is_err(),
+                "expected invalid id: {invalid}"
+            );
+            assert!(
+                store.ensure_layout(invalid).is_err(),
+                "expected invalid id: {invalid}"
+            );
+            assert!(
+                store.delete(invalid).is_err(),
+                "expected invalid id: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_cannot_remove_paths_outside_conversation_root() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path());
+        let outside_file = dir.path().join("outside.txt");
+        fs::write(&outside_file, "keep me").unwrap();
+
+        let err = store.delete("../outside.txt").unwrap_err().to_string();
+
+        assert!(err.contains("invalid conversation id"));
+        assert_eq!(fs::read_to_string(&outside_file).unwrap(), "keep me");
     }
 }

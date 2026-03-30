@@ -4,11 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use tokio::time::Duration;
 
-use crate::{
-    azure::AzureTool,
-    conversation_store::ConversationStore,
-    skills::SkillRegistry,
-};
+use crate::{azure::AzureTool, conversation_store::ConversationStore, skills::SkillRegistry};
 
 pub struct LocalToolExecutor {
     store: ConversationStore,
@@ -63,7 +59,7 @@ impl LocalToolExecutor {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let capped = seconds.min(300.0).max(0.0);
+        let capped = seconds.clamp(0.0, 300.0);
         if !reason.is_empty() {
             tracing::info!(seconds = capped, reason, "local tool: sleep");
         }
@@ -74,6 +70,7 @@ impl LocalToolExecutor {
     fn jobs_path(&self) -> PathBuf {
         self.store
             .conversation_dir(&self.conversation_id)
+            .expect("conversation_id should be validated by store callers")
             .join("jobs.json")
     }
 
@@ -164,15 +161,12 @@ impl LocalToolExecutor {
             .get("skill_name")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("run_skill: missing 'skill_name'"))?;
-        let tool_slug = arguments
-            .get("tool_slug")
-            .and_then(Value::as_str);
+        let tool_slug = arguments.get("tool_slug").and_then(Value::as_str);
         let parameters_str = arguments
             .get("parameters")
             .and_then(Value::as_str)
             .unwrap_or("{}");
-        let params: Value = serde_json::from_str(parameters_str)
-            .unwrap_or_else(|_| json!({}));
+        let params: Value = serde_json::from_str(parameters_str).unwrap_or_else(|_| json!({}));
 
         let (skill, tool) = registry
             .find_tool(skill_name, tool_slug)
@@ -202,7 +196,12 @@ impl LocalToolExecutor {
                     Value::Bool(false) => {}
                     other => {
                         cmd.arg(&flag);
-                        cmd.arg(other.as_str().map(str::to_string).unwrap_or_else(|| other.to_string()));
+                        cmd.arg(
+                            other
+                                .as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| other.to_string()),
+                        );
                     }
                 }
             }

@@ -30,6 +30,7 @@ impl ToolEvidenceWriter {
         let path = self
             .store
             .conversation_dir(conversation_id)
+            .expect("conversation_id should be validated by store callers")
             .join("tool_output")
             .join(filename);
         let payload = format!(

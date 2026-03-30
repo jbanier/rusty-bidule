@@ -92,10 +92,7 @@ impl McpManager {
         self.list_tools_filtered(None).await
     }
 
-    pub async fn list_tools_filtered(
-        &mut self,
-        filter: Option<&[String]>,
-    ) -> Result<Vec<McpTool>> {
+    pub async fn list_tools_filtered(&mut self, filter: Option<&[String]>) -> Result<Vec<McpTool>> {
         debug!("listing MCP tools across configured servers");
         let mut all_tools = Vec::new();
         self.tool_index.clear();
@@ -103,12 +100,11 @@ impl McpManager {
 
         for index in 0..self.servers.len() {
             // Apply server filter if provided
-            if let Some(allowed) = filter {
-                if !allowed.is_empty()
-                    && !allowed.contains(&self.servers[index].config.name)
-                {
-                    continue;
-                }
+            if let Some(allowed) = filter
+                && !allowed.is_empty()
+                && !allowed.contains(&self.servers[index].config.name)
+            {
+                continue;
             }
 
             let timeout_seconds = self.server_session_timeout(index);
@@ -590,7 +586,9 @@ mod tests {
 
     use crate::config::McpServerConfig;
 
-    use super::{ServerState, Transport, build_headers, normalize_tool_result, parse_mcp_response_body};
+    use super::{
+        ServerState, Transport, build_headers, normalize_tool_result, parse_mcp_response_body,
+    };
 
     #[test]
     fn normalizes_text_content_arrays() {

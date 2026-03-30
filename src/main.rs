@@ -28,10 +28,7 @@ async fn main() -> Result<()> {
     // We need config before we can pass tracing config to init_logging.
     // Load config first (no logging yet — errors go to stderr).
     let config_result = AppConfig::load(&options.config_path);
-    let tracing_config = config_result
-        .as_ref()
-        .ok()
-        .and_then(|c| c.tracing.clone());
+    let tracing_config = config_result.as_ref().ok().and_then(|c| c.tracing.clone());
     let _log_guard = logging::init_logging(tracing_config.as_ref())?;
 
     let current_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
@@ -166,10 +163,10 @@ impl CliOptions {
                     }
                 }
                 "--port" => {
-                    if let Some(port_str) = args.next() {
-                        if let Ok(port) = port_str.parse() {
-                            options.port = port;
-                        }
+                    if let Some(port_str) = args.next()
+                        && let Ok(port) = port_str.parse()
+                    {
+                        options.port = port;
                     }
                 }
                 other => {

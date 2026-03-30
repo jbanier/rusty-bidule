@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use axum::{
@@ -8,6 +8,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc::unbounded_channel};
@@ -31,9 +32,13 @@ pub struct JobState {
     pub events: Vec<ProgressEvent>,
     pub result: Option<RunTurnResult>,
     pub error: Option<String>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 pub type JobRegistry = Arc<Mutex<HashMap<String, JobState>>>;
+
+const COMPLETED_JOB_TTL: Duration = Duration::from_secs(60 * 60);
+const JOB_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 fn new_job_id() -> String {
     let suffix = rand::random::<u32>();
@@ -96,11 +101,7 @@ struct AppError(anyhow::Error);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let body = json!({"error": self.0.to_string()});
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(body),
-        )
-            .into_response()
+        (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
     }
 }
 
@@ -170,6 +171,7 @@ async fn post_message(
                 events: Vec::new(),
                 result: None,
                 error: None,
+                completed_at: None,
             },
         );
     }
@@ -205,12 +207,10 @@ async fn post_message(
         if let Some(job) = lock.get_mut(&job_id_clone) {
             match result {
                 Ok(r) => {
-                    job.status = "done".to_string();
-                    job.result = Some(r);
+                    mark_job_completed(job, "done", Some(r), None);
                 }
                 Err(e) => {
-                    job.status = "failed".to_string();
-                    job.error = Some(format!("{e:#}"));
+                    mark_job_completed(job, "failed", None, Some(format!("{e:#}")));
                 }
             }
         }
@@ -230,10 +230,7 @@ async fn compact_conversation(
     Path(id): Path<String>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
     let (ui_tx, _ui_rx) = unbounded_channel::<UiEvent>();
-    let summary = state
-        .orchestrator
-        .compact_conversation(&id, ui_tx)
-        .await?;
+    let summary = state.orchestrator.compact_conversation(&id, ui_tx).await?;
     Ok(axum::Json(json!({"summary": summary})))
 }
 
@@ -321,6 +318,16 @@ async fn get_job(
     Ok(axum::Json(serde_json::to_value(job)?))
 }
 
+async fn delete_job(
+    State(state): State<WebAppState>,
+    Path(job_id): Path<String>,
+) -> AppResult<StatusCode> {
+    let mut jobs = state.jobs.lock().await;
+    jobs.remove(&job_id)
+        .ok_or_else(|| anyhow::anyhow!("job '{job_id}' not found"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---------------------------------------------------------------------------
 // Router & server entry point
 // ---------------------------------------------------------------------------
@@ -336,18 +343,36 @@ pub async fn run_web_server(
         jobs: Arc::new(Mutex::new(HashMap::new())),
         recipes: Arc::new(recipes),
     };
+    spawn_job_registry_sweeper(state.jobs.clone());
 
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
-        .route("/api/conversations", get(list_conversations).post(create_conversation))
-        .route("/api/conversations/{id}", get(get_conversation).delete(delete_conversation))
+        .route(
+            "/api/conversations",
+            get(list_conversations).post(create_conversation),
+        )
+        .route(
+            "/api/conversations/{id}",
+            get(get_conversation).delete(delete_conversation),
+        )
         .route("/api/conversations/{id}/messages", post(post_message))
-        .route("/api/conversations/{id}/compact", post(compact_conversation))
-        .route("/api/conversations/{id}/recipe", post(use_recipe).delete(clear_recipe))
-        .route("/api/conversations/{id}/mcp-servers", get(get_mcp_servers).put(put_mcp_servers).delete(delete_mcp_servers))
+        .route(
+            "/api/conversations/{id}/compact",
+            post(compact_conversation),
+        )
+        .route(
+            "/api/conversations/{id}/recipe",
+            post(use_recipe).delete(clear_recipe),
+        )
+        .route(
+            "/api/conversations/{id}/mcp-servers",
+            get(get_mcp_servers)
+                .put(put_mcp_servers)
+                .delete(delete_mcp_servers),
+        )
         .route("/api/recipes", get(list_recipes))
-        .route("/api/jobs/{job_id}", get(get_job))
+        .route("/api/jobs/{job_id}", get(get_job).delete(delete_job))
         .with_state(state);
 
     let addr = format!("{host}:{port}");
@@ -357,4 +382,89 @@ pub async fn run_web_server(
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn mark_job_completed(
+    job: &mut JobState,
+    status: &str,
+    result: Option<RunTurnResult>,
+    error: Option<String>,
+) {
+    job.status = status.to_string();
+    job.result = result;
+    job.error = error;
+    job.completed_at = Some(Utc::now());
+}
+
+fn evict_expired_jobs(jobs: &mut HashMap<String, JobState>, now: DateTime<Utc>, ttl: Duration) {
+    let ttl = chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(0));
+    jobs.retain(|_, job| {
+        let Some(completed_at) = job.completed_at else {
+            return true;
+        };
+        completed_at + ttl > now
+    });
+}
+
+fn spawn_job_registry_sweeper(jobs: JobRegistry) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(JOB_SWEEP_INTERVAL);
+        loop {
+            interval.tick().await;
+            let mut lock = jobs.lock().await;
+            evict_expired_jobs(&mut lock, Utc::now(), COMPLETED_JOB_TTL);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use chrono::Duration as ChronoDuration;
+
+    use super::{COMPLETED_JOB_TTL, JobState, evict_expired_jobs};
+
+    #[test]
+    fn evicts_only_completed_jobs_past_ttl() {
+        let now = chrono::Utc::now();
+        let mut jobs = HashMap::from([
+            (
+                "running".to_string(),
+                JobState {
+                    status: "running".to_string(),
+                    events: Vec::new(),
+                    result: None,
+                    error: None,
+                    completed_at: None,
+                },
+            ),
+            (
+                "fresh".to_string(),
+                JobState {
+                    status: "done".to_string(),
+                    events: Vec::new(),
+                    result: None,
+                    error: None,
+                    completed_at: Some(now - ChronoDuration::minutes(10)),
+                },
+            ),
+            (
+                "expired".to_string(),
+                JobState {
+                    status: "failed".to_string(),
+                    events: Vec::new(),
+                    result: None,
+                    error: Some("boom".to_string()),
+                    completed_at: Some(now - ChronoDuration::minutes(61)),
+                },
+            ),
+        ]);
+
+        evict_expired_jobs(&mut jobs, now, COMPLETED_JOB_TTL);
+
+        assert!(jobs.contains_key("running"));
+        assert!(jobs.contains_key("fresh"));
+        assert!(!jobs.contains_key("expired"));
+    }
 }

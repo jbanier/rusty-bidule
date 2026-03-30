@@ -45,22 +45,22 @@ pub fn init_logging(tracing_config: Option<&TracingConfig>) -> Result<WorkerGuar
                 .with_file(false)
                 .with_line_number(false),
         )
-        .with(
-            use_console.then(|| {
-                fmt::layer()
-                    .with_writer(std::io::stdout)
-                    .with_ansi(true)
-                    .with_target(true)
-                    .with_level(true)
-            }),
-        );
+        .with(use_console.then(|| {
+            fmt::layer()
+                .with_writer(std::io::stdout)
+                .with_ansi(true)
+                .with_target(true)
+                .with_level(true)
+        }));
 
     registry
         .try_init()
         .context("failed to initialize file logging")?;
 
     if matches!(provider, TracingProvider::Phoenix) {
-        eprintln!("WARNING: Phoenix tracing requires the 'tracing' feature flag; currently not compiled in");
+        eprintln!(
+            "WARNING: Phoenix tracing requires the 'tracing' feature flag; currently not compiled in"
+        );
     }
 
     tracing::event!(
@@ -91,4 +91,3 @@ fn discover_project_root() -> Option<PathBuf> {
 fn looks_like_project_root(candidate: &Path) -> bool {
     candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir()
 }
-

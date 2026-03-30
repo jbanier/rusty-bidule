@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub azure_openai: AzureOpenAiConfig,
     #[serde(default)]
     pub mcp_runtime: McpRuntimeConfig,
+    #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub tracing: Option<TracingConfig>,
@@ -23,8 +24,6 @@ pub struct AppConfig {
 pub struct TracingConfig {
     #[serde(default)]
     pub provider: TracingProvider,
-    pub phoenix_endpoint: Option<String>,
-    pub phoenix_project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -50,15 +49,10 @@ pub struct AzureOpenAiConfig {
     pub max_output_tokens: u32,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct McpRuntimeConfig {
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_seconds: u64,
-    #[serde(default = "default_cleanup_timeout")]
-    pub cleanup_timeout_seconds: u64,
-    #[serde(default)]
-    pub connect_in_parallel: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,9 +150,6 @@ impl AppConfig {
         if self.azure_openai.api_version.trim().is_empty() {
             bail!("azure_openai.api_version must not be empty");
         }
-        if self.mcp_servers.is_empty() {
-            bail!("at least one MCP server must be configured");
-        }
         for server in &self.mcp_servers {
             if server.transport != "streamable_http" && server.transport != "sse" {
                 bail!(
@@ -222,10 +213,6 @@ const fn default_connect_timeout() -> u64 {
     15
 }
 
-const fn default_cleanup_timeout() -> u64 {
-    5
-}
-
 fn default_token_endpoint_auth_method() -> String {
     "none".to_string()
 }
@@ -275,7 +262,7 @@ mcp_servers:
     }
 
     #[test]
-    fn rejects_missing_mcp_servers() {
+    fn allows_empty_mcp_servers() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         fs::write(
@@ -291,6 +278,27 @@ mcp_servers: []
         )
         .unwrap();
 
-        assert!(AppConfig::load(&path).is_err());
+        let config = AppConfig::load(&path).unwrap();
+        assert!(config.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn allows_omitted_mcp_servers_field() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert!(config.mcp_servers.is_empty());
     }
 }

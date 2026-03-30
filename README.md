@@ -25,7 +25,7 @@ If you just want to get the prototype running:
    export AZURE_OPENAI_API_KEY='your-key-here'
    ```
 
-3. Update `config/config.local.yaml` with your real Azure endpoint, deployment, and MCP server settings.
+3. Update `config/config.local.yaml` with your real Azure endpoint, deployment, and optional MCP server settings.
 
 4. Launch the TUI:
 
@@ -69,7 +69,7 @@ If you adopt it, treat it as an experimental operator tool.
 
 - Rust toolchain with Cargo
 - Network access to your Azure OpenAI endpoint
-- One or more reachable MCP servers
+- Zero or more reachable MCP servers, depending on whether you want MCP-backed tools
 - A local browser for OAuth flows if you use `oauth_public`
 
 ## Project layout
@@ -116,7 +116,8 @@ export AZURE_OPENAI_API_KEY='your-key-here'
 
 ### MCP servers
 
-The prototype currently expects MCP servers in `streamable_http` mode:
+MCP servers are optional. If you configure them, the prototype currently expects
+`streamable_http` mode:
 
 ```yaml
 mcp_servers:

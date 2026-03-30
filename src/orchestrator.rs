@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, mpsc::UnboundedSender};
+use tokio::sync::{Mutex, OwnedMutexGuard, mpsc::UnboundedSender};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -31,8 +31,27 @@ struct OrchestratorInner {
     evidence: ToolEvidenceWriter,
     azure: AzureClient,
     mcp: Mutex<McpManager>,
+    conversation_locks: ConversationTurnLocks,
     skills: SkillRegistry,
     recipes: RecipeRegistry,
+}
+
+#[derive(Default)]
+struct ConversationTurnLocks {
+    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl ConversationTurnLocks {
+    async fn acquire(&self, conversation_id: &str) -> OwnedMutexGuard<()> {
+        let conversation_lock = {
+            let mut locks = self.locks.lock().await;
+            locks
+                .entry(conversation_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        conversation_lock.lock_owned().await
+    }
 }
 
 impl Orchestrator {
@@ -72,6 +91,7 @@ impl Orchestrator {
                 evidence,
                 azure,
                 mcp: Mutex::new(mcp),
+                conversation_locks: ConversationTurnLocks::default(),
                 skills,
                 recipes,
             }),
@@ -106,6 +126,7 @@ impl Orchestrator {
         conversation_id: &str,
         _ui_tx: UnboundedSender<UiEvent>,
     ) -> Result<String> {
+        let _conversation_guard = self.acquire_conversation_lock(conversation_id).await;
         info!(%conversation_id, "compacting conversation");
         let conversation = self.inner.store.load(conversation_id)?;
 
@@ -113,9 +134,12 @@ impl Orchestrator {
             "role": "system",
             "content": "Produce a compact but complete summary of the following conversation. Preserve key findings, tool results, and decisions. Be concise but thorough."
         })];
-        messages.extend(conversation.messages.iter().map(|m| {
-            json!({"role": m.role, "content": m.content})
-        }));
+        messages.extend(
+            conversation
+                .messages
+                .iter()
+                .map(|m| json!({"role": m.role, "content": m.content})),
+        );
 
         let completion = self
             .inner
@@ -137,7 +161,10 @@ impl Orchestrator {
             .save_compaction(conversation_id, &checkpoint_id, &summary)?;
         self.inner.store.append_log(
             conversation_id,
-            &format!("compaction saved: {checkpoint_id} ({} chars)", summary.len()),
+            &format!(
+                "compaction saved: {checkpoint_id} ({} chars)",
+                summary.len()
+            ),
         )?;
         info!(%conversation_id, %checkpoint_id, "conversation compacted");
         Ok(summary)
@@ -149,6 +176,7 @@ impl Orchestrator {
         user_message: String,
         ui_tx: UnboundedSender<UiEvent>,
     ) -> Result<RunTurnResult> {
+        let _conversation_guard = self.acquire_conversation_lock(conversation_id).await;
         let turn_start = std::time::Instant::now();
         let mut tool_seconds: f64 = 0.0;
         let mut llm_seconds: f64 = 0.0;
@@ -183,10 +211,7 @@ impl Orchestrator {
         let history = conversation.messages.clone();
         let (mcp_tools, mcp_error) = {
             let mut manager = self.inner.mcp.lock().await;
-            match manager
-                .list_tools_filtered(mcp_filter.as_deref())
-                .await
-            {
+            match manager.list_tools_filtered(mcp_filter.as_deref()).await {
                 Ok(tools) => (tools, None),
                 Err(err) => (Vec::new(), Some(err.to_string())),
             }
@@ -235,7 +260,11 @@ impl Orchestrator {
             &history,
             mcp_error.as_deref(),
             recipe.as_ref().map(|r| r.instructions.as_str()),
-            if capability_summary.is_empty() { None } else { Some(capability_summary.as_str()) },
+            if capability_summary.is_empty() {
+                None
+            } else {
+                Some(capability_summary.as_str())
+            },
             &self.inner.store,
             conversation_id,
         );
@@ -381,7 +410,12 @@ impl Orchestrator {
             // Count existing assistant messages for 1-based index
             let assistant_index = {
                 let convo = self.inner.store.load(conversation_id)?;
-                convo.messages.iter().filter(|m| m.role == "assistant").count() + 1
+                convo
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == "assistant")
+                    .count()
+                    + 1
             };
 
             let total_seconds = turn_start.elapsed().as_secs_f64();
@@ -485,10 +519,7 @@ impl Orchestrator {
                     )?;
                     self.inner.store.append_log(
                         conversation_id,
-                        &format!(
-                            "local tool call failed: {} error={}",
-                            tool_name, failure
-                        ),
+                        &format!("local tool call failed: {} error={}", tool_name, failure),
                     )?;
                     return Err(anyhow!(failure));
                 }
@@ -535,6 +566,10 @@ impl Orchestrator {
         }
     }
 
+    async fn acquire_conversation_lock(&self, conversation_id: &str) -> OwnedMutexGuard<()> {
+        self.inner.conversation_locks.acquire(conversation_id).await
+    }
+
     fn emit(
         &self,
         ui_tx: &UnboundedSender<UiEvent>,
@@ -556,9 +591,7 @@ fn discover_project_root() -> Option<std::path::PathBuf> {
     let current_dir = std::env::current_dir().ok()?;
     current_dir
         .ancestors()
-        .find(|candidate| {
-            candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir()
-        })
+        .find(|candidate| candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir())
         .map(std::path::Path::to_path_buf)
 }
 
@@ -596,24 +629,23 @@ fn build_messages(
 
     // Check for active compaction
     let conversation = store.load(conversation_id).ok();
-    if let Some(ref convo) = conversation {
-        if let Some(checkpoint_id) = &convo.active_compaction {
-            if let Ok(summary) = store.load_compaction(conversation_id, checkpoint_id) {
-                messages.push(json!({
-                    "role": "system",
-                    "content": format!("Previous conversation summary:\n{summary}")
-                }));
-                // Only include the last 10 messages after compaction
-                let tail: Vec<_> = history.iter().rev().take(10).collect();
-                for msg in tail.into_iter().rev() {
-                    messages.push(json!({
-                        "role": msg.role,
-                        "content": msg.content,
-                    }));
-                }
-                return messages;
-            }
+    if let Some(ref convo) = conversation
+        && let Some(checkpoint_id) = &convo.active_compaction
+        && let Ok(summary) = store.load_compaction(conversation_id, checkpoint_id)
+    {
+        messages.push(json!({
+            "role": "system",
+            "content": format!("Previous conversation summary:\n{summary}")
+        }));
+        // Only include the last 10 messages after compaction
+        let tail: Vec<_> = history.iter().rev().take(10).collect();
+        for msg in tail.into_iter().rev() {
+            messages.push(json!({
+                "role": msg.role,
+                "content": msg.content,
+            }));
         }
+        return messages;
     }
 
     messages.extend(history.iter().map(|message| {
@@ -649,6 +681,7 @@ fn build_azure_tools_with_local(
     (azure_tools, omitted_tool_count)
 }
 
+#[cfg(test)]
 fn build_azure_tools(mcp_tools: &[McpTool]) -> (Vec<AzureTool>, usize) {
     let azure_tools = mcp_tools
         .iter()
@@ -708,11 +741,13 @@ fn json_value_len(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tokio::time::{Duration, timeout};
 
     use crate::mcp_runtime::McpTool;
 
     use super::{
-        MAX_AZURE_TOOL_COUNT, build_azure_tools, estimate_context_chars, sanitize_azure_tool_schema,
+        ConversationTurnLocks, MAX_AZURE_TOOL_COUNT, build_azure_tools, estimate_context_chars,
+        sanitize_azure_tool_schema,
     };
 
     #[test]
@@ -770,7 +805,36 @@ mod tests {
 
         assert_eq!(sanitized["properties"]["nested"]["properties"], json!({}));
     }
+
+    #[tokio::test]
+    async fn serializes_access_for_same_conversation_id() {
+        let locks = ConversationTurnLocks::default();
+        let guard = locks.acquire("same-convo").await;
+
+        assert!(
+            timeout(Duration::from_millis(20), locks.acquire("same-convo"))
+                .await
+                .is_err()
+        );
+
+        drop(guard);
+
+        assert!(
+            timeout(Duration::from_millis(20), locks.acquire("same-convo"))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn allows_parallel_access_for_different_conversation_ids() {
+        let locks = ConversationTurnLocks::default();
+        let _guard = locks.acquire("convo-a").await;
+
+        assert!(
+            timeout(Duration::from_millis(20), locks.acquire("convo-b"))
+                .await
+                .is_ok()
+        );
+    }
 }
-
-
-

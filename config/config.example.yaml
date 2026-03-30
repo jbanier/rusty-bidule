@@ -16,9 +16,8 @@ azure_openai:
 
 mcp_runtime:
   connect_timeout_seconds: 15
-  cleanup_timeout_seconds: 5
-  connect_in_parallel: false
 
+# Optional. Leave empty or remove the whole block to run without MCP servers.
 mcp_servers:
   - name: csirt-mcp
     transport: streamable_http

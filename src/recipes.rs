@@ -15,7 +15,6 @@ pub struct Recipe {
     pub instructions: String,
     pub initial_prompt: Option<String>,
     pub config_mcp_servers: Option<Vec<String>>,
-    pub config_local_tools: Option<Vec<String>>,
     pub response_template: Option<String>,
 }
 
@@ -80,8 +79,8 @@ impl RecipeRegistry {
 }
 
 fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
 
     let (frontmatter, body) = split_frontmatter(&raw);
 
@@ -126,7 +125,7 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
         if s.is_empty() { None } else { Some(s) }
     };
 
-    let (config_mcp_servers, config_local_tools) = parse_config_section(&body);
+    let config_mcp_servers = parse_config_section(&body);
 
     Ok(Recipe {
         name,
@@ -136,7 +135,6 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
         instructions,
         initial_prompt,
         config_mcp_servers,
-        config_local_tools,
         response_template,
     })
 }
@@ -201,34 +199,22 @@ fn extract_section(body: &str, heading: &str) -> String {
     remaining[..end].trim().to_string()
 }
 
-fn parse_config_section(body: &str) -> (Option<Vec<String>>, Option<Vec<String>>) {
+fn parse_config_section(body: &str) -> Option<Vec<String>> {
     let config_text = extract_section(body, "Config:");
     if config_text.is_empty() {
-        return (None, None);
+        return None;
     }
 
     let yaml: serde_yaml::Value = match serde_yaml::from_str(&config_text) {
         Ok(v) => v,
-        Err(_) => return (None, None),
+        Err(_) => return None,
     };
 
-    let mcp_servers = yaml
-        .get("mcp_servers")
+    yaml.get("mcp_servers")
         .and_then(|v| v.as_sequence())
         .map(|seq| {
             seq.iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect::<Vec<_>>()
-        });
-
-    let local_tools = yaml
-        .get("local_tools")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        });
-
-    (mcp_servers, local_tools)
+        })
 }

@@ -423,7 +423,8 @@ impl App {
                     "enable" => {
                         let names: Vec<String> = parts.map(str::to_string).collect();
                         if names.is_empty() {
-                            self.activities.push("Usage: /mcp enable <name...>".to_string());
+                            self.activities
+                                .push("Usage: /mcp enable <name...>".to_string());
                         } else {
                             let store = self.orchestrator.store();
                             let mut convo = store.load(&self.current_conversation_id)?;
@@ -435,42 +436,53 @@ impl App {
                             }
                             convo.enabled_mcp_servers = Some(current);
                             store.save(&convo)?;
-                            self.activities.push(format!("Enabled MCP servers: {}", names.join(", ")));
+                            self.activities
+                                .push(format!("Enabled MCP servers: {}", names.join(", ")));
                         }
                     }
                     "disable" => {
                         let names: Vec<String> = parts.map(str::to_string).collect();
                         if names.is_empty() {
-                            self.activities.push("Usage: /mcp disable <name...>".to_string());
+                            self.activities
+                                .push("Usage: /mcp disable <name...>".to_string());
                         } else {
                             let store = self.orchestrator.store();
                             let mut convo = store.load(&self.current_conversation_id)?;
                             let mut current = convo.enabled_mcp_servers.unwrap_or_default();
                             current.retain(|n| !names.contains(n));
-                            convo.enabled_mcp_servers = if current.is_empty() { None } else { Some(current) };
+                            convo.enabled_mcp_servers = if current.is_empty() {
+                                None
+                            } else {
+                                Some(current)
+                            };
                             store.save(&convo)?;
-                            self.activities.push(format!("Disabled MCP servers: {}", names.join(", ")));
+                            self.activities
+                                .push(format!("Disabled MCP servers: {}", names.join(", ")));
                         }
                     }
                     "only" => {
                         let names: Vec<String> = parts.map(str::to_string).collect();
                         if names.is_empty() {
-                            self.activities.push("Usage: /mcp only <name...>".to_string());
+                            self.activities
+                                .push("Usage: /mcp only <name...>".to_string());
                         } else {
                             let store = self.orchestrator.store();
                             let mut convo = store.load(&self.current_conversation_id)?;
                             convo.enabled_mcp_servers = Some(names.clone());
                             store.save(&convo)?;
-                            self.activities.push(format!("MCP servers restricted to: {}", names.join(", ")));
+                            self.activities
+                                .push(format!("MCP servers restricted to: {}", names.join(", ")));
                         }
                     }
                     _ => {
-                        self.activities.push("Usage: /mcp reset|enable|disable|only [names...]".to_string());
+                        self.activities
+                            .push("Usage: /mcp reset|enable|disable|only [names...]".to_string());
                     }
                 }
             }
             "/compact" => {
-                self.activities.push("Compacting conversation...".to_string());
+                self.activities
+                    .push("Compacting conversation...".to_string());
                 let orchestrator = self.orchestrator.clone();
                 let conv_id = self.current_conversation_id.clone();
                 let ui_tx = self.ui_tx.clone();
@@ -515,7 +527,8 @@ impl App {
                                 self.activities.push(format!("Recipe '{name}' not found."));
                             }
                         } else {
-                            self.activities.push("Usage: /recipe use <name>".to_string());
+                            self.activities
+                                .push("Usage: /recipe use <name>".to_string());
                         }
                     }
                     "show" => {
@@ -529,7 +542,8 @@ impl App {
                                 self.activities.push(format!("Recipe '{name}' not found."));
                             }
                         } else {
-                            self.activities.push("Usage: /recipe show <name>".to_string());
+                            self.activities
+                                .push("Usage: /recipe show <name>".to_string());
                         }
                     }
                     "clear" => {
@@ -540,7 +554,8 @@ impl App {
                         self.activities.push("Recipe cleared.".to_string());
                     }
                     _ => {
-                        self.activities.push("Usage: /recipe use|show|clear [name]".to_string());
+                        self.activities
+                            .push("Usage: /recipe use|show|clear [name]".to_string());
                     }
                 }
             }
@@ -605,8 +620,11 @@ impl App {
                             .messages;
                         self.scroll_messages_to_latest();
                         self.status = format!("Reply ready // {} tool calls", run.tool_calls);
-                        self.activities
-                            .push(format!("Assistant reply: {} chars · {} tool calls", run.reply.len(), run.tool_calls));
+                        self.activities.push(format!(
+                            "Assistant reply: {} chars · {} tool calls",
+                            run.reply.len(),
+                            run.tool_calls
+                        ));
                     }
                     Err(err) => {
                         self.status = "Run failed".to_string();

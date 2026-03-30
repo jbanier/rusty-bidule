@@ -15,6 +15,25 @@ pub struct AppConfig {
     #[serde(default)]
     pub mcp_runtime: McpRuntimeConfig,
     pub mcp_servers: Vec<McpServerConfig>,
+    #[serde(default)]
+    pub tracing: Option<TracingConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TracingConfig {
+    #[serde(default)]
+    pub provider: TracingProvider,
+    pub phoenix_endpoint: Option<String>,
+    pub phoenix_project: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TracingProvider {
+    #[default]
+    None,
+    Console,
+    Phoenix,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -141,9 +160,9 @@ impl AppConfig {
             bail!("at least one MCP server must be configured");
         }
         for server in &self.mcp_servers {
-            if server.transport != "streamable_http" {
+            if server.transport != "streamable_http" && server.transport != "sse" {
                 bail!(
-                    "unsupported transport '{}' for server '{}'; only streamable_http is supported in this prototype",
+                    "unsupported transport '{}' for server '{}'; only streamable_http and sse are supported",
                     server.transport,
                     server.name
                 );

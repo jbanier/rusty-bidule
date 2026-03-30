@@ -22,6 +22,12 @@ pub struct McpTool {
     pub input_schema: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Transport {
+    StreamableHttp,
+    Sse,
+}
+
 #[derive(Debug)]
 pub struct McpManager {
     client: Client,
@@ -35,7 +41,10 @@ pub struct McpManager {
 #[derive(Debug)]
 struct ServerState {
     config: McpServerConfig,
+    transport: Transport,
     session_id: Option<String>,
+    /// For SSE: the endpoint URL to POST requests to.
+    sse_endpoint: Option<String>,
     initialized: bool,
 }
 
@@ -59,10 +68,19 @@ impl McpManager {
             runtime,
             servers: servers
                 .into_iter()
-                .map(|config| ServerState {
-                    config,
-                    session_id: None,
-                    initialized: false,
+                .map(|config| {
+                    let transport = if config.transport == "sse" {
+                        Transport::Sse
+                    } else {
+                        Transport::StreamableHttp
+                    };
+                    ServerState {
+                        config,
+                        transport,
+                        session_id: None,
+                        sse_endpoint: None,
+                        initialized: false,
+                    }
                 })
                 .collect(),
             tool_index: HashMap::new(),
@@ -71,12 +89,28 @@ impl McpManager {
     }
 
     pub async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
+        self.list_tools_filtered(None).await
+    }
+
+    pub async fn list_tools_filtered(
+        &mut self,
+        filter: Option<&[String]>,
+    ) -> Result<Vec<McpTool>> {
         debug!("listing MCP tools across configured servers");
         let mut all_tools = Vec::new();
         self.tool_index.clear();
         let mut last_error = None;
 
         for index in 0..self.servers.len() {
+            // Apply server filter if provided
+            if let Some(allowed) = filter {
+                if !allowed.is_empty()
+                    && !allowed.contains(&self.servers[index].config.name)
+                {
+                    continue;
+                }
+            }
+
             let timeout_seconds = self.server_session_timeout(index);
             let list_future = self.list_server_tools(index);
             match tokio::time::timeout(Duration::from_secs(timeout_seconds), list_future).await {
@@ -205,6 +239,11 @@ impl McpManager {
         }
         info!(server = %self.servers[server_index].config.name, "initializing MCP server session");
 
+        // For SSE transport, first connect the SSE stream to get the endpoint URL
+        if self.servers[server_index].transport == Transport::Sse {
+            self.sse_connect(server_index).await?;
+        }
+
         let request = json!({
             "jsonrpc": "2.0",
             "id": self.next_request_id(),
@@ -228,6 +267,54 @@ impl McpManager {
         self.post_notification(server_index, &notify).await?;
         self.servers[server_index].initialized = true;
         info!(server = %self.servers[server_index].config.name, "MCP server initialized");
+        Ok(())
+    }
+
+    /// Connect to an SSE endpoint and parse the initial `endpoint` event.
+    async fn sse_connect(&mut self, server_index: usize) -> Result<()> {
+        let server = &self.servers[server_index];
+        let auth = self.oauth.authorize_server(&server.config).await?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        if let Some(token) = auth.as_ref() {
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", token.access_token))?,
+            );
+        }
+        for (name, value) in &server.config.headers {
+            let header_name = HeaderName::from_bytes(name.as_bytes())?;
+            let header_value = HeaderValue::from_str(value)?;
+            headers.insert(header_name, header_value);
+        }
+
+        let url = server.config.url.clone();
+        let timeout_secs = self.server_session_timeout(server_index);
+
+        let response = self
+            .client
+            .get(&url)
+            .headers(headers)
+            .timeout(Duration::from_secs(timeout_secs))
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to SSE endpoint {url}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            bail!("SSE endpoint returned HTTP {status}");
+        }
+
+        // Read the response body text to find the endpoint event
+        let body = response.text().await?;
+        let endpoint_url = parse_sse_endpoint_event(&body)
+            .ok_or_else(|| anyhow!("SSE endpoint event not found in response"))?;
+
+        debug!(server = %self.servers[server_index].config.name, endpoint = %endpoint_url, "SSE endpoint discovered");
+        self.servers[server_index].sse_endpoint = Some(endpoint_url);
         Ok(())
     }
 
@@ -255,15 +342,28 @@ impl McpManager {
     async fn post(&self, server_index: usize, body: &Value) -> Result<(HeaderMap, Value)> {
         let server = &self.servers[server_index];
         let auth = self.oauth.authorize_server(&server.config).await?;
+
+        // For SSE transport use the discovered endpoint URL
+        let url = if server.transport == Transport::Sse {
+            server
+                .sse_endpoint
+                .as_deref()
+                .unwrap_or(&server.config.url)
+                .to_string()
+        } else {
+            server.config.url.clone()
+        };
+
         debug!(
             server = %server.config.name,
             authenticated = auth.is_some(),
             has_session = server.session_id.is_some(),
+            transport = ?server.transport,
             "issuing MCP POST request"
         );
         let mut request = self
             .client
-            .post(&server.config.url)
+            .post(&url)
             .headers(build_headers(
                 &server.config,
                 server.session_id.as_deref(),
@@ -278,7 +378,7 @@ impl McpManager {
         let response = request.send().await.with_context(|| {
             format!(
                 "failed to reach MCP server '{}' at {}",
-                server.config.name, server.config.url
+                server.config.name, url
             )
         })?;
 
@@ -330,6 +430,24 @@ impl McpManager {
         self.next_id += 1;
         id
     }
+}
+
+/// Parse the endpoint URL from an SSE `endpoint` event.
+fn parse_sse_endpoint_event(body: &str) -> Option<String> {
+    let mut event_type = None;
+    for line in body.lines() {
+        let line = line.trim_end();
+        if let Some(val) = line.strip_prefix("event:") {
+            event_type = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("data:") {
+            if event_type.as_deref() == Some("endpoint") {
+                return Some(val.trim().to_string());
+            }
+        } else if line.is_empty() {
+            event_type = None;
+        }
+    }
+    None
 }
 
 fn build_headers(
@@ -472,7 +590,7 @@ mod tests {
 
     use crate::config::McpServerConfig;
 
-    use super::{ServerState, build_headers, normalize_tool_result, parse_mcp_response_body};
+    use super::{ServerState, Transport, build_headers, normalize_tool_result, parse_mcp_response_body};
 
     #[test]
     fn normalizes_text_content_arrays() {
@@ -498,7 +616,9 @@ mod tests {
                 client_session_timeout_seconds: Some(30),
                 auth: None,
             },
+            transport: Transport::StreamableHttp,
             session_id: None,
+            sse_endpoint: None,
             initialized: false,
         };
 

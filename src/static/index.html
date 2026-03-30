@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rusty Bidule — CSIRT AI Assistant</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Courier New', monospace; background: #0d0d0d; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+  #header { background: #1a1a2e; padding: 10px 20px; border-bottom: 1px solid #ff00ff; display: flex; align-items: center; gap: 20px; }
+  #header h1 { color: #ff00ff; font-size: 1.2rem; letter-spacing: 2px; }
+  #header span { color: #00ffff; font-size: 0.85rem; }
+  #main { display: flex; flex: 1; overflow: hidden; }
+  #sidebar { width: 260px; background: #111; border-right: 1px solid #333; display: flex; flex-direction: column; }
+  #sidebar-header { padding: 10px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+  #sidebar-header span { color: #00ffff; font-size: 0.8rem; }
+  #new-btn { background: #ff00ff; color: #000; border: none; padding: 4px 10px; cursor: pointer; font-family: inherit; font-size: 0.8rem; }
+  #new-btn:hover { background: #cc00cc; }
+  #conversation-list { flex: 1; overflow-y: auto; }
+  .convo-item { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #1a1a1a; font-size: 0.78rem; color: #aaa; }
+  .convo-item:hover { background: #1a1a2e; color: #fff; }
+  .convo-item.active { background: #1a1a2e; color: #ff00ff; border-left: 3px solid #ff00ff; }
+  .convo-item .convo-id { color: #00ffff; font-size: 0.7rem; }
+  .convo-item .convo-meta { color: #555; font-size: 0.65rem; margin-top: 2px; }
+  #chat-area { flex: 1; display: flex; flex-direction: column; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .message { max-width: 85%; padding: 10px 14px; border-radius: 2px; font-size: 0.85rem; line-height: 1.5; }
+  .message.user { align-self: flex-end; background: #1a1a2e; border: 1px solid #ff00ff; color: #fff; }
+  .message.assistant { align-self: flex-start; background: #111; border: 1px solid #333; color: #e0e0e0; }
+  .message .role { font-size: 0.65rem; color: #555; margin-bottom: 4px; text-transform: uppercase; }
+  .message .meta { font-size: 0.65rem; color: #444; margin-top: 4px; }
+  #input-area { padding: 12px; border-top: 1px solid #333; display: flex; gap: 8px; }
+  #msg-input { flex: 1; background: #111; border: 1px solid #444; color: #e0e0e0; padding: 8px 12px; font-family: inherit; font-size: 0.85rem; resize: none; height: 60px; }
+  #msg-input:focus { outline: none; border-color: #ff00ff; }
+  #send-btn { background: #ff00ff; color: #000; border: none; padding: 0 20px; cursor: pointer; font-family: inherit; font-size: 0.85rem; font-weight: bold; }
+  #send-btn:hover { background: #cc00cc; }
+  #send-btn:disabled { background: #444; color: #666; cursor: not-allowed; }
+  #status-bar { padding: 4px 16px; background: #0d0d0d; border-top: 1px solid #222; font-size: 0.7rem; color: #555; }
+  .spinner { color: #ff00ff; }
+  #no-convo { display: flex; align-items: center; justify-content: center; flex: 1; color: #333; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>⚡ RUSTY BIDULE</h1>
+  <span id="header-status">CSIRT AI Assistant // Web Interface</span>
+</div>
+<div id="main">
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <span>CONVERSATIONS</span>
+      <button id="new-btn" onclick="newConversation()">+ NEW</button>
+    </div>
+    <div id="conversation-list"></div>
+  </div>
+  <div id="chat-area">
+    <div id="messages"><div id="no-convo">Select or create a conversation</div></div>
+    <div id="input-area">
+      <textarea id="msg-input" placeholder="Type a message... (Ctrl+Enter to send)" onkeydown="handleInputKey(event)"></textarea>
+      <button id="send-btn" onclick="sendMessage()" disabled>SEND</button>
+    </div>
+  </div>
+</div>
+<div id="status-bar" id="status-bar">Ready</div>
+
+<script>
+let currentConvoId = null;
+let pollTimer = null;
+let activeJobId = null;
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch('/api' + path, opts);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+function setStatus(msg, spinning) {
+  const bar = document.getElementById('status-bar');
+  bar.innerHTML = spinning ? `<span class="spinner">⣾</span> ${msg}` : msg;
+}
+
+async function loadConversations() {
+  try {
+    const convos = await api('GET', '/conversations');
+    const list = document.getElementById('conversation-list');
+    list.innerHTML = '';
+    for (const c of convos) {
+      const div = document.createElement('div');
+      div.className = 'convo-item' + (c.conversation_id === currentConvoId ? ' active' : '');
+      div.innerHTML = `<div class="convo-id">${c.conversation_id}</div><div class="convo-meta">${c.message_count} msgs · ${new Date(c.updated_at).toLocaleString()}</div>`;
+      div.onclick = () => switchConversation(c.conversation_id);
+      list.appendChild(div);
+    }
+  } catch (e) { setStatus('Error loading conversations: ' + e.message); }
+}
+
+async function newConversation() {
+  try {
+    const c = await api('POST', '/conversations');
+    currentConvoId = c.conversation_id;
+    await loadConversations();
+    await loadMessages();
+    document.getElementById('send-btn').disabled = false;
+  } catch (e) { setStatus('Error: ' + e.message); }
+}
+
+async function switchConversation(id) {
+  currentConvoId = id;
+  await loadConversations();
+  await loadMessages();
+  document.getElementById('send-btn').disabled = false;
+}
+
+async function loadMessages() {
+  if (!currentConvoId) return;
+  try {
+    const c = await api('GET', `/conversations/${currentConvoId}`);
+    renderMessages(c.messages || []);
+  } catch (e) { setStatus('Error loading messages: ' + e.message); }
+}
+
+function renderMessages(messages) {
+  const container = document.getElementById('messages');
+  container.innerHTML = '';
+  if (!messages.length) {
+    container.innerHTML = '<div id="no-convo">No messages yet. Start chatting!</div>';
+    return;
+  }
+  for (const msg of messages) {
+    const div = document.createElement('div');
+    div.className = 'message ' + msg.role;
+    let meta = '';
+    if (msg.metadata) {
+      meta = `<div class="meta">#${msg.metadata.assistant_index} · ${msg.metadata.timing.total_seconds.toFixed(1)}s total · ${msg.metadata.tool_call_count} tools</div>`;
+    }
+    div.innerHTML = `<div class="role">${msg.role}</div><div class="content">${escHtml(msg.content)}</div>${meta}`;
+    container.appendChild(div);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+function handleInputKey(e) {
+  if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); sendMessage(); }
+}
+
+async function sendMessage() {
+  if (!currentConvoId) return;
+  const input = document.getElementById('msg-input');
+  const content = input.value.trim();
+  if (!content) return;
+
+  input.value = '';
+  document.getElementById('send-btn').disabled = true;
+  setStatus('Sending...', true);
+
+  try {
+    const result = await api('POST', `/conversations/${currentConvoId}/messages`, { content });
+    activeJobId = result.job_id;
+    pollJob(activeJobId);
+  } catch (e) {
+    setStatus('Error: ' + e.message);
+    document.getElementById('send-btn').disabled = false;
+  }
+}
+
+async function pollJob(jobId) {
+  try {
+    const job = await api('GET', `/jobs/${jobId}`);
+    if (job.status === 'running') {
+      const lastEvent = job.events.length ? job.events[job.events.length - 1].message : 'Processing...';
+      setStatus(lastEvent, true);
+      pollTimer = setTimeout(() => pollJob(jobId), 500);
+    } else {
+      clearTimeout(pollTimer);
+      activeJobId = null;
+      await loadMessages();
+      document.getElementById('send-btn').disabled = false;
+      if (job.status === 'done') {
+        setStatus(`Done · ${job.result ? job.result.tool_calls + ' tool calls' : ''}`);
+      } else {
+        setStatus('Error: ' + (job.error || 'unknown error'));
+      }
+    }
+  } catch (e) {
+    setStatus('Poll error: ' + e.message);
+    document.getElementById('send-btn').disabled = false;
+  }
+}
+
+// Init
+loadConversations().then(() => setStatus('Ready'));
+</script>
+</body>
+</html>

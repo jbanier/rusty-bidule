@@ -8,7 +8,9 @@ use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-pub fn init_logging() -> Result<WorkerGuard> {
+use crate::config::{TracingConfig, TracingProvider};
+
+pub fn init_logging(tracing_config: Option<&TracingConfig>) -> Result<WorkerGuard> {
     let project_root = discover_project_root()
         .or_else(|| std::env::current_dir().ok())
         .context("failed to determine current directory")?;
@@ -24,7 +26,13 @@ pub fn init_logging() -> Result<WorkerGuard> {
         )
     });
 
-    tracing_subscriber::registry()
+    let provider = tracing_config
+        .map(|c| &c.provider)
+        .unwrap_or(&TracingProvider::None);
+
+    let use_console = matches!(provider, TracingProvider::Console);
+
+    let registry = tracing_subscriber::registry()
         .with(filter)
         .with(
             fmt::layer()
@@ -37,8 +45,23 @@ pub fn init_logging() -> Result<WorkerGuard> {
                 .with_file(false)
                 .with_line_number(false),
         )
+        .with(
+            use_console.then(|| {
+                fmt::layer()
+                    .with_writer(std::io::stdout)
+                    .with_ansi(true)
+                    .with_target(true)
+                    .with_level(true)
+            }),
+        );
+
+    registry
         .try_init()
         .context("failed to initialize file logging")?;
+
+    if matches!(provider, TracingProvider::Phoenix) {
+        eprintln!("WARNING: Phoenix tracing requires the 'tracing' feature flag; currently not compiled in");
+    }
 
     tracing::event!(
         Level::INFO,
@@ -68,3 +91,4 @@ fn discover_project_root() -> Option<PathBuf> {
 fn looks_like_project_root(candidate: &Path) -> bool {
     candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir()
 }
+

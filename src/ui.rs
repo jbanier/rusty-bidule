@@ -367,7 +367,7 @@ impl App {
                 }
             }
             "/help" => {
-                self.activities.push("Commands: /new /list /use <id> /show [id] /delete <id> /login <server> /model /logging /help /exit /quit".to_string());
+                self.activities.push("Commands: /new /list /use <id> /show [id] /delete <id> /login <server> /model /logging /compact /recipes /recipe use|show|clear /mcp reset|enable|disable|only /help /exit /quit".to_string());
                 self.activities
                     .push("Multiline mode: enter <<< then finish with >>>".to_string());
                 self.activities
@@ -409,6 +409,140 @@ impl App {
             }
             "/logging" => {
                 self.activities.push("Logging verbosity toggles are not implemented yet; audit logs are always written to disk.".to_string());
+            }
+            "/mcp" => {
+                let sub = parts.next().unwrap_or_default();
+                match sub {
+                    "reset" => {
+                        let store = self.orchestrator.store();
+                        let mut convo = store.load(&self.current_conversation_id)?;
+                        convo.enabled_mcp_servers = None;
+                        store.save(&convo)?;
+                        self.activities.push("All MCP servers enabled".to_string());
+                    }
+                    "enable" => {
+                        let names: Vec<String> = parts.map(str::to_string).collect();
+                        if names.is_empty() {
+                            self.activities.push("Usage: /mcp enable <name...>".to_string());
+                        } else {
+                            let store = self.orchestrator.store();
+                            let mut convo = store.load(&self.current_conversation_id)?;
+                            let mut current = convo.enabled_mcp_servers.unwrap_or_default();
+                            for name in &names {
+                                if !current.contains(name) {
+                                    current.push(name.clone());
+                                }
+                            }
+                            convo.enabled_mcp_servers = Some(current);
+                            store.save(&convo)?;
+                            self.activities.push(format!("Enabled MCP servers: {}", names.join(", ")));
+                        }
+                    }
+                    "disable" => {
+                        let names: Vec<String> = parts.map(str::to_string).collect();
+                        if names.is_empty() {
+                            self.activities.push("Usage: /mcp disable <name...>".to_string());
+                        } else {
+                            let store = self.orchestrator.store();
+                            let mut convo = store.load(&self.current_conversation_id)?;
+                            let mut current = convo.enabled_mcp_servers.unwrap_or_default();
+                            current.retain(|n| !names.contains(n));
+                            convo.enabled_mcp_servers = if current.is_empty() { None } else { Some(current) };
+                            store.save(&convo)?;
+                            self.activities.push(format!("Disabled MCP servers: {}", names.join(", ")));
+                        }
+                    }
+                    "only" => {
+                        let names: Vec<String> = parts.map(str::to_string).collect();
+                        if names.is_empty() {
+                            self.activities.push("Usage: /mcp only <name...>".to_string());
+                        } else {
+                            let store = self.orchestrator.store();
+                            let mut convo = store.load(&self.current_conversation_id)?;
+                            convo.enabled_mcp_servers = Some(names.clone());
+                            store.save(&convo)?;
+                            self.activities.push(format!("MCP servers restricted to: {}", names.join(", ")));
+                        }
+                    }
+                    _ => {
+                        self.activities.push("Usage: /mcp reset|enable|disable|only [names...]".to_string());
+                    }
+                }
+            }
+            "/compact" => {
+                self.activities.push("Compacting conversation...".to_string());
+                let orchestrator = self.orchestrator.clone();
+                let conv_id = self.current_conversation_id.clone();
+                let ui_tx = self.ui_tx.clone();
+                tokio::spawn(async move {
+                    match orchestrator.compact_conversation(&conv_id, ui_tx).await {
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::error!(error = %err, "compaction failed");
+                        }
+                    }
+                });
+                self.activities.push("Conversation compacted.".to_string());
+            }
+            "/recipes" => {
+                let recipes = self.orchestrator.recipes().list();
+                if recipes.is_empty() {
+                    self.activities.push("No recipes found.".to_string());
+                } else {
+                    for r in recipes {
+                        let desc = r.description.as_deref().unwrap_or("");
+                        self.activities.push(format!("{}: {}", r.name, desc));
+                    }
+                }
+            }
+            "/recipe" => {
+                let sub = parts.next().unwrap_or_default();
+                match sub {
+                    "use" => {
+                        if let Some(name) = parts.next() {
+                            let name = name.to_string();
+                            if let Some(recipe) = self.orchestrator.recipes().find(&name) {
+                                let store = self.orchestrator.store();
+                                let mut convo = store.load(&self.current_conversation_id)?;
+                                convo.pending_recipe = Some(name.clone());
+                                store.save(&convo)?;
+                                self.activities.push(format!("Recipe '{name}' activated."));
+                                // Auto-dispatch initial prompt if set
+                                if let Some(prompt) = recipe.initial_prompt.clone() {
+                                    self.dispatch_message(prompt).await?;
+                                }
+                            } else {
+                                self.activities.push(format!("Recipe '{name}' not found."));
+                            }
+                        } else {
+                            self.activities.push("Usage: /recipe use <name>".to_string());
+                        }
+                    }
+                    "show" => {
+                        if let Some(name) = parts.next() {
+                            if let Some(recipe) = self.orchestrator.recipes().find(name) {
+                                self.activities.push(format!("Recipe: {}", recipe.name));
+                                for line in recipe.instructions.lines().take(10) {
+                                    self.activities.push(line.to_string());
+                                }
+                            } else {
+                                self.activities.push(format!("Recipe '{name}' not found."));
+                            }
+                        } else {
+                            self.activities.push("Usage: /recipe show <name>".to_string());
+                        }
+                    }
+                    "clear" => {
+                        let store = self.orchestrator.store();
+                        let mut convo = store.load(&self.current_conversation_id)?;
+                        convo.pending_recipe = None;
+                        store.save(&convo)?;
+                        self.activities.push("Recipe cleared.".to_string());
+                    }
+                    _ => {
+                        self.activities.push("Usage: /recipe use|show|clear [name]".to_string());
+                    }
+                }
             }
             "/exit" | "/quit" => {
                 self.status = "Restoring terminal".to_string();
@@ -472,7 +606,7 @@ impl App {
                         self.scroll_messages_to_latest();
                         self.status = format!("Reply ready // {} tool calls", run.tool_calls);
                         self.activities
-                            .push(format!("Assistant reply: {} chars", run.reply.len()));
+                            .push(format!("Assistant reply: {} chars · {} tool calls", run.reply.len(), run.tool_calls));
                     }
                     Err(err) => {
                         self.status = "Run failed".to_string();
@@ -932,11 +1066,13 @@ mod tests {
                 role: "user".to_string(),
                 content: "older".to_string(),
                 timestamp: Utc.with_ymd_and_hms(2026, 3, 15, 20, 0, 0).unwrap(),
+                metadata: None,
             },
             Message {
                 role: "assistant".to_string(),
                 content: "newer".to_string(),
                 timestamp: Utc.with_ymd_and_hms(2026, 3, 15, 20, 0, 1).unwrap(),
+                metadata: None,
             },
         ];
 

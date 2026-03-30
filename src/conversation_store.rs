@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use crate::types::{Conversation, ConversationSummary, Message};
+use crate::types::{Conversation, ConversationSummary, Message, MessageMetadata};
 
 #[derive(Debug, Clone)]
 pub struct ConversationStore {
@@ -34,6 +34,9 @@ impl ConversationStore {
             conversation_id: generate_conversation_id(now),
             created_at: now,
             updated_at: now,
+            pending_recipe: None,
+            enabled_mcp_servers: None,
+            active_compaction: None,
             messages: Vec::new(),
         };
         self.ensure_layout(&conversation.conversation_id)?;
@@ -95,11 +98,22 @@ impl ConversationStore {
         role: &str,
         content: impl Into<String>,
     ) -> Result<Message> {
+        self.append_message_with_metadata(conversation_id, role, content, None)
+    }
+
+    pub fn append_message_with_metadata(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: impl Into<String>,
+        metadata: Option<MessageMetadata>,
+    ) -> Result<Message> {
         let mut conversation = self.load(conversation_id)?;
         let message = Message {
             role: role.to_string(),
             content: content.into(),
             timestamp: Utc::now(),
+            metadata,
         };
         conversation.messages.push(message.clone());
         conversation.updated_at = Utc::now();
@@ -138,7 +152,53 @@ impl ConversationStore {
         let dir = self.conversation_dir(conversation_id);
         fs::create_dir_all(dir.join("tool_output"))?;
         fs::create_dir_all(dir.join("logs"))?;
+        fs::create_dir_all(dir.join("compactions"))?;
         Ok(())
+    }
+
+    /// Save a compaction summary and update `active_compaction` in conversation.json.
+    pub fn save_compaction(
+        &self,
+        conversation_id: &str,
+        checkpoint_id: &str,
+        summary: &str,
+    ) -> Result<()> {
+        self.ensure_layout(conversation_id)?;
+        let path = self
+            .conversation_dir(conversation_id)
+            .join("compactions")
+            .join(format!("{checkpoint_id}.json"));
+        let payload = serde_json::to_string_pretty(&serde_json::json!({
+            "checkpoint_id": checkpoint_id,
+            "created_at": Utc::now().to_rfc3339(),
+            "summary": summary,
+        }))?;
+        fs::write(&path, payload)
+            .with_context(|| format!("failed to write compaction {}", path.display()))?;
+        // Update active_compaction pointer in conversation.json
+        let mut conversation = self.load(conversation_id)?;
+        conversation.active_compaction = Some(checkpoint_id.to_string());
+        self.save(&conversation)?;
+        Ok(())
+    }
+
+    /// Load the summary text for a compaction checkpoint.
+    pub fn load_compaction(
+        &self,
+        conversation_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<String> {
+        let path = self
+            .conversation_dir(conversation_id)
+            .join("compactions")
+            .join(format!("{checkpoint_id}.json"));
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read compaction {}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        Ok(value["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
     }
 }
 

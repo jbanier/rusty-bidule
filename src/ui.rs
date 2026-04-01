@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::Local;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use pulldown_cmark::{CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
@@ -8,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, error, info, warn};
@@ -19,6 +20,102 @@ use crate::{
 };
 
 const SPINNER: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+const TRANSCRIPT_ACTIVITY_WINDOW: usize = 24;
+
+fn void_black() -> Color {
+    Color::Rgb(8, 7, 22)
+}
+
+fn panel_ink() -> Color {
+    Color::Rgb(18, 14, 40)
+}
+
+fn input_ink() -> Color {
+    Color::Rgb(15, 10, 33)
+}
+
+fn neon_pink() -> Color {
+    Color::Rgb(255, 88, 182)
+}
+
+fn neon_cyan() -> Color {
+    Color::Rgb(77, 232, 255)
+}
+
+fn neon_gold() -> Color {
+    Color::Rgb(255, 194, 92)
+}
+
+fn neon_orange() -> Color {
+    Color::Rgb(255, 128, 89)
+}
+
+fn neon_lime() -> Color {
+    Color::Rgb(148, 255, 125)
+}
+
+fn signal_red() -> Color {
+    Color::Rgb(255, 94, 133)
+}
+
+fn synth_text() -> Color {
+    Color::Rgb(223, 229, 255)
+}
+
+fn muted_synth() -> Color {
+    Color::Rgb(125, 121, 179)
+}
+
+fn pane_block(title: &'static str, accent: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(panel_ink()))
+        .title(Line::from(vec![
+            Span::styled("▣ ", Style::default().fg(neon_gold())),
+            Span::styled(
+                title,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+        ]))
+}
+
+fn section_heading(label: &'static str, accent: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "◆ ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            label,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn activity_style(entry: &str) -> Style {
+    let lower = entry.to_ascii_lowercase();
+    if entry.contains("ERROR") || lower.contains("failed") {
+        Style::default()
+            .fg(signal_red())
+            .add_modifier(Modifier::BOLD)
+    } else if entry.starts_with("Usage:") || entry.starts_with("Commands:") {
+        Style::default().fg(neon_cyan())
+    } else if lower.contains("completed")
+        || lower.contains("ready")
+        || lower.contains("activated")
+        || lower.contains("enabled")
+        || lower.contains("created")
+        || lower.contains("using ")
+        || lower.contains("compacted")
+    {
+        Style::default().fg(neon_lime())
+    } else if lower.contains("warning") || lower.contains("busy") || lower.contains("limit") {
+        Style::default().fg(neon_gold())
+    } else {
+        Style::default().fg(synth_text())
+    }
+}
 
 pub struct App {
     orchestrator: Orchestrator,
@@ -72,7 +169,7 @@ impl App {
             multiline_buffer: None,
             inflight: false,
             spinner_index: 0,
-            status: "Idle".to_string(),
+            status: "Idle in the neon rain".to_string(),
             ui_tx,
             ui_rx,
             should_quit: false,
@@ -113,116 +210,234 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut Frame) {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(void_black())),
+            frame.area(),
+        );
+
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(9),
                 Constraint::Min(10),
-                Constraint::Length(5),
+                Constraint::Length(8),
             ])
             .split(frame.area());
 
-        let title = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "RUSTY BIDULE",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  //  "),
-            Span::styled(
-                self.current_conversation_id.to_string(),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::raw("  //  "),
-            Span::styled(self.status_line(), Style::default().fg(Color::Yellow)),
-        ]))
-        .block(Block::default().borders(Borders::ALL).title("CYBERDECK"));
-        frame.render_widget(title, layout[0]);
+        frame.render_widget(self.render_agent_monitor(), layout[0]);
 
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
-            .split(layout[1]);
-
-        let message_block = Block::default()
-            .borders(Borders::ALL)
-            .title("MESSAGE STACK");
-        let message_inner = message_block.inner(body[0]);
-        frame.render_widget(message_block, body[0]);
-        let message_layout = Layout::default()
+        let transcript_block = pane_block("CONVERSATION // COMMAND OUTPUT", neon_cyan());
+        let transcript_inner = transcript_block.inner(layout[1]);
+        frame.render_widget(transcript_block, layout[1]);
+        let transcript_layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(message_inner);
+            .split(transcript_inner);
 
-        let messages = self.render_messages(message_layout[0].height);
-        frame.render_widget(messages, message_layout[0]);
+        let transcript = self.render_transcript(transcript_layout[0].height);
+        frame.render_widget(transcript, transcript_layout[0]);
 
         let indicator = render_scroll_indicator(
             self.rendered_message_lines,
             self.message_viewport_lines,
             self.message_scroll,
         );
-        frame.render_widget(indicator, message_layout[1]);
+        frame.render_widget(indicator, transcript_layout[1]);
 
-        let activity_items: Vec<ListItem> = self
-            .activities
-            .iter()
-            .rev()
-            .take(18)
-            .rev()
-            .map(|entry| {
-                ListItem::new(Line::from(Span::styled(
-                    entry.clone(),
-                    Style::default().fg(Color::Green),
-                )))
-            })
-            .collect();
-        let activity = List::new(activity_items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("ACTIVITY FEED"),
-        );
-        frame.render_widget(activity, body[1]);
-
-        let input_title = if self.multiline_buffer.is_some() {
-            "INPUT // MULTILINE"
-        } else {
-            "INPUT"
-        };
-        let input = Paragraph::new(self.input_preview())
-            .style(Style::default().fg(Color::White))
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(input_title));
-        frame.render_widget(input, layout[2]);
+        frame.render_widget(self.render_input(), layout[2]);
     }
 
-    fn render_messages(&mut self, area_height: u16) -> Paragraph<'static> {
-        let lines: Vec<Line<'static>> = ordered_messages(&self.messages)
-            .into_iter()
-            .flat_map(|message| {
-                let role_style = match message.role.as_str() {
-                    "user" => Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                    "assistant" => Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                    _ => Style::default().fg(Color::Yellow),
-                };
-                let mut lines = vec![Line::from(vec![
-                    Span::styled(message.role.to_uppercase().to_string(), role_style),
-                    Span::raw("  "),
-                    Span::styled(
-                        message.timestamp.format("%H:%M:%S").to_string(),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ])];
-                lines.extend(render_markdown(&message.content));
-                lines.push(Line::raw(""));
-                lines
+    fn render_agent_monitor(&self) -> Paragraph<'static> {
+        let mode = if self.inflight { "RUNNING" } else { "STANDBY" };
+        let input_mode = if self.multiline_buffer.is_some() {
+            "MULTILINE"
+        } else if self.input.trim().is_empty() {
+            "READY"
+        } else {
+            "DRAFT LOADED"
+        };
+        let tool_calls = self
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| {
+                message
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| metadata.tool_call_count)
             })
-            .collect();
+            .unwrap_or(0);
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    "RUSTY BIDULE",
+                    Style::default()
+                        .fg(neon_pink())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  //  "),
+                Span::styled(
+                    self.current_conversation_id.to_string(),
+                    Style::default().fg(neon_cyan()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    self.status_line(),
+                    Style::default()
+                        .fg(neon_gold())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  //  "),
+                Span::styled(mode, Style::default().fg(neon_lime())),
+                Span::raw("  //  "),
+                Span::styled(input_mode, Style::default().fg(neon_orange())),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    format!("messages {}", self.messages.len()),
+                    Style::default().fg(synth_text()),
+                ),
+                Span::raw("   "),
+                Span::styled(
+                    format!("agent events {}", self.activities.len()),
+                    Style::default().fg(synth_text()),
+                ),
+                Span::raw("   "),
+                Span::styled(
+                    format!("latest tools {}", tool_calls),
+                    Style::default().fg(synth_text()),
+                ),
+            ]),
+            section_heading("LIVE SIGNAL", neon_pink()),
+        ];
+
+        if self.activities.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Awaiting operator input.",
+                Style::default().fg(muted_synth()),
+            )));
+        } else {
+            for entry in self.activities.iter().rev().take(3) {
+                lines.push(Line::from(vec![
+                    Span::styled(">", Style::default().fg(neon_pink())),
+                    Span::raw(" "),
+                    Span::styled(entry.clone(), activity_style(entry)),
+                ]));
+            }
+        }
+
+        Paragraph::new(Text::from(lines))
+            .style(Style::default().bg(panel_ink()))
+            .wrap(Wrap { trim: false })
+            .block(pane_block("AGENT // LIVE SIGNAL", neon_pink()))
+    }
+
+    fn render_transcript(&mut self, area_height: u16) -> Paragraph<'static> {
+        let mut lines: Vec<Line<'static>> = vec![section_heading("RUN OUTPUT", neon_orange())];
+
+        if self.activities.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No command output yet. Progress pulses will appear here.",
+                Style::default().fg(muted_synth()),
+            )));
+        } else {
+            let hidden_count = self
+                .activities
+                .len()
+                .saturating_sub(TRANSCRIPT_ACTIVITY_WINDOW);
+            if hidden_count > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{hidden_count} earlier events hidden. Showing the latest {}.",
+                        TRANSCRIPT_ACTIVITY_WINDOW
+                    ),
+                    Style::default().fg(muted_synth()),
+                )));
+            }
+            for entry in self
+                .activities
+                .iter()
+                .rev()
+                .take(TRANSCRIPT_ACTIVITY_WINDOW)
+            {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "▸",
+                        Style::default()
+                            .fg(neon_orange())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(entry.clone(), activity_style(entry)),
+                ]));
+            }
+        }
+
+        lines.push(Line::raw(""));
+        lines.push(section_heading("CONVERSATION", neon_cyan()));
+        lines.push(Line::raw(""));
+
+        if self.messages.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No messages yet. Type into the deck below to start a run.",
+                Style::default().fg(muted_synth()),
+            )));
+        } else {
+            lines.extend(
+                ordered_messages(&self.messages)
+                    .into_iter()
+                    .flat_map(|message| {
+                        let (role_label, role_style) = match message.role.as_str() {
+                            "user" => (
+                                "OPERATOR",
+                                Style::default()
+                                    .fg(neon_cyan())
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            "assistant" => (
+                                "AGENT",
+                                Style::default()
+                                    .fg(neon_pink())
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            _ => (
+                                "SYSTEM",
+                                Style::default()
+                                    .fg(neon_gold())
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        };
+                        let timestamp = message
+                            .timestamp
+                            .with_timezone(&Local)
+                            .format("%H:%M:%S")
+                            .to_string();
+                        let mut header = vec![
+                            Span::styled(role_label.to_string(), role_style),
+                            Span::raw("  "),
+                            Span::styled(timestamp, Style::default().fg(muted_synth())),
+                        ];
+                        if let Some(metadata) = &message.metadata {
+                            header.push(Span::raw("  "));
+                            header.push(Span::styled(
+                                format!(
+                                    "#{}  {} tools  {:.1}s",
+                                    metadata.assistant_index,
+                                    metadata.tool_call_count,
+                                    metadata.timing.total_seconds
+                                ),
+                                Style::default().fg(neon_gold()),
+                            ));
+                        }
+                        let mut message_lines = vec![Line::from(header)];
+                        message_lines.extend(render_markdown(&message.content));
+                        message_lines.push(Line::raw(""));
+                        message_lines
+                    }),
+            );
+        }
 
         self.rendered_message_lines = lines.len().min(u16::MAX as usize) as u16;
         self.message_viewport_lines = area_height.saturating_sub(2);
@@ -233,7 +448,74 @@ impl App {
 
         Paragraph::new(Text::from(lines))
             .scroll((self.message_scroll, 0))
+            .style(Style::default().fg(synth_text()).bg(panel_ink()))
             .wrap(Wrap { trim: false })
+    }
+
+    fn render_input(&self) -> Paragraph<'static> {
+        let preview = self.input_preview();
+        let mut lines = vec![
+            Line::from(Span::styled(
+                if self.multiline_buffer.is_some() {
+                    "MULTILINE CAPTURE ACTIVE"
+                } else if self.inflight {
+                    "INPUT BUFFER LOCKED UNTIL THE CURRENT RUN FINISHES"
+                } else {
+                    "COMMAND / TEXT INPUT"
+                },
+                Style::default()
+                    .fg(neon_cyan())
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+        ];
+
+        if preview.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Type a prompt, or use /help to browse commands.",
+                Style::default().fg(muted_synth()),
+            )));
+        } else {
+            for line in preview.lines() {
+                lines.push(Line::from(vec![
+                    Span::styled(">", Style::default().fg(neon_pink())),
+                    Span::raw(" "),
+                    Span::styled(line.to_string(), Style::default().fg(synth_text())),
+                ]));
+            }
+        }
+
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(neon_gold())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" send", Style::default().fg(muted_synth())),
+            Span::raw("   "),
+            Span::styled(
+                "/help",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" command list", Style::default().fg(muted_synth())),
+            Span::raw("   "),
+            Span::styled(
+                "<<< ... >>>",
+                Style::default()
+                    .fg(neon_orange())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" multiline", Style::default().fg(muted_synth())),
+        ]));
+
+        Paragraph::new(Text::from(lines))
+            .style(Style::default().fg(synth_text()).bg(input_ink()))
+            .wrap(Wrap { trim: false })
+            .block(pane_block("INPUT // COMMAND DECK", neon_orange()))
     }
 
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
@@ -722,9 +1004,15 @@ fn build_scroll_indicator_lines(
     (0..height)
         .map(|index| {
             let (glyph, style) = if index >= thumb_offset && index < thumb_offset + thumb_size {
-                ("█", Style::default().fg(Color::Magenta))
+                (
+                    "█",
+                    Style::default()
+                        .fg(neon_pink())
+                        .bg(panel_ink())
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                ("│", Style::default().fg(Color::DarkGray))
+                ("│", Style::default().fg(muted_synth()).bg(panel_ink()))
             };
             Line::from(Span::styled(glyph.to_string(), style))
         })
@@ -773,8 +1061,8 @@ impl MarkdownRenderer {
                 MdEvent::Code(text) => self.push_span(
                     text.to_string(),
                     self.inline_style()
-                        .fg(Color::Yellow)
-                        .bg(Color::Black)
+                        .fg(neon_gold())
+                        .bg(input_ink())
                         .add_modifier(Modifier::BOLD),
                 ),
                 MdEvent::SoftBreak => {
@@ -789,23 +1077,23 @@ impl MarkdownRenderer {
                     self.flush_line();
                     self.lines.push(Line::from(Span::styled(
                         "────────────────────────",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(muted_synth()),
                     )));
                 }
                 MdEvent::Html(text) | MdEvent::InlineHtml(text) => {
-                    self.push_span(text.to_string(), self.inline_style().fg(Color::DarkGray));
+                    self.push_span(text.to_string(), self.inline_style().fg(muted_synth()));
                 }
                 MdEvent::FootnoteReference(text) => {
                     self.push_span(
                         format!("[{text}]"),
                         self.inline_style()
-                            .fg(Color::Yellow)
+                            .fg(neon_gold())
                             .add_modifier(Modifier::ITALIC),
                     );
                 }
                 MdEvent::TaskListMarker(checked) => {
                     let marker = if checked { "[x] " } else { "[ ] " };
-                    self.push_span(marker.to_string(), self.inline_style().fg(Color::Green));
+                    self.push_span(marker.to_string(), self.inline_style().fg(neon_lime()));
                 }
                 _ => {}
             }
@@ -841,7 +1129,7 @@ impl MarkdownRenderer {
                 if let Some(language) = &self.code_block_language {
                     self.lines.push(Line::from(Span::styled(
                         format!("```{language}"),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(neon_cyan()),
                     )));
                 }
             }
@@ -883,7 +1171,7 @@ impl MarkdownRenderer {
                 self.code_block_language = None;
                 self.lines.push(Line::from(Span::styled(
                     "```",
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(neon_cyan()),
                 )));
                 self.push_blank_line();
             }
@@ -903,7 +1191,7 @@ impl MarkdownRenderer {
                     self.push_span(
                         format!(" ({href})"),
                         self.inline_style()
-                            .fg(Color::Blue)
+                            .fg(neon_cyan())
                             .add_modifier(Modifier::UNDERLINED),
                     );
                 }
@@ -916,7 +1204,7 @@ impl MarkdownRenderer {
         if self.code_block {
             for line in text.split('\n') {
                 if !line.is_empty() {
-                    let style = Style::default().fg(Color::Yellow).bg(Color::Black);
+                    let style = Style::default().fg(neon_gold()).bg(input_ink());
                     self.push_span(line.to_string(), style);
                 }
                 self.flush_line();
@@ -964,12 +1252,12 @@ impl MarkdownRenderer {
         if self.quote_depth > 0 {
             self.current_spans.push(Span::styled(
                 format!("{} ", "│".repeat(self.quote_depth)),
-                Style::default().fg(Color::Green),
+                Style::default().fg(neon_lime()),
             ));
         }
         if let Some(prefix) = self.pending_item_prefix.take() {
             self.current_spans
-                .push(Span::styled(prefix, Style::default().fg(Color::Cyan)));
+                .push(Span::styled(prefix, Style::default().fg(neon_cyan())));
         }
     }
 
@@ -989,13 +1277,13 @@ impl MarkdownRenderer {
     }
 
     fn inline_style(&self) -> Style {
-        let mut style = Style::default().fg(Color::White);
+        let mut style = Style::default().fg(synth_text());
         if let Some(level) = self.heading_level {
             style = style
                 .fg(match level {
-                    HeadingLevel::H1 => Color::Magenta,
-                    HeadingLevel::H2 => Color::Cyan,
-                    _ => Color::Yellow,
+                    HeadingLevel::H1 => neon_pink(),
+                    HeadingLevel::H2 => neon_cyan(),
+                    _ => neon_gold(),
                 })
                 .add_modifier(Modifier::BOLD);
         }
@@ -1009,7 +1297,7 @@ impl MarkdownRenderer {
             style = style.add_modifier(Modifier::CROSSED_OUT);
         }
         if self.link_href.is_some() {
-            style = style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED);
+            style = style.fg(neon_cyan()).add_modifier(Modifier::UNDERLINED);
         }
         style
     }
@@ -1028,12 +1316,13 @@ impl LineExt for Line<'_> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
 
     use crate::types::Message;
 
     use super::{
-        build_scroll_indicator_lines, max_message_scroll, ordered_messages, render_markdown,
+        build_scroll_indicator_lines, max_message_scroll, neon_gold, neon_pink, ordered_messages,
+        render_markdown,
     };
 
     #[test]
@@ -1043,7 +1332,7 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.spans.iter().any(|span| span.content == "Title"
-                    && span.style.fg == Some(Color::Magenta)
+                    && span.style.fg == Some(neon_pink())
                     && span.style.add_modifier.contains(Modifier::BOLD)))
         );
         assert!(lines.iter().any(|line| line.spans.iter().any(
@@ -1067,7 +1356,7 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line.spans
                 .iter()
-                .any(|span| span.content == "fn main() {}" && span.style.fg == Some(Color::Yellow))
+                .any(|span| span.content == "fn main() {}" && span.style.fg == Some(neon_gold()))
         }));
     }
 

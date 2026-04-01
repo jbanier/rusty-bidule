@@ -932,9 +932,11 @@ impl App {
                                 convo.pending_recipe = Some(name.clone());
                                 store.save(&convo)?;
                                 self.activities.push(format!("Recipe '{name}' activated."));
-                                // Auto-dispatch initial prompt if set
                                 if let Some(prompt) = recipe.initial_prompt.clone() {
-                                    self.dispatch_message(prompt).await?;
+                                    self.input = prompt;
+                                    self.status = format!("Recipe '{name}' prompt loaded");
+                                    self.activities
+                                        .push(format!("Recipe '{name}' prompt loaded into input."));
                                 }
                             } else {
                                 self.activities.push(format!("Recipe '{name}' not found."));
@@ -2268,5 +2270,27 @@ mod tests {
 
         app.handle_command("/permissions reset").await.unwrap();
         assert_eq!(app.agent_permissions, AgentPermissions::default());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recipe_use_prefills_input_without_dispatching() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        app.handle_command("/recipe use ip-reputation")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.input.trim(),
+            "I need a background check on the following IP addresses:"
+        );
+        assert!(!app.inflight);
+        assert_eq!(app.status, "Recipe 'ip-reputation' prompt loaded");
+        let convo = app
+            .orchestrator
+            .store()
+            .load(&app.current_conversation_id)
+            .unwrap();
+        assert_eq!(convo.pending_recipe.as_deref(), Some("ip-reputation"));
     }
 }

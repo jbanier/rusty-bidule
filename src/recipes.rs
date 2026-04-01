@@ -218,3 +218,40 @@ fn parse_config_section(body: &str) -> Option<Vec<String>> {
                 .collect::<Vec<_>>()
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::parse_recipe_md;
+
+    #[test]
+    fn parses_initial_prompt_section() {
+        let dir = tempdir().unwrap();
+        let recipe_dir = dir.path().join("demo");
+        std::fs::create_dir(&recipe_dir).unwrap();
+        let recipe_path = recipe_dir.join("RECIPE.md");
+        std::fs::write(
+            &recipe_path,
+            r#"---
+name: demo
+---
+
+Instructions:
+Follow the recipe.
+
+Initial Prompt:
+Draft this first.
+
+Response Template:
+{{ response }}
+"#,
+        )
+        .unwrap();
+
+        let recipe = parse_recipe_md(&recipe_path, recipe_dir).unwrap();
+
+        assert_eq!(recipe.initial_prompt.as_deref(), Some("Draft this first."));
+        assert_eq!(recipe.instructions, "Follow the recipe.");
+    }
+}

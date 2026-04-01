@@ -137,7 +137,7 @@ Recognized body sections:
 | Section | Notes |
 |---------|-------|
 | `Instructions:` | Injected into the system prompt |
-| `Initial Prompt:` | Auto-sent when the recipe is loaded from the TUI |
+| `Initial Prompt:` | Loaded into the TUI input box when the recipe is activated |
 | `Config:` | Currently only `mcp_servers` is enforced |
 | `Response Template:` | Plain text wrapper using `{{ recipe_title }}` and `{{ response }}` |
 

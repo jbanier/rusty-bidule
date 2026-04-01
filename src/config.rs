@@ -7,11 +7,15 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::types::AgentPermissions;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub prompt: Option<String>,
     pub data_dir: Option<PathBuf>,
     pub azure_openai: AzureOpenAiConfig,
+    #[serde(default)]
+    pub agent_permissions: AgentPermissions,
     #[serde(default)]
     pub mcp_runtime: McpRuntimeConfig,
     #[serde(default)]
@@ -231,6 +235,8 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::types::FilesystemAccess;
+
     use super::AppConfig;
 
     #[test]
@@ -300,5 +306,34 @@ azure_openai:
 
         let config = AppConfig::load(&path).unwrap();
         assert!(config.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn parses_agent_permissions_block() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+agent_permissions:
+  allow_network: true
+  filesystem: read_write
+  yolo: false
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert!(config.agent_permissions.allow_network);
+        assert_eq!(
+            config.agent_permissions.filesystem,
+            FilesystemAccess::ReadWrite
+        );
+        assert!(!config.agent_permissions.yolo);
     }
 }

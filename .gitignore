@@ -3,3 +3,5 @@
 /var
 /config/config.local.yaml
 *.log
+__pycache__/
+*.pyc

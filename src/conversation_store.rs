@@ -7,17 +7,19 @@ use std::{
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
-use crate::types::{Conversation, ConversationSummary, Message, MessageMetadata};
+use crate::types::{AgentPermissions, Conversation, ConversationSummary, Message, MessageMetadata};
 
 #[derive(Debug, Clone)]
 pub struct ConversationStore {
     root: PathBuf,
+    default_agent_permissions: AgentPermissions,
 }
 
 impl ConversationStore {
-    pub fn new(data_dir: impl AsRef<Path>) -> Self {
+    pub fn new(data_dir: impl AsRef<Path>, default_agent_permissions: AgentPermissions) -> Self {
         Self {
             root: data_dir.as_ref().join("conversations"),
+            default_agent_permissions,
         }
     }
 
@@ -37,6 +39,7 @@ impl ConversationStore {
             pending_recipe: None,
             enabled_mcp_servers: None,
             active_compaction: None,
+            agent_permissions: self.default_agent_permissions.clone(),
             messages: Vec::new(),
         };
         self.ensure_layout(&conversation.conversation_id)?;
@@ -225,12 +228,14 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::types::AgentPermissions;
+
     use super::ConversationStore;
 
     #[test]
     fn creates_and_persists_conversation() {
         let dir = tempdir().unwrap();
-        let store = ConversationStore::new(dir.path());
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
         let conversation = store.create_conversation().unwrap();
         store
             .append_message(&conversation.conversation_id, "user", "hello")
@@ -244,7 +249,7 @@ mod tests {
     #[test]
     fn rejects_invalid_conversation_ids() {
         let dir = tempdir().unwrap();
-        let store = ConversationStore::new(dir.path());
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
 
         for invalid in ["", "..", "../escape", "nested/id", "/tmp/x", "with space"] {
             assert!(
@@ -265,7 +270,7 @@ mod tests {
     #[test]
     fn delete_cannot_remove_paths_outside_conversation_root() {
         let dir = tempdir().unwrap();
-        let store = ConversationStore::new(dir.path());
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
         let outside_file = dir.path().join("outside.txt");
         fs::write(&outside_file, "keep me").unwrap();
 

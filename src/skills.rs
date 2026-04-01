@@ -6,6 +6,8 @@ use std::{
 use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
+use crate::types::FilesystemAccess;
+
 #[derive(Debug, Clone)]
 pub struct SkillTool {
     pub name: Option<String>,
@@ -13,6 +15,8 @@ pub struct SkillTool {
     pub description: Option<String>,
     pub script: Option<String>,
     pub server: Option<String>,
+    pub requires_network: bool,
+    pub filesystem: FilesystemAccess,
 }
 
 #[derive(Debug, Clone)]
@@ -66,15 +70,68 @@ impl SkillRegistry {
             return String::new();
         }
         let mut out = String::from("## Available Skills\n\n");
+        out.push_str("Execution rules:\n");
+        out.push_str(
+            "- If a skill tool has a local `script`, execute it with `local__run_skill`.\n",
+        );
+        out.push_str("- Use the skill directory name for `skill_name` when shown below, plus the tool `slug` as `tool_slug`.\n");
+        out.push_str("- Pass `parameters` as a JSON string of CLI-style arguments.\n");
+        out.push_str(
+            "- Do not claim a listed script-backed skill is unavailable because of MCP.\n",
+        );
+        out.push_str("- A tool with `server` but no `script` is MCP-backed metadata only.\n\n");
         for skill in &self.skills {
-            out.push_str(&format!("### {}\n", skill.name));
+            let skill_name = skill_lookup_name(skill);
+            if skill_name == skill.name {
+                out.push_str(&format!("### {}\n", skill.name));
+            } else {
+                out.push_str(&format!("### {} (`{skill_name}`)\n", skill.name));
+            }
             out.push_str(&format!("{}\n", skill.description));
             if !skill.tools.is_empty() {
                 out.push_str("Tools:\n");
                 for tool in &skill.tools {
                     let display_name = tool.name.as_deref().unwrap_or(&tool.slug);
-                    let desc = tool.description.as_deref().unwrap_or("");
-                    out.push_str(&format!("- `{}`: {}\n", display_name, desc));
+                    let desc = tool
+                        .description
+                        .as_deref()
+                        .unwrap_or("No description provided.");
+                    match (tool.script.as_deref(), tool.server.as_deref()) {
+                        (Some(_), _) => {
+                            let mut requirements = Vec::new();
+                            if tool.requires_network {
+                                requirements.push("network");
+                            }
+                            if !matches!(tool.filesystem, FilesystemAccess::None) {
+                                requirements.push(match tool.filesystem {
+                                    FilesystemAccess::ReadOnly => "filesystem:read",
+                                    FilesystemAccess::ReadWrite => "filesystem:write",
+                                    FilesystemAccess::None => unreachable!(),
+                                });
+                            }
+                            let requirement_note = if requirements.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" Requires {}.", requirements.join(" + "))
+                            };
+                            out.push_str(&format!(
+                                "- `{}`: {} Use `local__run_skill` with `skill_name=\"{}\"` and `tool_slug=\"{}\"`.{}\n",
+                                display_name, desc, skill_name, tool.slug, requirement_note
+                            ));
+                        }
+                        (None, Some(server)) => {
+                            out.push_str(&format!(
+                                "- `{}`: {} MCP-backed via server `{server}`; not locally executable.\n",
+                                display_name, desc
+                            ));
+                        }
+                        (None, None) => {
+                            out.push_str(&format!(
+                                "- `{}`: {} Metadata only; no execution backend declared.\n",
+                                display_name, desc
+                            ));
+                        }
+                    }
                 }
             }
             out.push('\n');
@@ -101,6 +158,14 @@ impl SkillRegistry {
         };
         Some((skill, tool))
     }
+}
+
+fn skill_lookup_name(skill: &Skill) -> &str {
+    skill
+        .skill_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(skill.name.as_str())
 }
 
 fn parse_skill_md(path: &Path, skill_dir: PathBuf) -> Result<Skill> {
@@ -169,23 +234,27 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
         return Vec::new();
     };
 
-    // Extract content until next section heading (line starting with non-whitespace followed by ':')
+    // Extract the tool block only. Stop at the next markdown heading or
+    // obvious non-tool prose line, but still allow the documented shorthand
+    // forms such as `slug: script.py` at column 0.
     let tools_text = &body[tools_start..];
     let tools_section: String = tools_text
         .lines()
         .take_while(|line| {
-            // Stop at a line that looks like a new section heading (word followed by colon, no leading whitespace)
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 return true;
             }
-            !(!line.starts_with(' ')
-                && !line.starts_with('\t')
-                && !line.starts_with('-')
-                && line.contains(':')
-                && !line.starts_with("  ")
-                && line.len() < 50
-                && &body[..tools_start] != tools_text)
+
+            if line.starts_with('#') {
+                return false;
+            }
+
+            if line.starts_with(' ') || line.starts_with('\t') || trimmed.starts_with("- ") {
+                return true;
+            }
+
+            trimmed.contains(':') && !trimmed.ends_with(':')
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -219,6 +288,15 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
                             .get("server")
                             .and_then(|v| v.as_str())
                             .map(str::to_string),
+                        requires_network: map
+                            .get("network")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        filesystem: map
+                            .get("filesystem")
+                            .and_then(|v| v.as_str())
+                            .and_then(parse_filesystem_access)
+                            .unwrap_or(FilesystemAccess::None),
                     };
                     tools.push(tool);
                 }
@@ -235,6 +313,8 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
                         description: None,
                         script: Some(s.clone()),
                         server: None,
+                        requires_network: false,
+                        filesystem: FilesystemAccess::None,
                     });
                 }
                 _ => {}
@@ -263,6 +343,8 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
                     description: None,
                     script: Some(script),
                     server: None,
+                    requires_network: false,
+                    filesystem: FilesystemAccess::None,
                 });
             }
         }
@@ -279,8 +361,120 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
                 description: None,
                 script: Some(script.to_string()),
                 server: None,
+                requires_network: false,
+                filesystem: FilesystemAccess::None,
             });
         }
     }
     tools
+}
+
+fn parse_filesystem_access(value: &str) -> Option<FilesystemAccess> {
+    match value {
+        "none" => Some(FilesystemAccess::None),
+        "read" | "read_only" | "readonly" => Some(FilesystemAccess::ReadOnly),
+        "write" | "read_write" | "readwrite" => Some(FilesystemAccess::ReadWrite),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::types::FilesystemAccess;
+
+    use super::{Skill, SkillRegistry, SkillTool, parse_tools_block};
+
+    #[test]
+    fn parses_yaml_tool_list_before_markdown_heading() {
+        let body = "\
+Tools:
+  - name: Fetch Webex Room Messages
+    slug: webex_room_message_fetch
+    description: Fetch all messages from a named Webex room.
+    script: scripts/webex_room_message_fetch.py
+
+## When to use
+
+- Build incident timelines
+";
+
+        let tools = parse_tools_block(body);
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name.as_deref(), Some("Fetch Webex Room Messages"));
+        assert_eq!(tools[0].slug, "webex_room_message_fetch");
+        assert_eq!(
+            tools[0].script.as_deref(),
+            Some("scripts/webex_room_message_fetch.py")
+        );
+        assert!(!tools[0].requires_network);
+        assert_eq!(tools[0].filesystem, FilesystemAccess::None);
+    }
+
+    #[test]
+    fn keeps_column_zero_colon_shorthand() {
+        let body = "\
+Tools:
+retrieve_emails: scripts/retrieve_emails.py
+
+## Output
+";
+
+        let tools = parse_tools_block(body);
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].slug, "retrieve_emails");
+        assert_eq!(
+            tools[0].script.as_deref(),
+            Some("scripts/retrieve_emails.py")
+        );
+    }
+
+    #[test]
+    fn parses_tool_permissions_from_yaml() {
+        let body = "\
+Tools:
+  - name: Fetch Webex Room Messages
+    slug: webex_room_message_fetch
+    script: scripts/webex_room_message_fetch.py
+    network: true
+    filesystem: read_only
+";
+
+        let tools = parse_tools_block(body);
+
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].requires_network);
+        assert_eq!(tools[0].filesystem, FilesystemAccess::ReadOnly);
+    }
+
+    #[test]
+    fn capability_summary_includes_local_skill_invocation_details() {
+        let registry = SkillRegistry {
+            skills: vec![Skill {
+                name: "Webex Room Conversation".to_string(),
+                description: "Fetch Webex room messages.".to_string(),
+                tools: vec![SkillTool {
+                    name: Some("Fetch Webex Room Messages".to_string()),
+                    slug: "webex_room_message_fetch".to_string(),
+                    description: Some("Fetch all room messages for a date interval.".to_string()),
+                    script: Some("scripts/webex_room_message_fetch.py".to_string()),
+                    server: None,
+                    requires_network: true,
+                    filesystem: FilesystemAccess::ReadOnly,
+                }],
+                skill_dir: PathBuf::from("skills/webex-room-conversation"),
+            }],
+        };
+
+        let summary = registry.capability_summary();
+
+        assert!(summary.contains("local__run_skill"));
+        assert!(summary.contains("skill_name=\"webex-room-conversation\""));
+        assert!(summary.contains("tool_slug=\"webex_room_message_fetch\""));
+        assert!(summary.contains("Requires network + filesystem:read"));
+        assert!(summary.contains("Do not claim a listed script-backed skill"));
+    }
 }

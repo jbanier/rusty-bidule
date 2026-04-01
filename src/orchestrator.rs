@@ -14,7 +14,9 @@ use crate::{
     recipes::RecipeRegistry,
     skills::SkillRegistry,
     tool_evidence::ToolEvidenceWriter,
-    types::{MessageMetadata, MessageTiming, ProgressEvent, RunTurnResult, UiEvent},
+    types::{
+        AgentPermissions, MessageMetadata, MessageTiming, ProgressEvent, RunTurnResult, UiEvent,
+    },
 };
 
 const MAX_AGENT_ITERATIONS: usize = 10;
@@ -57,7 +59,7 @@ impl ConversationTurnLocks {
 impl Orchestrator {
     pub fn new(config: AppConfig) -> Result<Self> {
         let data_dir = config.data_dir();
-        let store = ConversationStore::new(&data_dir);
+        let store = ConversationStore::new(&data_dir, config.agent_permissions.clone());
         store.init()?;
         let evidence = ToolEvidenceWriter::new(store.clone());
         let azure = AzureClient::new(&config.azure_openai);
@@ -104,6 +106,19 @@ impl Orchestrator {
 
     pub fn recipes(&self) -> &RecipeRegistry {
         &self.inner.recipes
+    }
+
+    pub fn configured_mcp_server_names(&self) -> Vec<String> {
+        self.inner
+            .config
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect()
+    }
+
+    pub fn default_agent_permissions(&self) -> AgentPermissions {
+        self.inner.config.agent_permissions.clone()
     }
 
     pub async fn login_mcp_server(&self, server_name: &str) -> Result<()> {
@@ -194,6 +209,7 @@ impl Orchestrator {
         // Load conversation to get per-conversation settings
         let conversation = self.inner.store.load(conversation_id)?;
         let enabled_mcp_servers = conversation.enabled_mcp_servers.clone();
+        let agent_permissions = conversation.agent_permissions.clone();
         let pending_recipe_name = conversation.pending_recipe.clone();
 
         // Load recipe if pending
@@ -209,12 +225,17 @@ impl Orchestrator {
             .or(enabled_mcp_servers);
 
         let history = conversation.messages.clone();
-        let (mcp_tools, mcp_error) = {
+        let (mcp_tools, mcp_error) = if agent_permissions.allows_network() {
             let mut manager = self.inner.mcp.lock().await;
             match manager.list_tools_filtered(mcp_filter.as_deref()).await {
                 Ok(tools) => (tools, None),
                 Err(err) => (Vec::new(), Some(err.to_string())),
             }
+        } else {
+            (
+                Vec::new(),
+                Some("Network access is disabled by the active agent permissions.".to_string()),
+            )
         };
 
         if let Some(error) = mcp_error.as_deref() {
@@ -265,6 +286,7 @@ impl Orchestrator {
             } else {
                 Some(capability_summary.as_str())
             },
+            &agent_permissions,
             &self.inner.store,
             conversation_id,
         );
@@ -274,6 +296,7 @@ impl Orchestrator {
             self.inner.store.clone(),
             conversation_id,
             Some(self.inner.skills.clone()),
+            agent_permissions.clone(),
         );
 
         let mut tool_call_count = 0usize;
@@ -369,6 +392,7 @@ impl Orchestrator {
                             &tool_call.name,
                             tool_call.arguments.clone(),
                             &local_executor,
+                            &agent_permissions,
                         )
                         .await;
                     tool_seconds += tool_start.elapsed().as_secs_f64();
@@ -474,6 +498,7 @@ impl Orchestrator {
         tool_name: &str,
         arguments: Value,
         local_executor: &LocalToolExecutor,
+        agent_permissions: &AgentPermissions,
     ) -> Result<String> {
         self.inner.store.append_log(
             conversation_id,
@@ -524,6 +549,24 @@ impl Orchestrator {
                     return Err(anyhow!(failure));
                 }
             }
+        }
+
+        if !agent_permissions.allows_network() {
+            let failure = format!(
+                "permission denied: MCP tool '{tool_name}' requires network access. Enable it with /permissions network on, or use /yolo on."
+            );
+            self.inner.evidence.write_artifact(
+                conversation_id,
+                tool_name,
+                &arguments,
+                "failure",
+                &failure,
+            )?;
+            self.inner.store.append_log(
+                conversation_id,
+                &format!("tool call denied: {} error={}", tool_name, failure),
+            )?;
+            return Err(anyhow!(failure));
         }
 
         let result = {
@@ -601,12 +644,25 @@ fn build_messages(
     mcp_error: Option<&str>,
     recipe_instructions: Option<&str>,
     capability_summary: Option<&str>,
+    agent_permissions: &AgentPermissions,
     store: &ConversationStore,
     conversation_id: &str,
 ) -> Vec<Value> {
     let mut system_prompt = String::from(
-        "You are a CSIRT investigation assistant operating inside an evidence-preserving MCP client. Use tools when needed, stay grounded in tool output, and be explicit about uncertainty or failures.",
+        "You are a CSIRT investigation assistant operating inside an evidence-preserving tool runner with built-in local tools, local skill scripts, and optional MCP servers. Use tools when needed, stay grounded in tool output, and be explicit about uncertainty or failures.",
     );
+    system_prompt.push_str(
+        "\n\nTool execution rules:\n\
+        - Prefer local skill execution when an appropriate listed skill exists.\n\
+        - A listed skill with a local script must be executed via `local__run_skill`.\n\
+        - Never say a listed local skill is unavailable because of MCP; use the local runner first.\n\
+        - Only describe MCP as unavailable when an advertised MCP tool is actually required or a skill explicitly says it is MCP-backed.\n\
+        - Recipes provide prompt guidance and configuration; they are not executable scripts by themselves.",
+    );
+    system_prompt.push_str(&format!(
+        "\n\nActive agent permissions:\n- {}\n",
+        agent_permissions.summary()
+    ));
     if let Some(prompt) = prompt {
         system_prompt.push_str("\n\nOperator prompt:\n");
         system_prompt.push_str(prompt);
@@ -741,13 +797,16 @@ fn json_value_len(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tempfile::tempdir;
     use tokio::time::{Duration, timeout};
 
-    use crate::mcp_runtime::McpTool;
+    use crate::{
+        conversation_store::ConversationStore, mcp_runtime::McpTool, types::AgentPermissions,
+    };
 
     use super::{
-        ConversationTurnLocks, MAX_AZURE_TOOL_COUNT, build_azure_tools, estimate_context_chars,
-        sanitize_azure_tool_schema,
+        ConversationTurnLocks, MAX_AZURE_TOOL_COUNT, build_azure_tools, build_messages,
+        estimate_context_chars, sanitize_azure_tool_schema,
     };
 
     #[test]
@@ -804,6 +863,33 @@ mod tests {
         let sanitized = sanitize_azure_tool_schema(schema);
 
         assert_eq!(sanitized["properties"]["nested"]["properties"], json!({}));
+    }
+
+    #[test]
+    fn build_messages_explains_local_skill_execution_rules() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let permissions = AgentPermissions::default();
+
+        let messages = build_messages(
+            None,
+            &[],
+            None,
+            None,
+            Some("## Available Skills\n"),
+            &permissions,
+            &store,
+            "convo_test",
+        );
+
+        let system_prompt = messages[0]["content"].as_str().unwrap();
+
+        assert!(system_prompt.contains("local__run_skill"));
+        assert!(
+            system_prompt.contains("Never say a listed local skill is unavailable because of MCP")
+        );
+        assert!(system_prompt.contains("Active agent permissions"));
+        assert!(system_prompt.contains("Recipes provide prompt guidance and configuration"));
     }
 
     #[tokio::test]

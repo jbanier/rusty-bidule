@@ -101,7 +101,6 @@ impl McpManager {
         for index in 0..self.servers.len() {
             // Apply server filter if provided
             if let Some(allowed) = filter
-                && !allowed.is_empty()
                 && !allowed.contains(&self.servers[index].config.name)
             {
                 continue;

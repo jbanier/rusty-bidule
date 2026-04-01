@@ -190,6 +190,11 @@ Inside the terminal UI:
 - `/show [id]` — show conversation details
 - `/delete <id>` — delete a conversation
 - `/login <server>` — trigger OAuth login for an MCP server
+- `/mcp` or `/mcp status` — list configured MCP servers and their enabled/disabled state
+- `/mcp reset|enable|disable|only <name...>` — manage the conversation MCP filter
+- `/compact` — compact the current conversation
+- `/recipes` — list available recipes
+- `/recipe use|show|clear ...` — manage recipes for the current conversation
 - `/model` — show model-selection note
 - `/logging` — show logging note
 - `/help` — show command help

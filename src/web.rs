@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::Result;
 use axum::{
     Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -101,10 +101,33 @@ struct ConfigUpdateBody {
     config: AppConfig,
 }
 
+#[derive(Serialize)]
+struct ScratchpadResponse {
+    body: String,
+}
+
+#[derive(Deserialize)]
+struct ScratchpadBody {
+    body: String,
+}
+
+#[derive(Deserialize)]
+struct FindingCreateBody {
+    kind: String,
+    value: String,
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
 // ---------------------------------------------------------------------------
 // Error helper
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
@@ -404,6 +427,89 @@ async fn list_conversation_jobs(
     Ok(axum::Json(json!(jobs)))
 }
 
+async fn get_scratchpad(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let body = state.orchestrator.store().load_scratchpad(&id)?;
+    Ok(axum::Json(serde_json::to_value(ScratchpadResponse {
+        body,
+    })?))
+}
+
+async fn put_scratchpad(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<ScratchpadBody>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    state
+        .orchestrator
+        .store()
+        .save_scratchpad(&id, &body.body)?;
+    Ok(axum::Json(serde_json::to_value(ScratchpadResponse {
+        body: body.body,
+    })?))
+}
+
+async fn list_findings(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let findings = state
+        .orchestrator
+        .store()
+        .load_findings()?
+        .into_iter()
+        .filter(|finding| finding.conversation_id == id)
+        .collect::<Vec<_>>();
+    Ok(axum::Json(serde_json::to_value(findings)?))
+}
+
+async fn create_finding(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<FindingCreateBody>,
+) -> AppResult<(StatusCode, axum::Json<serde_json::Value>)> {
+    validate_resource_id(&id, "conversation")?;
+    let finding = state.orchestrator.store().add_finding(
+        &id,
+        &body.kind,
+        &body.value,
+        body.note.as_deref(),
+    )?;
+    Ok((
+        StatusCode::CREATED,
+        axum::Json(serde_json::to_value(finding)?),
+    ))
+}
+
+async fn delete_finding(
+    State(state): State<WebAppState>,
+    Path(finding_id): Path<String>,
+) -> AppResult<StatusCode> {
+    validate_resource_id(&finding_id, "finding")?;
+    if state.orchestrator.store().remove_finding(&finding_id)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(anyhow::anyhow!("finding '{finding_id}' not found").into())
+    }
+}
+
+async fn search_local(
+    State(state): State<WebAppState>,
+    Query(query): Query<SearchQuery>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    let needle = query.q.trim();
+    if needle.is_empty() {
+        return Err(anyhow::anyhow!("invalid search query").into());
+    }
+    let results = state.orchestrator.store().search_local(needle)?;
+    Ok(axum::Json(serde_json::to_value(results)?))
+}
+
 async fn get_config(State(state): State<WebAppState>) -> AppResult<axum::Json<serde_json::Value>> {
     Ok(axum::Json(serde_json::to_value(
         state.orchestrator.config(),
@@ -527,6 +633,19 @@ pub async fn run_web_server(
                 .delete(delete_mcp_servers),
         )
         .route("/api/conversations/{id}/jobs", get(list_conversation_jobs))
+        .route(
+            "/api/conversations/{id}/scratchpad",
+            get(get_scratchpad).put(put_scratchpad),
+        )
+        .route(
+            "/api/conversations/{id}/findings",
+            get(list_findings).post(create_finding),
+        )
+        .route(
+            "/api/findings/{finding_id}",
+            axum::routing::delete(delete_finding),
+        )
+        .route("/api/search", get(search_local))
         .route("/api/mcp/oauth-servers", get(list_oauth_servers))
         .route(
             "/api/mcp/oauth-servers/{server_name}/start",
@@ -633,7 +752,9 @@ mod tests {
     };
 
     use super::{
-        COMPLETED_JOB_TTL, JobState, PostMessageBody, WebAppState, evict_expired_jobs, post_message,
+        COMPLETED_JOB_TTL, FindingCreateBody, JobState, PostMessageBody, ScratchpadBody,
+        SearchQuery, WebAppState, create_finding, evict_expired_jobs, get_scratchpad,
+        list_findings, post_message, put_scratchpad, search_local,
     };
 
     fn test_config(data_dir: std::path::PathBuf) -> AppConfig {
@@ -722,5 +843,80 @@ mod tests {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         );
         assert!(state.jobs.lock().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scratchpad_round_trip_via_handlers() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let response = put_scratchpad(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+            axum::Json(ScratchpadBody {
+                body: "working note".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0["body"], "working note");
+
+        let response = get_scratchpad(State(state), Path(conversation.conversation_id))
+            .await
+            .unwrap();
+        let value = response.0;
+        assert_eq!(value["body"], "working note");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn findings_and_search_handlers_return_local_state() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        orchestrator
+            .store()
+            .append_message(&conversation.conversation_id, "user", "Tracking 5.6.7.8")
+            .unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let response = create_finding(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+            axum::Json(FindingCreateBody {
+                kind: "ip".to_string(),
+                value: "5.6.7.8".to_string(),
+                note: Some("watchlist".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0, axum::http::StatusCode::CREATED);
+
+        let findings = list_findings(State(state.clone()), Path(conversation.conversation_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(findings.as_array().unwrap().len(), 1);
+
+        let results = search_local(
+            State(state),
+            axum::extract::Query(SearchQuery {
+                q: "5.6.7.8".to_string(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!results.as_array().unwrap().is_empty());
     }
 }

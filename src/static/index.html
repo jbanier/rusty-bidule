@@ -266,7 +266,7 @@
 
   #chat-area {
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
     overflow: hidden;
   }
 
@@ -313,6 +313,176 @@
     font-size: 0.85rem;
     color: var(--accent);
     word-break: break-word;
+  }
+
+  #workbench {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    padding: 18px 24px 0;
+  }
+
+  .tool-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    padding: 16px;
+    border-radius: 20px;
+    background: rgba(9, 17, 29, 0.74);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .tool-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .tool-card h3 {
+    font-size: 0.95rem;
+  }
+
+  .tool-card p {
+    margin-top: 5px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.5;
+  }
+
+  .mini-pill {
+    padding: 5px 9px;
+    border-radius: 999px;
+    background: rgba(103, 232, 249, 0.08);
+    color: var(--accent);
+    font-size: 0.72rem;
+    white-space: nowrap;
+  }
+
+  .tool-card textarea,
+  .tool-card input {
+    width: 100%;
+    background: rgba(4, 10, 19, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    color: var(--text);
+    font: inherit;
+    padding: 11px 12px;
+  }
+
+  .tool-card textarea {
+    min-height: 132px;
+    resize: vertical;
+    line-height: 1.55;
+  }
+
+  .tool-card textarea:focus,
+  .tool-card input:focus {
+    outline: 1px solid rgba(103, 232, 249, 0.28);
+    border-color: rgba(103, 232, 249, 0.22);
+  }
+
+  .inline-fields {
+    display: grid;
+    grid-template-columns: 108px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .tool-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .tool-btn {
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(103, 232, 249, 0.12);
+    border: 1px solid rgba(103, 232, 249, 0.16);
+    color: var(--text);
+    font-size: 0.84rem;
+    font-weight: 600;
+  }
+
+  .tool-btn.secondary {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .tool-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .collection {
+    min-height: 0;
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .collection-empty {
+    padding: 12px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.5;
+  }
+
+  .finding-item,
+  .search-item {
+    padding: 12px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .finding-head,
+  .search-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .finding-kind,
+  .search-scope {
+    color: var(--accent);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .finding-value,
+  .search-title {
+    margin-top: 6px;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.84rem;
+    word-break: break-word;
+  }
+
+  .finding-note,
+  .search-snippet {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .finding-remove {
+    padding: 6px 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--muted);
+    font-size: 0.75rem;
   }
 
   #messages {
@@ -520,6 +690,10 @@
       flex-direction: column;
     }
 
+    #workbench {
+      grid-template-columns: 1fr;
+    }
+
     .context-pill {
       min-width: 0;
       width: 100%;
@@ -538,6 +712,7 @@
 
     .sidebar-top,
     .chat-header,
+    #workbench,
     #messages,
     #input-area {
       padding-left: 16px;
@@ -558,6 +733,10 @@
     .composer-footer {
       flex-direction: column;
       align-items: stretch;
+    }
+
+    .inline-fields {
+      grid-template-columns: 1fr;
     }
 
     #status-bar {
@@ -611,6 +790,57 @@
           <div id="conversation-context" class="value">No conversation selected</div>
         </div>
       </div>
+
+      <section id="workbench">
+        <section class="tool-card">
+          <div class="tool-card-header">
+            <div>
+              <h3>Scratchpad</h3>
+              <p>Conversation-local notes kept on disk outside the live model context.</p>
+            </div>
+            <div class="mini-pill" id="scratchpad-status">idle</div>
+          </div>
+          <textarea id="scratchpad-input" placeholder="Capture hypotheses, pivots, or analyst notes here." oninput="updateWorkspaceState()"></textarea>
+          <div class="tool-actions">
+            <button id="scratchpad-save-btn" class="tool-btn" onclick="saveScratchpad()">Save Notes</button>
+            <button id="scratchpad-clear-btn" class="tool-btn secondary" onclick="clearScratchpad()">Clear</button>
+          </div>
+        </section>
+
+        <section class="tool-card">
+          <div class="tool-card-header">
+            <div>
+              <h3>Findings</h3>
+              <p>Store confirmed indicators or observations for the active conversation.</p>
+            </div>
+            <div class="mini-pill" id="findings-status">0 stored</div>
+          </div>
+          <div class="inline-fields">
+            <input id="finding-kind" placeholder="kind" />
+            <input id="finding-value" placeholder="value" />
+          </div>
+          <input id="finding-note" placeholder="note (optional)" />
+          <div class="tool-actions">
+            <button id="finding-add-btn" class="tool-btn" onclick="addFinding()">Add Finding</button>
+          </div>
+          <div id="findings-list" class="collection"></div>
+        </section>
+
+        <section class="tool-card">
+          <div class="tool-card-header">
+            <div>
+              <h3>Cross-Session Search</h3>
+              <p>Search conversation text, scratchpads, and findings without leaving the browser.</p>
+            </div>
+            <div class="mini-pill" id="search-status">ready</div>
+          </div>
+          <div class="tool-actions">
+            <input id="search-input" placeholder="Search local history" onkeydown="handleSearchKey(event)" />
+            <button id="search-btn" class="tool-btn" onclick="runSearch()">Search</button>
+          </div>
+          <div id="search-results" class="collection"></div>
+        </section>
+      </section>
 
       <div id="messages">
         <div class="empty-state">
@@ -678,10 +908,32 @@ function updateComposerState() {
   send.disabled = !currentConvoId || !input.value.trim() || Boolean(activeJobId);
 }
 
+function updateWorkspaceState() {
+  const hasConversation = Boolean(currentConvoId);
+  document.getElementById('scratchpad-save-btn').disabled = !hasConversation;
+  document.getElementById('scratchpad-clear-btn').disabled = !hasConversation;
+  document.getElementById('scratchpad-input').disabled = !hasConversation;
+  document.getElementById('finding-add-btn').disabled = !hasConversation;
+  document.getElementById('finding-kind').disabled = !hasConversation;
+  document.getElementById('finding-value').disabled = !hasConversation;
+  document.getElementById('finding-note').disabled = !hasConversation;
+  if (!hasConversation) {
+    document.getElementById('scratchpad-status').textContent = 'select thread';
+    document.getElementById('findings-status').textContent = 'select thread';
+  }
+}
+
 function createEmptyState(title, description) {
   const wrapper = document.createElement('div');
   wrapper.className = 'empty-state';
   wrapper.innerHTML = `<div class="empty-icon">+</div><h3>${escHtml(title)}</h3><p>${escHtml(description)}</p>`;
+  return wrapper;
+}
+
+function createCollectionEmptyState(message) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'collection-empty';
+  wrapper.textContent = message;
   return wrapper;
 }
 
@@ -733,6 +985,7 @@ async function loadConversations() {
 
     updateConversationContext();
     updateComposerState();
+    updateWorkspaceState();
   } catch (e) {
     setStatus('Error loading conversations: ' + e.message);
   }
@@ -746,6 +999,7 @@ async function newConversation() {
     persistentWarning = '';
     await loadConversations();
     await loadMessages();
+    await loadWorkspaceData();
     updateComposerState();
     document.getElementById('msg-input').focus();
     setStatus('Conversation ready');
@@ -760,8 +1014,22 @@ async function switchConversation(id) {
   setStatus('Loading conversation...', true);
   await loadConversations();
   await loadMessages();
+  await loadWorkspaceData();
   updateComposerState();
   setStatus('Conversation loaded');
+}
+
+async function loadWorkspaceData() {
+  if (!currentConvoId) {
+    document.getElementById('scratchpad-input').value = '';
+    renderFindings([]);
+    clearSearchResults('Search across local sessions, notes, and findings.');
+    updateWorkspaceState();
+    return;
+  }
+
+  await Promise.all([loadScratchpad(), loadFindings()]);
+  updateWorkspaceState();
 }
 
 async function loadMessages() {
@@ -812,6 +1080,213 @@ function renderMessages(messages) {
   }
 
   container.scrollTop = container.scrollHeight;
+}
+
+async function loadScratchpad() {
+  if (!currentConvoId) return;
+  try {
+    const scratchpad = await api('GET', `/conversations/${currentConvoId}/scratchpad`);
+    document.getElementById('scratchpad-input').value = scratchpad.body || '';
+    document.getElementById('scratchpad-status').textContent = scratchpad.body?.trim() ? 'saved' : 'empty';
+  } catch (e) {
+    document.getElementById('scratchpad-status').textContent = 'error';
+    setStatus('Error loading scratchpad: ' + e.message);
+  }
+}
+
+async function saveScratchpad() {
+  if (!currentConvoId) return;
+  const body = document.getElementById('scratchpad-input').value;
+  document.getElementById('scratchpad-status').textContent = 'saving';
+  try {
+    await api('PUT', `/conversations/${currentConvoId}/scratchpad`, { body });
+    document.getElementById('scratchpad-status').textContent = body.trim() ? 'saved' : 'empty';
+    setStatus('Scratchpad saved');
+  } catch (e) {
+    document.getElementById('scratchpad-status').textContent = 'error';
+    setStatus('Error saving scratchpad: ' + e.message);
+  }
+}
+
+async function clearScratchpad() {
+  if (!currentConvoId) return;
+  document.getElementById('scratchpad-input').value = '';
+  await saveScratchpad();
+}
+
+async function loadFindings() {
+  if (!currentConvoId) return;
+  try {
+    const findings = await api('GET', `/conversations/${currentConvoId}/findings`);
+    renderFindings(findings || []);
+  } catch (e) {
+    document.getElementById('findings-status').textContent = 'error';
+    setStatus('Error loading findings: ' + e.message);
+  }
+}
+
+function renderFindings(findings) {
+  const list = document.getElementById('findings-list');
+  list.innerHTML = '';
+  document.getElementById('findings-status').textContent = currentConvoId
+    ? `${findings.length} stored`
+    : 'select thread';
+
+  if (!currentConvoId) {
+    list.appendChild(createCollectionEmptyState('Select a conversation to view and store findings.'));
+    return;
+  }
+
+  if (!findings.length) {
+    list.appendChild(createCollectionEmptyState('No findings stored for this conversation yet.'));
+    return;
+  }
+
+  for (const finding of findings) {
+    const item = document.createElement('article');
+    item.className = 'finding-item';
+
+    const head = document.createElement('div');
+    head.className = 'finding-head';
+
+    const meta = document.createElement('div');
+    const kind = document.createElement('div');
+    kind.className = 'finding-kind';
+    kind.textContent = finding.kind;
+    const value = document.createElement('div');
+    value.className = 'finding-value';
+    value.textContent = finding.value;
+    meta.appendChild(kind);
+    meta.appendChild(value);
+
+    const remove = document.createElement('button');
+    remove.className = 'finding-remove';
+    remove.textContent = 'Remove';
+    remove.onclick = () => removeFinding(finding.finding_id);
+
+    head.appendChild(meta);
+    head.appendChild(remove);
+    item.appendChild(head);
+
+    if (finding.note) {
+      const note = document.createElement('div');
+      note.className = 'finding-note';
+      note.textContent = finding.note;
+      item.appendChild(note);
+    }
+
+    list.appendChild(item);
+  }
+}
+
+async function addFinding() {
+  if (!currentConvoId) return;
+  const kindInput = document.getElementById('finding-kind');
+  const valueInput = document.getElementById('finding-value');
+  const noteInput = document.getElementById('finding-note');
+  const kind = kindInput.value.trim();
+  const value = valueInput.value.trim();
+  const note = noteInput.value.trim();
+
+  if (!kind || !value) {
+    setStatus('Error: finding kind and value are required');
+    return;
+  }
+
+  try {
+    await api('POST', `/conversations/${currentConvoId}/findings`, {
+      kind,
+      value,
+      note: note || undefined,
+    });
+    kindInput.value = '';
+    valueInput.value = '';
+    noteInput.value = '';
+    await loadFindings();
+    setStatus('Finding stored');
+  } catch (e) {
+    setStatus('Error storing finding: ' + e.message);
+  }
+}
+
+async function removeFinding(findingId) {
+  try {
+    await api('DELETE', `/findings/${findingId}`);
+    await loadFindings();
+    setStatus('Finding removed');
+  } catch (e) {
+    setStatus('Error removing finding: ' + e.message);
+  }
+}
+
+function handleSearchKey(event) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    runSearch();
+  }
+}
+
+function clearSearchResults(message) {
+  const results = document.getElementById('search-results');
+  results.innerHTML = '';
+  results.appendChild(createCollectionEmptyState(message));
+  document.getElementById('search-status').textContent = 'ready';
+}
+
+async function runSearch() {
+  const input = document.getElementById('search-input');
+  const query = input.value.trim();
+  if (!query) {
+    clearSearchResults('Enter a query to search local conversations, notes, and findings.');
+    return;
+  }
+
+  document.getElementById('search-status').textContent = 'searching';
+  try {
+    const results = await api('GET', `/search?q=${encodeURIComponent(query)}`);
+    renderSearchResults(results || [], query);
+  } catch (e) {
+    document.getElementById('search-status').textContent = 'error';
+    setStatus('Error running search: ' + e.message);
+  }
+}
+
+function renderSearchResults(results, query) {
+  const container = document.getElementById('search-results');
+  container.innerHTML = '';
+  document.getElementById('search-status').textContent = `${results.length} hits`;
+
+  if (!results.length) {
+    container.appendChild(createCollectionEmptyState(`No local matches for "${query}".`));
+    return;
+  }
+
+  for (const result of results.slice(0, 20)) {
+    const item = document.createElement('article');
+    item.className = 'search-item';
+
+    const head = document.createElement('div');
+    head.className = 'search-head';
+
+    const scope = document.createElement('div');
+    scope.className = 'search-scope';
+    scope.textContent = result.scope;
+
+    const title = document.createElement('div');
+    title.className = 'search-title';
+    title.textContent = result.title;
+
+    head.appendChild(scope);
+    head.appendChild(title);
+
+    const snippet = document.createElement('div');
+    snippet.className = 'search-snippet';
+    snippet.textContent = result.snippet;
+
+    item.appendChild(head);
+    item.appendChild(snippet);
+    container.appendChild(item);
+  }
 }
 
 function escHtml(s) {
@@ -873,6 +1348,7 @@ async function pollJob(jobId) {
     if (job.status === 'done') {
       const toolInfo = job.result ? `${job.result.tool_calls} tool calls` : 'No tool calls';
       setStatus(persistentWarning || `Done. ${toolInfo}`);
+      await loadWorkspaceData();
     } else {
       setStatus('Error: ' + (job.error || 'unknown error'));
     }
@@ -885,6 +1361,8 @@ async function pollJob(jobId) {
 
 updateConversationContext();
 updateComposerState();
+updateWorkspaceState();
+clearSearchResults('Search across local sessions, notes, and findings.');
 loadConversations().then(() => setStatus('Ready'));
 </script>
 </body>

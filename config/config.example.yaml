@@ -19,6 +19,9 @@ agent_permissions:
   filesystem: read_only
   yolo: false
 
+local_tools:
+  execution_timeout_seconds: 180
+
 mcp_runtime:
   connect_timeout_seconds: 15
 

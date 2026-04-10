@@ -71,7 +71,10 @@ impl OAuthProvider {
         &self,
         server: &McpServerConfig,
     ) -> Result<Option<OAuthAuthorization>> {
-        let Some(McpAuthConfig::OauthPublic(auth)) = &server.auth else {
+        let Some(auth) = &server.auth else {
+            return Ok(None);
+        };
+        let McpAuthConfig::OauthPublic(auth) = auth else {
             return Ok(None);
         };
         debug!(server = %server.name, "authorizing MCP server through OAuth");
@@ -97,6 +100,26 @@ impl OAuthProvider {
         let token = self.run_authorization_code_flow(server, auth).await?;
         self.save_token(&server.name, &token)?;
         info!(server = %server.name, "completed OAuth authorization flow");
+        Ok(Some(OAuthAuthorization {
+            access_token: token.access_token,
+        }))
+    }
+
+    pub async fn authorize_server_forced(
+        &self,
+        server: &McpServerConfig,
+    ) -> Result<Option<OAuthAuthorization>> {
+        let Some(auth) = &server.auth else {
+            return Ok(None);
+        };
+        let McpAuthConfig::OauthPublic(auth) = auth else {
+            return Ok(None);
+        };
+        debug!(server = %server.name, "forcing MCP OAuth authorization");
+
+        let token = self.run_authorization_code_flow(server, auth).await?;
+        self.save_token(&server.name, &token)?;
+        info!(server = %server.name, "completed forced OAuth authorization flow");
         Ok(Some(OAuthAuthorization {
             access_token: token.access_token,
         }))
@@ -274,6 +297,16 @@ impl OAuthProvider {
         &self,
         server: &McpServerConfig,
     ) -> Result<AuthorizationServerMetadata> {
+        if let Some(McpAuthConfig::OauthPublic(auth)) = &server.auth
+            && auth.authorization_endpoint.is_some()
+            && auth.token_endpoint.is_some()
+        {
+            return Ok(AuthorizationServerMetadata {
+                authorization_endpoint: auth.authorization_endpoint.clone().unwrap_or_default(),
+                token_endpoint: auth.token_endpoint.clone().unwrap_or_default(),
+                registration_endpoint: auth.registration_endpoint.clone(),
+            });
+        }
         let server_url = Url::parse(&server.url)
             .with_context(|| format!("invalid MCP server URL {}", server.url))?;
         let metadata_url = server_url
@@ -326,7 +359,7 @@ impl OAuthProvider {
         })?;
         let redirect_uri = resolve_redirect_uri(auth)?;
         let payload = json!({
-            "client_name": format!("rusty-bidule-{}", server.name),
+            "client_name": auth.client_name.clone().unwrap_or_else(|| format!("rusty-bidule-{}", server.name)),
             "redirect_uris": [redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -576,7 +609,15 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let payload = serde_json::to_string_pretty(value)?;
-    fs::write(path, payload).with_context(|| format!("failed to write {}", path.display()))
+    fs::write(path, payload).with_context(|| format!("failed to write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

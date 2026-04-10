@@ -5,17 +5,19 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::types::AgentPermissions;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub prompt: Option<String>,
     pub data_dir: Option<PathBuf>,
-    pub azure_openai: AzureOpenAiConfig,
+    pub azure_openai: Option<AzureOpenAiConfig>,
     #[serde(default)]
     pub agent_permissions: AgentPermissions,
+    #[serde(default)]
+    pub local_tools: LocalToolsConfig,
     #[serde(default)]
     pub mcp_runtime: McpRuntimeConfig,
     #[serde(default)]
@@ -24,13 +26,15 @@ pub struct AppConfig {
     pub tracing: Option<TracingConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct TracingConfig {
     #[serde(default)]
     pub provider: TracingProvider,
+    pub phoenix_endpoint: Option<String>,
+    pub phoenix_project: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TracingProvider {
     #[default]
@@ -39,7 +43,7 @@ pub enum TracingProvider {
     Phoenix,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AzureOpenAiConfig {
     pub api_key: String,
     pub api_version: String,
@@ -53,13 +57,31 @@ pub struct AzureOpenAiConfig {
     pub max_output_tokens: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpRuntimeConfig {
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_seconds: u64,
+    #[serde(default = "default_cleanup_timeout")]
+    pub cleanup_timeout_seconds: u64,
+    #[serde(default)]
+    pub connect_in_parallel: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LocalToolsConfig {
+    #[serde(default = "default_local_tool_execution_timeout_seconds")]
+    pub execution_timeout_seconds: u64,
+}
+
+impl Default for LocalToolsConfig {
+    fn default() -> Self {
+        Self {
+            execution_timeout_seconds: default_local_tool_execution_timeout_seconds(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
     pub name: String,
     pub transport: String,
@@ -72,13 +94,14 @@ pub struct McpServerConfig {
     pub auth: Option<McpAuthConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpAuthConfig {
-    OauthPublic(McpOauthPublicConfig),
+    OauthPublic(Box<McpOauthPublicConfig>),
+    StaticHeaders(McpStaticHeadersConfig),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpOauthPublicConfig {
     #[serde(default)]
     pub scopes: Vec<String>,
@@ -97,6 +120,16 @@ pub struct McpOauthPublicConfig {
     pub open_browser: bool,
     #[serde(default)]
     pub use_dynamic_client_registration: bool,
+    pub client_name: Option<String>,
+    pub authorization_endpoint: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub registration_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpStaticHeadersConfig {
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 impl AppConfig {
@@ -118,23 +151,43 @@ impl AppConfig {
     }
 
     fn resolve_secrets(&mut self) -> Result<()> {
-        self.azure_openai.api_key = resolve_value(&self.azure_openai.api_key)?;
-        self.azure_openai.endpoint = resolve_value(&self.azure_openai.endpoint)?;
+        if let Some(azure_openai) = &mut self.azure_openai {
+            azure_openai.api_key = resolve_value(&azure_openai.api_key)?;
+            azure_openai.endpoint = resolve_value(&azure_openai.endpoint)?;
+        }
         for server in &mut self.mcp_servers {
             server.url = resolve_value(&server.url)?;
             for value in server.headers.values_mut() {
                 *value = resolve_value(value)?;
             }
-            if let Some(McpAuthConfig::OauthPublic(auth)) = &mut server.auth {
-                if let Some(client_id) = &mut auth.client_id {
-                    *client_id = resolve_value(client_id)?;
-                }
-                if let Some(client_secret) = &mut auth.client_secret {
-                    *client_secret = resolve_value(client_secret)?;
-                }
-                auth.redirect_uri = resolve_value(&auth.redirect_uri)?;
-                if let Some(resource) = &mut auth.resource {
-                    *resource = resolve_value(resource)?;
+            if let Some(auth) = &mut server.auth {
+                match auth {
+                    McpAuthConfig::OauthPublic(auth) => {
+                        if let Some(client_id) = &mut auth.client_id {
+                            *client_id = resolve_value(client_id)?;
+                        }
+                        if let Some(client_secret) = &mut auth.client_secret {
+                            *client_secret = resolve_value(client_secret)?;
+                        }
+                        auth.redirect_uri = resolve_value(&auth.redirect_uri)?;
+                        if let Some(resource) = &mut auth.resource {
+                            *resource = resolve_value(resource)?;
+                        }
+                        if let Some(endpoint) = &mut auth.authorization_endpoint {
+                            *endpoint = resolve_value(endpoint)?;
+                        }
+                        if let Some(endpoint) = &mut auth.token_endpoint {
+                            *endpoint = resolve_value(endpoint)?;
+                        }
+                        if let Some(endpoint) = &mut auth.registration_endpoint {
+                            *endpoint = resolve_value(endpoint)?;
+                        }
+                    }
+                    McpAuthConfig::StaticHeaders(static_headers) => {
+                        for value in static_headers.headers.values_mut() {
+                            *value = resolve_value(value)?;
+                        }
+                    }
                 }
             }
         }
@@ -142,17 +195,19 @@ impl AppConfig {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.azure_openai.api_key.trim().is_empty() {
-            bail!("azure_openai.api_key must not be empty");
-        }
-        if self.azure_openai.endpoint.trim().is_empty() {
-            bail!("azure_openai.endpoint must not be empty");
-        }
-        if self.azure_openai.deployment.trim().is_empty() {
-            bail!("azure_openai.deployment must not be empty");
-        }
-        if self.azure_openai.api_version.trim().is_empty() {
-            bail!("azure_openai.api_version must not be empty");
+        if let Some(azure_openai) = &self.azure_openai {
+            if azure_openai.api_key.trim().is_empty() {
+                bail!("azure_openai.api_key must not be empty");
+            }
+            if azure_openai.endpoint.trim().is_empty() {
+                bail!("azure_openai.endpoint must not be empty");
+            }
+            if azure_openai.deployment.trim().is_empty() {
+                bail!("azure_openai.deployment must not be empty");
+            }
+            if azure_openai.api_version.trim().is_empty() {
+                bail!("azure_openai.api_version must not be empty");
+            }
         }
         for server in &self.mcp_servers {
             if server.transport != "streamable_http" && server.transport != "sse" {
@@ -165,25 +220,38 @@ impl AppConfig {
             if server.url.trim().is_empty() {
                 bail!("mcp_servers[].url must not be empty");
             }
-            if let Some(McpAuthConfig::OauthPublic(auth)) = &server.auth {
-                if auth.redirect_uri.trim().is_empty() {
-                    bail!("mcp_servers[].auth.redirect_uri must not be empty");
-                }
-                if auth.use_dynamic_client_registration
-                    && auth.token_endpoint_auth_method.trim().is_empty()
-                {
-                    bail!(
-                        "mcp_servers[].auth.token_endpoint_auth_method must not be empty when dynamic registration is enabled"
-                    );
-                }
-                if !auth.use_dynamic_client_registration && auth.client_id.is_none() {
-                    bail!(
-                        "mcp_servers[].auth.client_id is required when dynamic registration is disabled"
-                    );
+            if let Some(auth) = &server.auth {
+                match auth {
+                    McpAuthConfig::OauthPublic(auth) => {
+                        if auth.redirect_uri.trim().is_empty() {
+                            bail!("mcp_servers[].auth.redirect_uri must not be empty");
+                        }
+                        if auth.use_dynamic_client_registration
+                            && auth.token_endpoint_auth_method.trim().is_empty()
+                        {
+                            bail!(
+                                "mcp_servers[].auth.token_endpoint_auth_method must not be empty when dynamic registration is enabled"
+                            );
+                        }
+                        if !auth.use_dynamic_client_registration && auth.client_id.is_none() {
+                            bail!(
+                                "mcp_servers[].auth.client_id is required when dynamic registration is disabled"
+                            );
+                        }
+                    }
+                    McpAuthConfig::StaticHeaders(_) => {}
                 }
             }
         }
         Ok(())
+    }
+
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let payload =
+            serde_yaml::to_string(self).context("failed to serialize YAML configuration")?;
+        fs::write(path, payload)
+            .with_context(|| format!("failed to write config file {}", path.display()))
     }
 }
 
@@ -215,6 +283,14 @@ const fn default_max_output_tokens() -> u32 {
 
 const fn default_connect_timeout() -> u64 {
     15
+}
+
+const fn default_cleanup_timeout() -> u64 {
+    10
+}
+
+const fn default_local_tool_execution_timeout_seconds() -> u64 {
+    180
 }
 
 fn default_token_endpoint_auth_method() -> String {
@@ -264,7 +340,11 @@ mcp_servers:
         .unwrap();
 
         let config = AppConfig::load(&path).unwrap();
-        assert_eq!(config.azure_openai.api_key, "super-secret");
+        assert_eq!(
+            config.azure_openai.as_ref().map(|cfg| cfg.api_key.as_str()),
+            Some("super-secret")
+        );
+        assert_eq!(config.local_tools.execution_timeout_seconds, 180);
     }
 
     #[test]
@@ -286,6 +366,7 @@ mcp_servers: []
 
         let config = AppConfig::load(&path).unwrap();
         assert!(config.mcp_servers.is_empty());
+        assert_eq!(config.local_tools.execution_timeout_seconds, 180);
     }
 
     #[test]
@@ -306,6 +387,29 @@ azure_openai:
 
         let config = AppConfig::load(&path).unwrap();
         assert!(config.mcp_servers.is_empty());
+        assert_eq!(config.local_tools.execution_timeout_seconds, 180);
+    }
+
+    #[test]
+    fn parses_local_tool_timeout_override() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+local_tools:
+  execution_timeout_seconds: 240
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(config.local_tools.execution_timeout_seconds, 240);
     }
 
     #[test]

@@ -32,6 +32,11 @@ pub struct AzureCompletion {
 
 #[derive(Debug, Clone)]
 pub struct AzureClient {
+    enabled: Option<AzureClientEnabled>,
+}
+
+#[derive(Debug, Clone)]
+struct AzureClientEnabled {
     client: Client<AzureConfig>,
     endpoint: String,
     deployment: String,
@@ -42,7 +47,10 @@ pub struct AzureClient {
 }
 
 impl AzureClient {
-    pub fn new(config: &AzureOpenAiConfig) -> Self {
+    pub fn new(config: Option<&AzureOpenAiConfig>) -> Self {
+        let Some(config) = config else {
+            return Self { enabled: None };
+        };
         let endpoint = config.endpoint.trim_end_matches('/').to_string();
         let client = Client::with_config(
             AzureConfig::new()
@@ -53,13 +61,15 @@ impl AzureClient {
         );
 
         Self {
-            client,
-            endpoint,
-            deployment: config.deployment.clone(),
-            api_version: config.api_version.clone(),
-            temperature: config.temperature,
-            top_p: config.top_p,
-            max_output_tokens: config.max_output_tokens,
+            enabled: Some(AzureClientEnabled {
+                client,
+                endpoint,
+                deployment: config.deployment.clone(),
+                api_version: config.api_version.clone(),
+                temperature: config.temperature,
+                top_p: config.top_p,
+                max_output_tokens: config.max_output_tokens,
+            }),
         }
     }
 
@@ -68,24 +78,29 @@ impl AzureClient {
         messages: &[Value],
         tools: &[AzureTool],
     ) -> Result<AzureCompletion> {
+        let Some(enabled) = &self.enabled else {
+            return Err(anyhow!(
+                "Azure OpenAI is not configured. Add an azure_openai block to enable inference."
+            ));
+        };
         let body = build_chat_request_body(
             messages,
             tools,
-            self.temperature,
-            self.top_p,
-            self.max_output_tokens,
+            enabled.temperature,
+            enabled.top_p,
+            enabled.max_output_tokens,
         );
 
         debug!(
-            endpoint = %self.endpoint,
-            deployment = %self.deployment,
-            api_version = %self.api_version,
+            endpoint = %enabled.endpoint,
+            deployment = %enabled.deployment,
+            api_version = %enabled.api_version,
             message_count = messages.len(),
             tool_count = tools.len(),
             "sending Azure OpenAI chat completion request"
         );
 
-        let payload: Value = match self.client.chat().create_byot(&body).await {
+        let payload: Value = match enabled.client.chat().create_byot(&body).await {
             Ok(payload) => payload,
             Err(err) => return Err(self.log_and_wrap_error(err)),
         };
@@ -94,21 +109,24 @@ impl AzureClient {
     }
 
     fn log_and_wrap_error(&self, err: OpenAIError) -> anyhow::Error {
+        let Some(enabled) = &self.enabled else {
+            return anyhow!("Azure OpenAI is not configured");
+        };
         match err {
             OpenAIError::ApiError(api_error) => {
                 log_api_error(
-                    &self.endpoint,
-                    &self.deployment,
-                    &self.api_version,
+                    &enabled.endpoint,
+                    &enabled.deployment,
+                    &enabled.api_version,
                     &api_error,
                 );
                 anyhow!("Azure OpenAI request failed: {api_error}")
             }
             OpenAIError::JSONDeserialize(deserialize_error, body) => {
                 error!(
-                    endpoint = %self.endpoint,
-                    deployment = %self.deployment,
-                    api_version = %self.api_version,
+                    endpoint = %enabled.endpoint,
+                    deployment = %enabled.deployment,
+                    api_version = %enabled.api_version,
                     deserialize_error = %deserialize_error,
                     response_body = %truncate_for_log(&body),
                     "Azure OpenAI response parse failed"
@@ -120,9 +138,9 @@ impl AzureClient {
             }
             OpenAIError::Reqwest(reqwest_error) => {
                 error!(
-                    endpoint = %self.endpoint,
-                    deployment = %self.deployment,
-                    api_version = %self.api_version,
+                    endpoint = %enabled.endpoint,
+                    deployment = %enabled.deployment,
+                    api_version = %enabled.api_version,
                     error = %reqwest_error,
                     "failed to reach Azure OpenAI endpoint"
                 );
@@ -130,9 +148,9 @@ impl AzureClient {
             }
             other => {
                 error!(
-                    endpoint = %self.endpoint,
-                    deployment = %self.deployment,
-                    api_version = %self.api_version,
+                    endpoint = %enabled.endpoint,
+                    deployment = %enabled.deployment,
+                    api_version = %enabled.api_version,
                     error = %other,
                     "Azure OpenAI request failed"
                 );

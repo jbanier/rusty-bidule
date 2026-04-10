@@ -11,11 +11,13 @@ use crate::{
     conversation_store::ConversationStore,
     local_tools::{LocalToolExecutor, local_tool_definitions},
     mcp_runtime::{McpManager, McpTool},
+    paths::discover_project_root,
     recipes::RecipeRegistry,
     skills::SkillRegistry,
     tool_evidence::ToolEvidenceWriter,
     types::{
-        AgentPermissions, MessageMetadata, MessageTiming, ProgressEvent, RunTurnResult, UiEvent,
+        AgentPermissions, MessageMetadata, MessageTiming, ProgressEvent, RememberedJob,
+        RunTurnResult, UiEvent,
     },
 };
 
@@ -36,6 +38,30 @@ struct OrchestratorInner {
     conversation_locks: ConversationTurnLocks,
     skills: SkillRegistry,
     recipes: RecipeRegistry,
+}
+
+struct FinishTurnContext<'a> {
+    conversation_id: &'a str,
+    final_reply: &'a str,
+    turn_start: std::time::Instant,
+    tool_seconds: f64,
+    llm_seconds: f64,
+    tool_call_count: usize,
+    automation: bool,
+    recipe: Option<&'a crate::recipes::Recipe>,
+    ui_tx: &'a UnboundedSender<UiEvent>,
+}
+
+struct MessageBuildContext<'a> {
+    prompt: Option<&'a str>,
+    history: &'a [crate::types::Message],
+    mcp_error: Option<&'a str>,
+    recipe_instructions: Option<&'a str>,
+    capability_summary: Option<&'a str>,
+    agent_permissions: &'a AgentPermissions,
+    store: &'a ConversationStore,
+    conversation_id: &'a str,
+    user_message_override: Option<&'a str>,
 }
 
 #[derive(Default)]
@@ -62,7 +88,7 @@ impl Orchestrator {
         let store = ConversationStore::new(&data_dir, config.agent_permissions.clone());
         store.init()?;
         let evidence = ToolEvidenceWriter::new(store.clone());
-        let azure = AzureClient::new(&config.azure_openai);
+        let azure = AzureClient::new(config.azure_openai.as_ref());
         let mcp = McpManager::new(
             &data_dir,
             config.mcp_runtime.clone(),
@@ -121,6 +147,23 @@ impl Orchestrator {
         self.inner.config.agent_permissions.clone()
     }
 
+    pub fn config(&self) -> AppConfig {
+        self.inner.config.clone()
+    }
+
+    pub async fn mcp_tool_counts_by_server(
+        &self,
+        filter: Option<&[String]>,
+    ) -> Result<HashMap<String, usize>> {
+        let mut manager = self.inner.mcp.lock().await;
+        let tools = manager.list_tools_filtered(filter).await?;
+        let mut counts = HashMap::new();
+        for tool in tools {
+            *counts.entry(tool.server_name).or_insert(0) += 1;
+        }
+        Ok(counts)
+    }
+
     pub async fn login_mcp_server(&self, server_name: &str) -> Result<()> {
         info!(server = server_name, "triggering MCP OAuth login");
         let mut manager = self.inner.mcp.lock().await;
@@ -156,17 +199,13 @@ impl Orchestrator {
                 .map(|m| json!({"role": m.role, "content": m.content})),
         );
 
-        let completion = self
-            .inner
-            .azure
-            .chat_completion(&messages, &[])
-            .await
-            .context("compaction LLM call failed")?;
-
-        let summary = completion
-            .assistant_text
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "Summary unavailable.".to_string());
+        let summary = match self.inner.azure.chat_completion(&messages, &[]).await {
+            Ok(completion) => completion
+                .assistant_text
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Summary unavailable.".to_string()),
+            Err(_) => fallback_compaction_summary(&conversation),
+        };
 
         let timestamp = chrono::Utc::now().timestamp();
         let checkpoint_id = format!("compact-{timestamp}");
@@ -191,24 +230,65 @@ impl Orchestrator {
         user_message: String,
         ui_tx: UnboundedSender<UiEvent>,
     ) -> Result<RunTurnResult> {
+        self.run_turn_internal(conversation_id, Some(user_message), ui_tx, false)
+            .await
+    }
+
+    pub async fn run_automation_turn(
+        &self,
+        conversation_id: &str,
+        job: &RememberedJob,
+        ui_tx: UnboundedSender<UiEvent>,
+    ) -> Result<RunTurnResult> {
+        let prompt = build_automation_prompt(job);
+        self.run_turn_internal(conversation_id, Some(prompt), ui_tx, true)
+            .await
+    }
+
+    async fn run_turn_internal(
+        &self,
+        conversation_id: &str,
+        user_message: Option<String>,
+        ui_tx: UnboundedSender<UiEvent>,
+        automation: bool,
+    ) -> Result<RunTurnResult> {
         let _conversation_guard = self.acquire_conversation_lock(conversation_id).await;
         let turn_start = std::time::Instant::now();
         let mut tool_seconds: f64 = 0.0;
         let mut llm_seconds: f64 = 0.0;
 
         info!(%conversation_id, "starting conversation turn");
-        self.emit(&ui_tx, "turn_started", "Recording user message", None, None);
-        self.inner
-            .store
-            .append_message(conversation_id, "user", &user_message)?;
-        self.inner.store.append_log(
-            conversation_id,
-            &format!("user message received: {}", user_message.replace('\n', " ")),
-        )?;
+        self.emit(
+            &ui_tx,
+            "turn_started",
+            if automation {
+                "Running automation turn"
+            } else {
+                "Recording user message"
+            },
+            None,
+            None,
+        );
+        if let Some(user_message) = user_message.as_deref() {
+            if !automation {
+                self.inner
+                    .store
+                    .append_message(conversation_id, "user", user_message)?;
+            }
+            self.inner.store.append_log(
+                conversation_id,
+                &format!(
+                    "{} message received: {}",
+                    if automation { "automation" } else { "user" },
+                    user_message.replace('\n', " ")
+                ),
+            )?;
+        }
 
         // Load conversation to get per-conversation settings
         let conversation = self.inner.store.load(conversation_id)?;
         let enabled_mcp_servers = conversation.enabled_mcp_servers.clone();
+        let enabled_local_tools = conversation.enabled_local_tools.clone();
         let agent_permissions = conversation.agent_permissions.clone();
         let pending_recipe_name = conversation.pending_recipe.clone();
 
@@ -223,6 +303,10 @@ impl Orchestrator {
             .as_ref()
             .and_then(|r| r.config_mcp_servers.clone())
             .or(enabled_mcp_servers);
+        let local_tool_filter: Option<Vec<String>> = recipe
+            .as_ref()
+            .and_then(|r| r.config_local_tools.clone())
+            .or(enabled_local_tools);
 
         let history = conversation.messages.clone();
         let (mcp_tools, mcp_error) = if agent_permissions.allows_network() {
@@ -246,7 +330,7 @@ impl Orchestrator {
         }
 
         // Build local tool definitions
-        let local_defs = local_tool_definitions();
+        let local_defs = local_tool_definitions(local_tool_filter.as_deref());
         let local_count = local_defs.len().min(MAX_AZURE_TOOL_COUNT);
 
         let (azure_tools, omitted_tool_count) =
@@ -264,9 +348,9 @@ impl Orchestrator {
                 &ui_tx,
                 "tool_limit",
                 &format!(
-                    "Azure tool limit reached: advertising {} of {} tools",
+                    "Azure tool limit reached: advertising {} of {} tools. Disable one or more MCP servers with /mcp disable <name> or /mcp only <name...>.",
                     azure_tools.len(),
-                    mcp_tools.len() + local_count
+                    mcp_tools.len() + local_count,
                 ),
                 None,
                 None,
@@ -276,20 +360,25 @@ impl Orchestrator {
         // Skills capability summary
         let capability_summary = self.inner.skills.capability_summary();
 
-        let mut messages = build_messages(
-            self.inner.config.prompt.as_deref(),
-            &history,
-            mcp_error.as_deref(),
-            recipe.as_ref().map(|r| r.instructions.as_str()),
-            if capability_summary.is_empty() {
+        let mut messages = build_messages(MessageBuildContext {
+            prompt: self.inner.config.prompt.as_deref(),
+            history: &history,
+            mcp_error: mcp_error.as_deref(),
+            recipe_instructions: recipe.as_ref().map(|r| r.instructions.as_str()),
+            capability_summary: if capability_summary.is_empty() {
                 None
             } else {
                 Some(capability_summary.as_str())
             },
-            &agent_permissions,
-            &self.inner.store,
+            agent_permissions: &agent_permissions,
+            store: &self.inner.store,
             conversation_id,
-        );
+            user_message_override: if automation {
+                user_message.as_deref()
+            } else {
+                None
+            },
+        });
 
         // Create local tool executor
         let local_executor = LocalToolExecutor::new(
@@ -297,6 +386,8 @@ impl Orchestrator {
             conversation_id,
             Some(self.inner.skills.clone()),
             agent_permissions.clone(),
+            local_tool_filter.clone(),
+            std::time::Duration::from_secs(self.inner.config.local_tools.execution_timeout_seconds),
         );
 
         let mut tool_call_count = 0usize;
@@ -342,12 +433,27 @@ impl Orchestrator {
             {
                 Ok(completion) => completion,
                 Err(err) => {
-                    error!(
-                        %conversation_id,
-                        iteration,
-                        error = %err,
-                        "Azure completion failed"
-                    );
+                    if iteration == 0 {
+                        let reply = if automation {
+                            format!("Automation deferred: {err}")
+                        } else {
+                            format!("Azure inference unavailable: {err}")
+                        };
+                        return self
+                            .finish_turn(FinishTurnContext {
+                                conversation_id,
+                                final_reply: &reply,
+                                turn_start,
+                                tool_seconds,
+                                llm_seconds,
+                                tool_call_count,
+                                automation,
+                                recipe: recipe.as_ref(),
+                                ui_tx: &ui_tx,
+                            })
+                            .await;
+                    }
+                    error!(%conversation_id, iteration, error = %err, "Azure completion failed");
                     return Err(err).context("Azure completion failed");
                 }
             };
@@ -430,66 +536,83 @@ impl Orchestrator {
             } else {
                 reply.clone()
             };
-
-            // Count existing assistant messages for 1-based index
-            let assistant_index = {
-                let convo = self.inner.store.load(conversation_id)?;
-                convo
-                    .messages
-                    .iter()
-                    .filter(|m| m.role == "assistant")
-                    .count()
-                    + 1
-            };
-
-            let total_seconds = turn_start.elapsed().as_secs_f64();
-            let metadata = MessageMetadata {
-                assistant_index,
-                timing: MessageTiming {
+            return self
+                .finish_turn(FinishTurnContext {
+                    conversation_id,
+                    final_reply: &final_reply,
+                    turn_start,
                     tool_seconds,
                     llm_seconds,
-                    total_seconds,
-                },
-                tool_call_count,
-            };
-
-            self.inner.store.append_message_with_metadata(
-                conversation_id,
-                "assistant",
-                &final_reply,
-                Some(metadata),
-            )?;
-            self.inner.store.append_log(
-                conversation_id,
-                &format!("assistant reply stored ({} chars)", final_reply.len()),
-            )?;
-            info!(
-                %conversation_id,
-                tool_call_count,
-                reply_len = final_reply.len(),
-                total_seconds,
-                "conversation turn finished"
-            );
-            self.emit(
-                &ui_tx,
-                "turn_finished",
-                &format!(
-                    "Assistant #{}  [tools: {:.1}s  llm: {:.1}s]",
-                    assistant_index, tool_seconds, llm_seconds
-                ),
-                None,
-                Some(tool_call_count),
-            );
-            return Ok(RunTurnResult {
-                reply: final_reply,
-                tool_calls: tool_call_count,
-            });
+                    tool_call_count,
+                    automation,
+                    recipe: recipe.as_ref(),
+                    ui_tx: &ui_tx,
+                })
+                .await;
         }
 
         bail!(
             "agent exceeded the {}-iteration safety limit",
             MAX_AGENT_ITERATIONS
         )
+    }
+
+    async fn finish_turn(&self, ctx: FinishTurnContext<'_>) -> Result<RunTurnResult> {
+        let mut convo = self.inner.store.load(ctx.conversation_id)?;
+        let assistant_index = convo
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .count()
+            + 1;
+        let total_seconds = ctx.turn_start.elapsed().as_secs_f64();
+        let metadata = MessageMetadata {
+            assistant_index,
+            timing: MessageTiming {
+                tool_seconds: ctx.tool_seconds,
+                llm_seconds: ctx.llm_seconds,
+                total_seconds,
+            },
+            tool_call_count: ctx.tool_call_count,
+        };
+
+        convo.messages.push(crate::types::Message {
+            role: "assistant".to_string(),
+            content: ctx.final_reply.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: Some(metadata),
+        });
+        convo.updated_at = chrono::Utc::now();
+        if ctx.recipe.is_some() && !ctx.automation {
+            convo.pending_recipe = None;
+        }
+        self.inner.store.save(&convo)?;
+        self.inner.store.append_log(
+            ctx.conversation_id,
+            &format!("assistant reply stored ({} chars)", ctx.final_reply.len()),
+        )?;
+        info!(
+            conversation_id = %ctx.conversation_id,
+            tool_call_count = ctx.tool_call_count,
+            reply_len = ctx.final_reply.len(),
+            total_seconds,
+            automation = ctx.automation,
+            "conversation turn finished"
+        );
+        self.emit(
+            ctx.ui_tx,
+            "turn_finished",
+            &format!(
+                "Assistant #{}  [tools: {:.1}s  llm: {:.1}s]",
+                assistant_index, ctx.tool_seconds, ctx.llm_seconds
+            ),
+            None,
+            Some(ctx.tool_call_count),
+        );
+        Ok(RunTurnResult {
+            reply: ctx.final_reply.to_string(),
+            tool_calls: ctx.tool_call_count,
+        })
     }
 
     async fn execute_tool_call(
@@ -630,24 +753,7 @@ impl Orchestrator {
     }
 }
 
-fn discover_project_root() -> Option<std::path::PathBuf> {
-    let current_dir = std::env::current_dir().ok()?;
-    current_dir
-        .ancestors()
-        .find(|candidate| candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir())
-        .map(std::path::Path::to_path_buf)
-}
-
-fn build_messages(
-    prompt: Option<&str>,
-    history: &[crate::types::Message],
-    mcp_error: Option<&str>,
-    recipe_instructions: Option<&str>,
-    capability_summary: Option<&str>,
-    agent_permissions: &AgentPermissions,
-    store: &ConversationStore,
-    conversation_id: &str,
-) -> Vec<Value> {
+fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<Value> {
     let mut system_prompt = String::from(
         "You are a CSIRT investigation assistant operating inside an evidence-preserving tool runner with built-in local tools, local skill scripts, and optional MCP servers. Use tools when needed, stay grounded in tool output, and be explicit about uncertainty or failures.",
     );
@@ -661,21 +767,21 @@ fn build_messages(
     );
     system_prompt.push_str(&format!(
         "\n\nActive agent permissions:\n- {}\n",
-        agent_permissions.summary()
+        ctx.agent_permissions.summary()
     ));
-    if let Some(prompt) = prompt {
+    if let Some(prompt) = ctx.prompt {
         system_prompt.push_str("\n\nOperator prompt:\n");
         system_prompt.push_str(prompt);
     }
-    if let Some(summary) = capability_summary {
+    if let Some(summary) = ctx.capability_summary {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(summary);
     }
-    if let Some(instructions) = recipe_instructions {
+    if let Some(instructions) = ctx.recipe_instructions {
         system_prompt.push_str("\n\nRecipe instructions:\n");
         system_prompt.push_str(instructions);
     }
-    if let Some(mcp_error) = mcp_error {
+    if let Some(mcp_error) = ctx.mcp_error {
         system_prompt.push_str("\n\nCurrent MCP warning:\n");
         system_prompt.push_str(mcp_error);
         system_prompt.push_str("\nProceed carefully and explain when tool access is degraded.");
@@ -684,37 +790,92 @@ fn build_messages(
     let mut messages = vec![json!({"role": "system", "content": system_prompt})];
 
     // Check for active compaction
-    let conversation = store.load(conversation_id).ok();
+    let conversation = ctx.store.load(ctx.conversation_id).ok();
     if let Some(ref convo) = conversation
         && let Some(checkpoint_id) = &convo.active_compaction
-        && let Ok(summary) = store.load_compaction(conversation_id, checkpoint_id)
+        && let Ok(summary) = ctx
+            .store
+            .load_compaction(ctx.conversation_id, checkpoint_id)
     {
         messages.push(json!({
             "role": "system",
             "content": format!("Previous conversation summary:\n{summary}")
         }));
         // Only include the last 10 messages after compaction
-        let tail: Vec<_> = history.iter().rev().take(10).collect();
+        let tail: Vec<_> = ctx.history.iter().rev().take(10).collect();
         for msg in tail.into_iter().rev() {
             messages.push(json!({
                 "role": msg.role,
                 "content": msg.content,
             }));
         }
+        if let Some(user_message) = ctx.user_message_override {
+            messages.push(json!({
+                "role": "user",
+                "content": user_message,
+            }));
+        }
         return messages;
     }
 
-    messages.extend(history.iter().map(|message| {
+    messages.extend(ctx.history.iter().map(|message| {
         json!({
             "role": message.role,
             "content": message.content,
         })
     }));
+    if let Some(user_message) = ctx.user_message_override {
+        messages.push(json!({
+            "role": "user",
+            "content": user_message,
+        }));
+    }
     messages
 }
 
 fn estimate_context_chars(messages: &[Value]) -> usize {
     messages.iter().map(json_value_len).sum()
+}
+
+fn build_automation_prompt(job: &RememberedJob) -> String {
+    format!(
+        "Continue tracking remembered job '{alias}' with transaction_id '{transaction_id}'. Current status: {status}. Retrieval state: {retrieval_state}. Notes: {notes}. Automation prompt: {automation_prompt}",
+        alias = job.alias,
+        transaction_id = job.transaction_id,
+        status = job.status.as_deref().unwrap_or("unknown"),
+        retrieval_state = job.retrieval_state.as_deref().unwrap_or("unknown"),
+        notes = job.notes.as_deref().unwrap_or(""),
+        automation_prompt = job
+            .automation_prompt
+            .as_deref()
+            .unwrap_or("Follow up on the remote job and update the record if useful.")
+    )
+}
+
+fn fallback_compaction_summary(conversation: &crate::types::Conversation) -> String {
+    let mut summary = format!(
+        "Compaction fallback generated without Azure inference. Messages: {}.",
+        conversation.messages.len()
+    );
+    if let Some(last_user) = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+    {
+        summary.push_str("\nLast operator message: ");
+        summary.push_str(last_user.content.trim());
+    }
+    if let Some(last_assistant) = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant")
+    {
+        summary.push_str("\nLast assistant reply: ");
+        summary.push_str(last_assistant.content.trim());
+    }
+    summary
 }
 
 fn build_azure_tools_with_local(
@@ -805,8 +966,8 @@ mod tests {
     };
 
     use super::{
-        ConversationTurnLocks, MAX_AZURE_TOOL_COUNT, build_azure_tools, build_messages,
-        estimate_context_chars, sanitize_azure_tool_schema,
+        ConversationTurnLocks, MAX_AZURE_TOOL_COUNT, MessageBuildContext, build_azure_tools,
+        build_messages, estimate_context_chars, sanitize_azure_tool_schema,
     };
 
     #[test]
@@ -871,16 +1032,17 @@ mod tests {
         let store = ConversationStore::new(dir.path(), AgentPermissions::default());
         let permissions = AgentPermissions::default();
 
-        let messages = build_messages(
-            None,
-            &[],
-            None,
-            None,
-            Some("## Available Skills\n"),
-            &permissions,
-            &store,
-            "convo_test",
-        );
+        let messages = build_messages(MessageBuildContext {
+            prompt: None,
+            history: &[],
+            mcp_error: None,
+            recipe_instructions: None,
+            capability_summary: Some("## Available Skills\n"),
+            agent_permissions: &permissions,
+            store: &store,
+            conversation_id: "convo_test",
+            user_message_override: None,
+        });
 
         let system_prompt = messages[0]["content"].as_str().unwrap();
 

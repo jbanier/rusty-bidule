@@ -1,17 +1,42 @@
 # rusty-bidule
 
-`rusty-bidule` is a **prototype** Rust MCP client with a cyberpunk-style terminal UI.
+`rusty-bidule` is a prototype Rust client for investigation workflows. It pairs
+Azure OpenAI reasoning with MCP tools, optional local skill scripts, persistent
+conversation state, and both terminal and browser interfaces.
 
-It is designed to:
+The project is aimed at operators who want a tool-grounded assistant rather than
+an open-ended chat shell.
 
-- talk to Azure OpenAI for reasoning,
-- connect to MCP servers over `streamable_http`,
-- preserve conversations and tool evidence on disk,
-- and support OAuth login for MCP servers that require browser-based authentication.
+## What It Does
 
-## Quick start
+- Runs interactive conversations in a Ratatui terminal UI
+- Exposes a lightweight web UI and REST API
+- Calls Azure OpenAI chat completions for reasoning
+- Discovers and invokes MCP tools from configured servers
+- Executes selected local skill scripts through `local__run_skill`
+- Persists conversations, compactions, logs, OAuth state, and tool evidence
+- Supports OAuth public-client login for MCP servers that require browser auth
 
-If you just want to get the prototype running:
+## Prototype Status
+
+This repository is intentionally still a working prototype.
+
+- Interfaces and config shape may evolve
+- Operational hardening is incomplete
+- Azure + MCP is the primary path that gets attention
+- Some provider or schema mismatches are normalized pragmatically rather than
+  handled as full protocol parity
+
+Treat it as an operator tool under active iteration, not a finished platform.
+
+## Requirements
+
+- Rust toolchain with Cargo
+- Network access to your Azure OpenAI endpoint
+- Zero or more reachable MCP servers if you want MCP-backed tools
+- A local browser if you use OAuth-enabled MCP servers
+
+## Quick Start
 
 1. Copy the sample config:
 
@@ -25,77 +50,108 @@ If you just want to get the prototype running:
    export AZURE_OPENAI_API_KEY='your-key-here'
    ```
 
-3. Update `config/config.local.yaml` with your real Azure endpoint, deployment, and optional MCP server settings.
+3. Edit `config/config.local.yaml` with your Azure endpoint, deployment, and
+   any MCP server settings.
 
-4. Launch the TUI:
+4. Launch the terminal UI:
 
    ```bash
    cargo run
    ```
 
-For a one-shot run instead of the TUI:
+For a one-shot run:
 
 ```bash
 cargo run -- --once "Summarize the latest findings"
 ```
 
-## Prototype status
+For the web interface:
 
-This repository is intentionally a working prototype, not a polished product.
+```bash
+cargo run -- --interface web --port 8080
+```
 
-That means:
+Prompt input also supports inline file inclusion with `@path/to/file.md`. The
+app replaces each reference with a labeled block containing that file's text
+before the turn is sent. Relative paths are resolved from the detected project
+root. Use `\@file.md` to keep a literal `@file.md` in the prompt instead of
+expanding it.
 
-- interfaces and configuration may still change,
-- compatibility is focused on the current Azure + MCP use case,
-- operational hardening is incomplete,
-- and some behaviors degrade gracefully rather than aiming for full platform parity.
+Inline file inclusion requires filesystem read permission for the active
+conversation. If access is disabled, or the file cannot be resolved or read,
+the submission fails immediately.
 
-If you adopt it, treat it as an experimental operator tool.
+Recipes are currently guidance overlays for the model, not a deterministic
+playbook engine. They can bias tool usage and structure, but they do not yet
+enforce mandatory multi-step branching, variable passing, or guaranteed tool
+execution order.
 
-## Current capabilities
+## Running Modes
 
-- Ratatui/crossterm terminal interface
-- Markdown rendering in the message stack
-- Latest-first message history with scrolling and a scroll indicator
-- Azure OpenAI chat completions via `async-openai`
-- MCP tool discovery and tool invocation over `streamable_http`
-- Compatibility fixes for FastMCP-style servers
-- OAuth public-client login flow for selected MCP servers
-- Durable conversation logs and tool evidence under `data/`
-- Centralized application logging in `var/bidule.log`
-- Headless one-shot execution with `--once`
+### Interactive TUI
 
-## Requirements
+```bash
+cargo run
+```
 
-- Rust toolchain with Cargo
-- Network access to your Azure OpenAI endpoint
-- Zero or more reachable MCP servers, depending on whether you want MCP-backed tools
-- A local browser for OAuth flows if you use `oauth_public`
+Use this mode when you want an operator-facing terminal workflow with
+conversation browsing, recipes, permission controls, and inline progress.
 
-## Project layout
+### Web Interface
 
-- `src/` — application code
-- `config/config.example.yaml` — example configuration
-- `config/config.local.yaml` — local operator config (ignored by git)
-- `data/` — conversations, OAuth state, and tool evidence
-- `var/bidule.log` — application log file
+```bash
+cargo run -- --interface web --host 127.0.0.1 --port 8080
+```
+
+This starts an Axum server that serves the browser UI at `/` and exposes a REST
+API under `/api/...`.
+
+### One-shot Mode
+
+```bash
+cargo run -- --once "Summarize the latest findings"
+```
+
+You can target an existing conversation:
+
+```bash
+cargo run -- --conversation convo-20260318171242-0df4dd9f --once "List involved assets"
+```
+
+One-shot mode prints the final reply to `stdout` and progress updates to
+`stderr`.
 
 ## Configuration
 
-Copy the example config and adapt it locally:
+The default config file is `config/config.local.yaml`. The binary searches
+upward from the current working directory to find the project root and then uses
+that path.
 
-```bash
-cp config/config.example.yaml config/config.local.yaml
-```
-
-The default config path is discovered automatically as `config/config.local.yaml`. You can override it with either:
+You can override the path with either:
 
 - `RUSTY_BIDULE_CONFIG=/path/to/config.yaml`
 - `cargo run -- --config /path/to/config.yaml`
 
+### Minimal Local-Only Configuration
+
+If you want to start without MCP servers, keep `mcp_servers` empty or omit it:
+
+```yaml
+prompt: |
+  You are a CSIRT investigation assistant.
+
+azure_openai:
+  api_key: env:AZURE_OPENAI_API_KEY
+  api_version: 2025-03-01-preview
+  endpoint: https://example.cognitiveservices.azure.com/
+  deployment: gpt-4.1
+
+mcp_servers: []
+```
+
 ### Azure OpenAI
 
-The current config shape is:
+The current Azure block looks like this:
 
 ```yaml
 azure_openai:
@@ -108,29 +164,57 @@ azure_openai:
   max_output_tokens: 1200
 ```
 
-Recommended practice is to keep the API key out of the YAML file and provide it through the environment:
+Values prefixed with `env:` are resolved from environment variables at startup.
+That resolution is supported for the Azure key, endpoint, MCP URLs, MCP header
+values, and OAuth client settings.
 
-```bash
-export AZURE_OPENAI_API_KEY='your-key-here'
+### Agent Permissions
+
+The app applies default tool permissions from config to every new conversation:
+
+```yaml
+agent_permissions:
+  allow_network: false
+  filesystem: read_only
+  yolo: false
 ```
 
-### MCP servers
+- `allow_network`: controls networked tool use such as MCP calls
+- `filesystem`: one of `none`, `read_only`, `read_write`
+- `yolo`: bypasses the internal permission checks
 
-MCP servers are optional. If you configure them, the prototype currently expects
-`streamable_http` mode:
+In the TUI, these can be changed per conversation with `/permissions ...` and
+`/yolo ...`.
+
+### MCP Runtime
+
+Current shared runtime settings:
+
+```yaml
+mcp_runtime:
+  connect_timeout_seconds: 15
+```
+
+### MCP Servers
+
+MCP is optional. Each server currently supports `streamable_http` or `sse`
+transport:
 
 ```yaml
 mcp_servers:
-  - name: my-own-mcp
+  - name: csirt-mcp
     transport: streamable_http
     url: http://127.0.0.1:5000/mcp
     headers:
       Authorization: Bearer None
+    timeout: 30
+    sse_read_timeout: 300
+    client_session_timeout_seconds: 30
 ```
 
-Extra headers are passed through as configured.
+Configured headers are passed through as-is after `env:` resolution.
 
-### OAuth-enabled MCP servers
+### OAuth-enabled MCP Servers
 
 Servers that require browser login can use `auth.type: oauth_public`:
 
@@ -139,7 +223,7 @@ Servers that require browser login can use `auth.type: oauth_public`:
     transport: streamable_http
     url: https://mcp.app.wiz.io
     headers:
-      Wiz-DataCenter: <some values>
+      Wiz-DataCenter: us12
     auth:
       type: oauth_public
       scopes:
@@ -158,67 +242,109 @@ Servers that require browser login can use `auth.type: oauth_public`:
       use_dynamic_client_registration: true
 ```
 
-OAuth tokens and client registrations are stored under `data/oauth/`.
+OAuth tokens and dynamic client registrations are stored under `data/oauth/`.
+Login can be triggered from the TUI with `/login <server>`.
 
-## Running the prototype
+## Project Layout
 
-### Interactive TUI
+- `src/` application code
+- `config/config.example.yaml` example configuration
+- `config/config.local.yaml` local operator config
+- `skills/` local skill definitions and scripts
+- `recipes/` prompt/config bundles for investigations
+- `data/` conversations, OAuth state, and tool evidence
+- `var/bidule.log` application log file
 
-```bash
-cargo run
-```
+## TUI Commands
 
-### Headless one-shot mode
+Conversation management:
 
-```bash
-cargo run -- --once "Summarize the latest findings"
-```
+- `/new`
+- `/list`
+- `/use <id>`
+- `/show [id]`
+- `/delete <id>`
+- `/compact`
 
-You can also target a specific stored conversation:
+Recipes:
 
-```bash
-cargo run -- --conversation convo-20260318171242-0df4dd9f --once "List involved assets"
-```
+- `/recipes`
+- `/recipe use <name>`
+- `/recipe show <name>`
+- `/recipe clear`
 
-## TUI commands
+MCP and auth:
 
-Inside the terminal UI:
+- `/login <server>`
+- `/mcp` or `/mcp status`
+- `/mcp reset|enable|disable|only <name...>`
 
-- `/new` — create a new conversation
-- `/list` — list known conversations
-- `/use <id>` — switch conversation
-- `/show [id]` — show conversation details
-- `/delete <id>` — delete a conversation
-- `/login <server>` — trigger OAuth login for an MCP server
-- `/mcp` or `/mcp status` — list configured MCP servers and their enabled/disabled state
-- `/mcp reset|enable|disable|only <name...>` — manage the conversation MCP filter
-- `/compact` — compact the current conversation
-- `/recipes` — list available recipes
-- `/recipe use|show|clear ...` — manage recipes for the current conversation
-- `/model` — show model-selection note
-- `/logging` — show logging note
-- `/help` — show command help
-- `/exit` or `/quit` — leave the TUI and restore the terminal
+Permissions:
 
-### TUI navigation
+- `/permissions`
+- `/permissions network on|off`
+- `/permissions fs none|read|write`
+- `/permissions yolo on|off`
+- `/permissions reset`
+- `/yolo on|off`
 
-- `Up` / `Down` — scroll message history
-- `PageUp` / `PageDown` — page through history
-- `Home` / `End` — jump in history
+Local analyst state:
+
+- `/scratch` or `/scratch show`
+- `/scratch set <text>`
+- `/scratch append <text>`
+- `/scratch clear`
+- `/findings` or `/findings list`
+- `/findings add <kind> <value> [note]`
+- `/findings remove <finding-id>`
+- `/search <query>`
+
+Other:
+
+- `/logging`
+- `/help`
+- `/exit` or `/quit`
+
+### TUI Navigation
+
+- `Up` / `Down` scroll message history
+- `Ctrl+Up` / `Ctrl+Down` browse session-only input history
+- `PageUp` / `PageDown` page through history
+- `Home` / `End` jump in history
 - enter `<<<` to start multiline input
 - enter `>>>` to send multiline input
 
-## Logging and evidence
+### Inline File References
 
-The prototype writes two kinds of durable output:
+You can embed local file contents directly in a prompt:
 
-- `var/bidule.log` — application-level logs (`DEBUG`, `INFO`, `WARN`, `ERROR`)
-- `data/conversations/...` — stored messages, conversation logs, and tool artifacts
+```text
+Summarize the following notes @docs/incident.md
+```
 
-This split is intentional:
+The app expands that into a labeled fenced block before dispatch. This works in
+the TUI, the web UI/API message submission path, and `--once`.
 
-- `var/bidule.log` helps debug runtime issues,
-- while `data/` preserves operator-visible evidence and tool output.
+## Skills And Recipes
+
+Skills are loaded from `skills/<skill-name>/SKILL.md`. Today they primarily
+provide metadata plus optional script-backed tools that can be executed through
+`local__run_skill`.
+
+Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`. They let you preload
+instructions, an initial prompt, and an MCP server filter for a conversation.
+
+## Persistence, Logging, And Evidence
+
+Durable output is split by purpose:
+
+- `var/bidule.log` stores application-level logs
+- `data/conversations/...` stores messages, per-conversation logs, compactions,
+  and tool artifacts
+- `data/oauth/...` stores OAuth state, tokens, and client registration data
+
+This is deliberate: `var/` is for runtime diagnostics, while `data/` is for
+operator-visible state and evidence.
 
 ## Validation
 
@@ -228,16 +354,17 @@ Run the test suite with:
 cargo test
 ```
 
-## Known limitations
+## Known Limitations
 
-- This is still a prototype and not a hardened production client.
-- Only `streamable_http` MCP transport is supported today.
-- Azure behavior is aligned with the current chat-completions flow, not every Azure/OpenAI feature (still looking from a framework).
-- Large MCP tool inventories are truncated before Azure submission to stay within provider limits (128).
-- Some MCP schemas require normalization for Azure compatibility.
+- This is not yet a hardened production client
+- MCP filtering and permission checks are application-level controls
+- Azure tool advertising is truncated when inventories exceed provider limits
+- Some MCP schemas need normalization for Azure compatibility
+- The browser UI is intentionally lightweight compared to the TUI
 
-## Notes for operators
+## More Detail
 
-- If the app reports config-loading issues, confirm `AZURE_OPENAI_API_KEY` is exported and the selected config path exists.
-- If an MCP server requires OAuth, run `/login <server>` before relying on its tools.
-- If something goes wrong, inspect `var/bidule.log` first.
+User-facing setup and operation live here in `README.md`.
+
+Engineering details, architecture, runtime behavior, and interface references
+live in [`docs/REFERENCE.md`](docs/REFERENCE.md).

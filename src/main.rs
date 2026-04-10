@@ -1,3 +1,4 @@
+mod auto_pull;
 mod azure;
 mod config;
 mod conversation_store;
@@ -6,6 +7,8 @@ mod logging;
 mod mcp_runtime;
 mod oauth;
 mod orchestrator;
+mod paths;
+mod prompt_expansion;
 mod recipes;
 mod skills;
 mod tool_evidence;
@@ -14,9 +17,11 @@ mod ui;
 mod web;
 
 use anyhow::Result;
+use auto_pull::AutoPullRuntime;
 use config::AppConfig;
 use orchestrator::Orchestrator;
-use std::path::{Path, PathBuf};
+use prompt_expansion::expand_prompt_file_references;
+use std::path::PathBuf;
 use tokio::sync::mpsc::unbounded_channel;
 use tracing::{debug, error, info};
 use types::UiEvent;
@@ -57,6 +62,7 @@ async fn main() -> Result<()> {
     match options.interface.as_str() {
         "web" => {
             info!("launching web interface");
+            AutoPullRuntime::new(orchestrator.clone()).start();
             let recipes = orchestrator.recipes().clone();
             web::run_web_server(orchestrator, recipes, &options.host, options.port).await
         }
@@ -66,6 +72,7 @@ async fn main() -> Result<()> {
                 run_once(orchestrator, options.conversation_id, message).await
             } else {
                 info!("launching interactive TUI");
+                AutoPullRuntime::new(orchestrator.clone()).start();
                 let app = App::new(orchestrator).await?;
                 app.run().await
             }
@@ -82,6 +89,12 @@ async fn run_once(
         Some(value) => value,
         None => orchestrator.ensure_default_conversation().await?,
     };
+    let conversation = orchestrator.store().load(&conversation_id)?;
+    let message = expand_prompt_file_references(
+        &message,
+        &conversation.agent_permissions,
+        paths::discover_project_root().as_deref(),
+    )?;
     info!(%conversation_id, "executing one-shot conversation turn");
     let (ui_tx, mut ui_rx) = unbounded_channel();
     let run = orchestrator.run_turn(&conversation_id, message, ui_tx);
@@ -95,8 +108,11 @@ async fn run_once(
                 return Ok(());
             }
             Some(event) = ui_rx.recv() => {
-                if let UiEvent::Progress(progress) = event {
-                    eprintln!("{}: {}", progress.kind, progress.message);
+                match event {
+                    UiEvent::Progress(progress) => {
+                        eprintln!("{}: {}", progress.kind, progress.message);
+                    }
+                    UiEvent::Finished(_) | UiEvent::CompactionFinished(_) => {}
                 }
             }
         }
@@ -240,19 +256,7 @@ EXAMPLES:
 }
 
 fn default_config_path() -> PathBuf {
-    discover_project_root()
+    paths::discover_project_root()
         .map(|root| root.join("config").join("config.local.yaml"))
         .unwrap_or_else(|| PathBuf::from("config/config.local.yaml"))
-}
-
-fn discover_project_root() -> Option<PathBuf> {
-    let current_dir = std::env::current_dir().ok()?;
-    current_dir
-        .ancestors()
-        .find(|candidate| looks_like_project_root(candidate))
-        .map(Path::to_path_buf)
-}
-
-fn looks_like_project_root(candidate: &Path) -> bool {
-    candidate.join("Cargo.toml").is_file() && candidate.join("src").is_dir()
 }

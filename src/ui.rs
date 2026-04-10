@@ -11,86 +11,83 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Paragraph, Wrap},
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     orchestrator::Orchestrator,
+    paths::discover_project_root,
+    prompt_expansion::expand_prompt_file_references,
     types::{AgentPermissions, Conversation, FilesystemAccess, Message, UiEvent},
 };
 
-const SPINNER: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+const SPINNER: &[&str] = &["|", "/", "-", "\\"];
 fn void_black() -> Color {
-    Color::Rgb(8, 7, 22)
+    Color::Rgb(7, 11, 10)
 }
 
 fn panel_ink() -> Color {
-    Color::Rgb(18, 14, 40)
+    Color::Rgb(15, 23, 21)
 }
 
 fn input_ink() -> Color {
-    Color::Rgb(15, 10, 33)
+    Color::Rgb(11, 17, 16)
 }
 
 fn neon_pink() -> Color {
-    Color::Rgb(255, 88, 182)
+    Color::Rgb(242, 184, 88)
 }
 
 fn neon_cyan() -> Color {
-    Color::Rgb(77, 232, 255)
+    Color::Rgb(123, 169, 157)
 }
 
 fn neon_gold() -> Color {
-    Color::Rgb(255, 194, 92)
+    Color::Rgb(246, 205, 110)
 }
 
 fn neon_orange() -> Color {
-    Color::Rgb(255, 128, 89)
+    Color::Rgb(208, 146, 99)
 }
 
 fn neon_lime() -> Color {
-    Color::Rgb(148, 255, 125)
+    Color::Rgb(146, 191, 122)
 }
 
 fn signal_red() -> Color {
-    Color::Rgb(255, 94, 133)
+    Color::Rgb(212, 121, 108)
 }
 
 fn synth_text() -> Color {
-    Color::Rgb(223, 229, 255)
+    Color::Rgb(231, 224, 202)
 }
 
 fn muted_synth() -> Color {
-    Color::Rgb(125, 121, 179)
+    Color::Rgb(126, 139, 121)
 }
 
-fn pane_block(title: &'static str, accent: Color) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(panel_ink()))
-        .title(Line::from(vec![
-            Span::styled("▣ ", Style::default().fg(neon_gold())),
-            Span::styled(
-                title,
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
-            ),
-        ]))
-}
-
-fn section_heading(label: &'static str, accent: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            "◆ ",
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            label,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-    ])
+fn rule_line(label: Option<&str>) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        "─".repeat(18),
+        Style::default().fg(neon_cyan()),
+    )];
+    if let Some(label) = label {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(neon_gold())
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            "─".repeat(18),
+            Style::default().fg(neon_cyan()),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn activity_style(entry: &str) -> Style {
@@ -142,10 +139,14 @@ pub struct App {
     message_viewport_lines: u16,
     activities: Vec<String>,
     input: String,
+    input_history: Vec<String>,
+    input_history_cursor: Option<usize>,
+    input_history_draft: Option<String>,
     multiline_buffer: Option<Vec<String>>,
     inflight: bool,
     spinner_index: usize,
     status: String,
+    persistent_warning: Option<String>,
     ui_tx: UnboundedSender<UiEvent>,
     ui_rx: UnboundedReceiver<UiEvent>,
     should_quit: bool,
@@ -187,10 +188,14 @@ impl App {
             message_viewport_lines: 0,
             activities: Vec::new(),
             input: String::new(),
+            input_history: Vec::new(),
+            input_history_cursor: None,
+            input_history_draft: None,
             multiline_buffer: None,
             inflight: false,
             spinner_index: 0,
-            status: "Idle in the neon rain".to_string(),
+            status: "Session idle".to_string(),
+            persistent_warning: None,
             ui_tx,
             ui_rx,
             should_quit: false,
@@ -239,23 +244,25 @@ impl App {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(10),
+                Constraint::Length(2),
+                Constraint::Length(1),
                 Constraint::Min(10),
-                Constraint::Length(8),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(frame.area());
 
-        frame.render_widget(self.render_agent_monitor(), layout[0]);
+        frame.render_widget(self.render_header(), layout[0]);
+        frame.render_widget(self.render_separator(Some("TRANSCRIPT")), layout[1]);
 
-        let transcript_block = pane_block("TRANSCRIPT // OUTPUT", neon_cyan());
-        let transcript_inner = transcript_block.inner(layout[1]);
-        frame.render_widget(transcript_block, layout[1]);
         let transcript_layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(transcript_inner);
+            .split(layout[2]);
 
-        let transcript = self.render_transcript(transcript_layout[0].height);
+        let transcript =
+            self.render_transcript(transcript_layout[0].width, transcript_layout[0].height);
         frame.render_widget(transcript, transcript_layout[0]);
 
         let indicator = render_scroll_indicator(
@@ -265,17 +272,166 @@ impl App {
         );
         frame.render_widget(indicator, transcript_layout[1]);
 
-        frame.render_widget(self.render_input(), layout[2]);
+        frame.render_widget(self.render_activity_line(), layout[3]);
+        frame.render_widget(self.render_input_line(), layout[4]);
+        frame.render_widget(self.render_footer(), layout[5]);
     }
 
-    fn render_agent_monitor(&self) -> Paragraph<'static> {
-        let mode = if self.inflight { "RUNNING" } else { "STANDBY" };
+    fn render_header(&self) -> Paragraph<'static> {
+        let help_line = Line::from(vec![
+            Span::styled(
+                "Menu",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "Enter send",
+                Style::default()
+                    .fg(neon_gold())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "/help",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" commands  "),
+            Span::styled(
+                "PgUp/PgDn",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" scroll  "),
+            Span::styled(
+                "Ctrl+Up/Down",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" history  "),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" clear"),
+        ]);
+
+        let tip_line = Line::from(vec![
+            Span::styled(
+                "Tips",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "<<< >>>",
+                Style::default()
+                    .fg(neon_orange())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" multiline  "),
+            Span::styled(
+                "/new",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" session  "),
+            Span::styled(
+                "/mcp",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" servers  "),
+            Span::styled(
+                "/permissions",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" access"),
+        ]);
+
+        Paragraph::new(Text::from(vec![help_line, tip_line]))
+            .style(Style::default().fg(synth_text()).bg(void_black()))
+            .wrap(Wrap { trim: false })
+    }
+
+    fn render_separator(&self, label: Option<&str>) -> Paragraph<'static> {
+        Paragraph::new(Text::from(vec![rule_line(label)])).style(Style::default().bg(void_black()))
+    }
+
+    fn render_activity_line(&self) -> Paragraph<'static> {
+        let line = if let Some(warning) = &self.persistent_warning {
+            Line::from(vec![
+                Span::styled("Warning ==> ", Style::default().fg(neon_gold())),
+                Span::styled(
+                    warning.clone(),
+                    Style::default()
+                        .fg(neon_gold())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        } else if let Some(entry) = self.activities.last() {
+            Line::from(vec![
+                Span::styled("Feedback ==> ", Style::default().fg(neon_cyan())),
+                Span::styled(entry.clone(), activity_style(entry)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("Feedback ==> ", Style::default().fg(neon_cyan())),
+                Span::styled("ready", Style::default().fg(muted_synth())),
+            ])
+        };
+
+        Paragraph::new(Text::from(vec![line]))
+            .style(Style::default().fg(synth_text()).bg(void_black()))
+    }
+
+    fn render_input_line(&self) -> Paragraph<'static> {
+        let preview = self.input_preview();
+        let input = if preview.is_empty() {
+            "Type a prompt or run /help.".to_string()
+        } else {
+            preview.replace('\n', " ")
+        };
+
+        Paragraph::new(Text::from(vec![Line::from(vec![
+            Span::styled(
+                "Input ===> ",
+                Style::default()
+                    .fg(neon_orange())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                input,
+                Style::default().fg(if preview.is_empty() {
+                    muted_synth()
+                } else {
+                    synth_text()
+                }),
+            ),
+        ])]))
+        .style(Style::default().bg(input_ink()))
+    }
+
+    fn render_footer(&self) -> Paragraph<'static> {
+        let mode = if self.inflight { "RUNNING" } else { "READY" };
         let input_mode = if self.multiline_buffer.is_some() {
             "MULTILINE"
         } else if self.input.trim().is_empty() {
-            "READY"
+            "CLEAR"
         } else {
-            "DRAFT LOADED"
+            "DRAFT"
         };
         let tool_calls = self
             .messages
@@ -289,98 +445,121 @@ impl App {
             })
             .unwrap_or(0);
 
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    "RUSTY BIDULE",
-                    Style::default()
-                        .fg(neon_pink())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  //  "),
-                Span::styled(
-                    self.current_conversation_id.to_string(),
-                    Style::default().fg(neon_cyan()),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    self.status.clone(),
-                    Style::default()
-                        .fg(neon_gold())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  //  "),
-                Span::styled(mode, Style::default().fg(neon_lime())),
-                Span::raw("  //  "),
-                Span::styled(input_mode, Style::default().fg(neon_orange())),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    format!("messages {}", self.messages.len()),
-                    Style::default().fg(synth_text()),
-                ),
-                Span::raw("   "),
-                Span::styled(
-                    format!("agent events {}", self.activities.len()),
-                    Style::default().fg(synth_text()),
-                ),
-                Span::raw("   "),
-                Span::styled(
-                    format!("latest tools {}", tool_calls),
-                    Style::default().fg(synth_text()),
-                ),
-            ]),
-            render_mcp_status_line(
-                &self.configured_mcp_servers,
-                self.enabled_mcp_servers.as_deref(),
-            ),
-            render_agent_permissions_line(&self.agent_permissions),
-            section_heading("LIVE SIGNAL", neon_pink()),
-        ];
-
-        if self.activities.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Awaiting operator input.",
-                Style::default().fg(muted_synth()),
-            )));
+        let network = if self.agent_permissions.allows_network() {
+            "net:on"
         } else {
-            for entry in self.activities.iter().rev().take(2) {
-                lines.push(Line::from(vec![
-                    Span::styled(">", Style::default().fg(neon_pink())),
-                    Span::raw(" "),
-                    Span::styled(entry.clone(), activity_style(entry)),
-                ]));
-            }
-        }
+            "net:off"
+        };
+        let filesystem = if self.agent_permissions.yolo {
+            "fs:all".to_string()
+        } else {
+            format!("fs:{}", self.agent_permissions.filesystem.label())
+        };
+        let yolo = if self.agent_permissions.yolo {
+            "yolo:on"
+        } else {
+            "yolo:off"
+        };
+        let mcp = build_mcp_server_statuses(
+            &self.configured_mcp_servers,
+            self.enabled_mcp_servers.as_deref(),
+            None,
+        )
+        .into_iter()
+        .filter(|status| status.enabled)
+        .count();
+        let multiline = self
+            .multiline_buffer
+            .as_ref()
+            .map(|buffer| format!("ml:{:>2}", buffer.len()))
+            .unwrap_or_else(|| "ml:--".to_string());
 
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(panel_ink()))
-            .wrap(Wrap { trim: false })
-            .block(pane_block("AGENT // LIVE SIGNAL", neon_pink()))
+        let line = Line::from(vec![
+            Span::styled(
+                "(:) ",
+                Style::default()
+                    .fg(neon_pink())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                self.status_line(),
+                Style::default()
+                    .fg(neon_gold())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(format!("state:{mode}"), Style::default().fg(neon_lime())),
+            Span::raw("  "),
+            Span::styled(
+                format!("input:{input_mode}"),
+                Style::default().fg(neon_orange()),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("msg:{}", self.messages.len()),
+                Style::default().fg(synth_text()),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("tools:{tool_calls}"),
+                Style::default().fg(synth_text()),
+            ),
+            Span::raw("  "),
+            Span::styled(multiline, Style::default().fg(synth_text())),
+            Span::raw("  "),
+            Span::styled(format!("mcp:{mcp}"), Style::default().fg(neon_cyan())),
+            Span::raw("  "),
+            Span::styled(
+                network,
+                Style::default().fg(if self.agent_permissions.allows_network() {
+                    neon_lime()
+                } else {
+                    signal_red()
+                }),
+            ),
+            Span::raw("  "),
+            Span::styled(filesystem, Style::default().fg(neon_cyan())),
+            Span::raw("  "),
+            Span::styled(
+                yolo,
+                Style::default().fg(if self.agent_permissions.yolo {
+                    neon_pink()
+                } else {
+                    muted_synth()
+                }),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("id:{}", self.current_conversation_id),
+                Style::default().fg(muted_synth()),
+            ),
+        ]);
+
+        Paragraph::new(Text::from(vec![line]))
+            .style(Style::default().fg(synth_text()).bg(panel_ink()))
     }
 
-    fn render_transcript(&mut self, area_height: u16) -> Paragraph<'static> {
+    fn render_transcript(&mut self, area_width: u16, area_height: u16) -> Paragraph<'static> {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         let transcript_messages = ordered_transcript_messages(&self.messages, &self.command_output);
 
         if transcript_messages.is_empty() {
             lines.push(Line::from(Span::styled(
-                "No messages yet. Type into the deck below to start a run.",
+                "No messages yet. Use the input pane below to start a session.",
                 Style::default().fg(muted_synth()),
             )));
         } else {
             lines.extend(transcript_messages.into_iter().flat_map(|message| {
                 let (role_label, role_style) = match message.role.as_str() {
                     "user" => (
-                        "OPERATOR",
+                        "USER",
                         Style::default()
                             .fg(neon_cyan())
                             .add_modifier(Modifier::BOLD),
                     ),
                     "assistant" => (
-                        "AGENT",
+                        "ASSISTANT",
                         Style::default()
                             .fg(neon_pink())
                             .add_modifier(Modifier::BOLD),
@@ -412,7 +591,7 @@ impl App {
                     header.push(Span::raw("  "));
                     header.push(Span::styled(
                         format!(
-                            "#{}  {} tools  {:.1}s",
+                            "#{}  {}t  {:.1}s",
                             metadata.assistant_index,
                             metadata.tool_call_count,
                             metadata.timing.total_seconds
@@ -427,8 +606,9 @@ impl App {
             }));
         }
 
-        self.rendered_message_lines = lines.len().min(u16::MAX as usize) as u16;
-        self.message_viewport_lines = area_height.saturating_sub(2);
+        self.rendered_message_lines =
+            count_wrapped_rows(&lines, area_width).min(u16::MAX as usize) as u16;
+        self.message_viewport_lines = area_height;
         self.message_scroll = self.message_scroll.min(max_message_scroll(
             self.rendered_message_lines,
             self.message_viewport_lines,
@@ -436,87 +616,23 @@ impl App {
 
         Paragraph::new(Text::from(lines))
             .scroll((self.message_scroll, 0))
-            .style(Style::default().fg(synth_text()).bg(panel_ink()))
+            .style(Style::default().fg(synth_text()).bg(void_black()))
             .wrap(Wrap { trim: false })
-    }
-
-    fn render_input(&self) -> Paragraph<'static> {
-        let preview = self.input_preview();
-        let mut lines = Vec::new();
-
-        if self.inflight {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    self.status_line(),
-                    Style::default()
-                        .fg(neon_gold())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled("RUNNING", Style::default().fg(neon_lime())),
-            ]));
-            lines.push(Line::raw(""));
-        } else if self.multiline_buffer.is_some() {
-            lines.push(Line::from(Span::styled(
-                "MULTILINE CAPTURE ACTIVE",
-                Style::default()
-                    .fg(neon_cyan())
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::raw(""));
-        }
-
-        if preview.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Type a prompt, or use /help to browse commands.",
-                Style::default().fg(muted_synth()),
-            )));
-        } else {
-            for line in preview.lines() {
-                lines.push(Line::from(vec![
-                    Span::styled(">", Style::default().fg(neon_pink())),
-                    Span::raw(" "),
-                    Span::styled(line.to_string(), Style::default().fg(synth_text())),
-                ]));
-            }
-        }
-
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(neon_gold())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" send", Style::default().fg(muted_synth())),
-            Span::raw("   "),
-            Span::styled(
-                "/help",
-                Style::default()
-                    .fg(neon_pink())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" command list", Style::default().fg(muted_synth())),
-            Span::raw("   "),
-            Span::styled(
-                "<<< ... >>>",
-                Style::default()
-                    .fg(neon_orange())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" multiline", Style::default().fg(muted_synth())),
-        ]));
-
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().fg(synth_text()).bg(input_ink()))
-            .wrap(Wrap { trim: false })
-            .block(pane_block("INPUT // COMMAND DECK", neon_orange()))
     }
 
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return Ok(());
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Up {
+            self.navigate_input_history(true);
+            return Ok(());
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Down {
+            self.navigate_input_history(false);
             return Ok(());
         }
 
@@ -528,17 +644,23 @@ impl App {
             KeyCode::Home => self.message_scroll = 0,
             KeyCode::End => self.scroll_messages_to_latest(),
             KeyCode::Char(ch) => {
+                self.detach_input_history_navigation();
                 self.input.push(ch);
             }
             KeyCode::Backspace => {
+                self.detach_input_history_navigation();
                 self.input.pop();
             }
             KeyCode::Enter => {
                 let submitted = std::mem::take(&mut self.input);
+                self.input_history_cursor = None;
+                self.input_history_draft = None;
                 self.handle_submission(submitted).await?;
             }
             KeyCode::Esc => {
                 self.input.clear();
+                self.input_history_cursor = None;
+                self.input_history_draft = None;
                 self.multiline_buffer = None;
                 self.status = "Input cleared".to_string();
             }
@@ -549,10 +671,7 @@ impl App {
     }
 
     async fn handle_submission(&mut self, submitted: String) -> Result<()> {
-        let trimmed = submitted.trim_end().to_string();
-        if trimmed.is_empty() {
-            return Ok(());
-        }
+        let submitted = submitted.trim_end_matches(['\r', '\n']);
 
         if self.inflight {
             warn!("ignored submission while engine was busy");
@@ -562,15 +681,22 @@ impl App {
         }
 
         if let Some(buffer) = &mut self.multiline_buffer {
-            if trimmed == ">>>" {
+            if submitted == ">>>" {
                 let payload = buffer.join("\n");
                 self.multiline_buffer = None;
                 self.dispatch_message(payload).await?;
             } else {
-                buffer.push(trimmed);
+                buffer.push(submitted.to_string());
             }
             return Ok(());
         }
+
+        let trimmed = submitted.trim_end().to_string();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        self.remember_input_history(&trimmed);
 
         if trimmed == "<<<" {
             self.multiline_buffer = Some(Vec::new());
@@ -584,6 +710,54 @@ impl App {
             self.dispatch_message(trimmed).await?;
         }
         Ok(())
+    }
+
+    fn remember_input_history(&mut self, entry: &str) {
+        if self.input_history.last().is_some_and(|last| last == entry) {
+            return;
+        }
+        self.input_history.push(entry.to_string());
+        const MAX_INPUT_HISTORY: usize = 200;
+        if self.input_history.len() > MAX_INPUT_HISTORY {
+            let excess = self.input_history.len() - MAX_INPUT_HISTORY;
+            self.input_history.drain(0..excess);
+        }
+    }
+
+    fn detach_input_history_navigation(&mut self) {
+        if self.input_history_cursor.is_some() {
+            self.input_history_cursor = None;
+            self.input_history_draft = None;
+        }
+    }
+
+    fn navigate_input_history(&mut self, older: bool) {
+        if self.input_history.is_empty() {
+            return;
+        }
+
+        match (older, self.input_history_cursor) {
+            (true, None) => {
+                self.input_history_draft = Some(self.input.clone());
+                self.input_history_cursor = Some(self.input_history.len().saturating_sub(1));
+            }
+            (true, Some(cursor)) => {
+                self.input_history_cursor = Some(cursor.saturating_sub(1));
+            }
+            (false, None) => return,
+            (false, Some(cursor)) if cursor + 1 < self.input_history.len() => {
+                self.input_history_cursor = Some(cursor + 1);
+            }
+            (false, Some(_)) => {
+                self.input = self.input_history_draft.take().unwrap_or_default();
+                self.input_history_cursor = None;
+                return;
+            }
+        }
+
+        if let Some(cursor) = self.input_history_cursor {
+            self.input = self.input_history[cursor].clone();
+        }
     }
 
     async fn handle_command(&mut self, command: &str) -> Result<()> {
@@ -654,6 +828,27 @@ impl App {
                 self.activities
                     .push("Command help opened in transcript.".to_string());
             }
+            "/history" => {
+                let body = self
+                    .messages
+                    .iter()
+                    .rev()
+                    .take(20)
+                    .rev()
+                    .map(|message| format!("- `{}`: {}", message.role, message.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.push_command_output(
+                    "/history",
+                    if body.is_empty() {
+                        "No conversation history yet.".to_string()
+                    } else {
+                        body
+                    },
+                );
+                self.activities
+                    .push("Conversation history opened in transcript.".to_string());
+            }
             "/login" => {
                 if let Some(server_name) = parts.next() {
                     self.status = format!("Logging into {server_name}");
@@ -679,11 +874,217 @@ impl App {
                         .push("Usage: /login <mcp-server-name>".to_string());
                 }
             }
-            "/model" => {
-                self.activities.push("Model selection is fixed to the configured Azure deployment in this prototype.".to_string());
-            }
             "/logging" => {
-                self.activities.push("Logging verbosity toggles are not implemented yet; audit logs are always written to disk.".to_string());
+                let provider = self.orchestrator.config().tracing.map(|cfg| cfg.provider);
+                self.push_command_output(
+                    "/logging",
+                    format!(
+                        "Tracing provider: `{:?}`\nApplication log: `var/bidule.log`\nConversation audit log: `data/conversations/<id>/logs/conversation.log`",
+                        provider.unwrap_or_default()
+                    ),
+                );
+                self.activities
+                    .push("Logging configuration opened in transcript.".to_string());
+            }
+            "/jobs" => {
+                let jobs = self
+                    .orchestrator
+                    .store()
+                    .load_job_state(&self.current_conversation_id)?;
+                let body = if jobs.is_empty() {
+                    "No remembered jobs for this conversation.".to_string()
+                } else {
+                    jobs.iter()
+                        .map(|job| {
+                            format!(
+                                "- `{}`: tx=`{}` status=`{}` mode=`{}` next_poll_at=`{}`",
+                                job.alias,
+                                job.transaction_id,
+                                job.status.as_deref().unwrap_or("unknown"),
+                                job.mode.as_deref().unwrap_or("manual"),
+                                job.next_poll_at
+                                    .map(|value| value.to_rfc3339())
+                                    .unwrap_or_else(|| "-".to_string())
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                self.push_command_output("/jobs", body);
+                self.activities
+                    .push("Remembered jobs opened in transcript.".to_string());
+            }
+            "/scratch" => {
+                let sub = parts.next().unwrap_or_default();
+                match sub {
+                    "" | "show" => {
+                        let body = self
+                            .orchestrator
+                            .store()
+                            .load_scratchpad(&self.current_conversation_id)?;
+                        self.push_command_output(
+                            "/scratch",
+                            if body.trim().is_empty() {
+                                "Scratchpad is empty.".to_string()
+                            } else {
+                                body
+                            },
+                        );
+                        self.activities
+                            .push("Scratchpad opened in transcript.".to_string());
+                    }
+                    "set" => {
+                        let body = command
+                            .strip_prefix("/scratch set")
+                            .unwrap_or("")
+                            .trim_start();
+                        self.orchestrator
+                            .store()
+                            .save_scratchpad(&self.current_conversation_id, body)?;
+                        self.activities.push("Scratchpad updated.".to_string());
+                    }
+                    "append" => {
+                        let suffix = command
+                            .strip_prefix("/scratch append")
+                            .unwrap_or("")
+                            .trim_start();
+                        let existing = self
+                            .orchestrator
+                            .store()
+                            .load_scratchpad(&self.current_conversation_id)?;
+                        let next = if existing.trim().is_empty() {
+                            suffix.to_string()
+                        } else if suffix.is_empty() {
+                            existing
+                        } else {
+                            format!("{existing}\n{suffix}")
+                        };
+                        self.orchestrator
+                            .store()
+                            .save_scratchpad(&self.current_conversation_id, &next)?;
+                        self.activities.push("Scratchpad appended.".to_string());
+                    }
+                    "clear" => {
+                        self.orchestrator
+                            .store()
+                            .save_scratchpad(&self.current_conversation_id, "")?;
+                        self.activities.push("Scratchpad cleared.".to_string());
+                    }
+                    _ => {
+                        self.activities.push(
+                            "Usage: /scratch [show] | /scratch set <text> | /scratch append <text> | /scratch clear"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            "/findings" | "/finding" => {
+                let sub = parts.next().unwrap_or_default();
+                match sub {
+                    "" | "list" => {
+                        let findings = self.orchestrator.store().load_findings()?;
+                        let body = findings
+                            .iter()
+                            .filter(|finding| {
+                                finding.conversation_id == self.current_conversation_id
+                            })
+                            .map(|finding| {
+                                format!(
+                                    "- `{}` [{}] `{}`{}",
+                                    finding.finding_id,
+                                    finding.kind,
+                                    finding.value,
+                                    finding
+                                        .note
+                                        .as_deref()
+                                        .map(|note| format!(" // {note}"))
+                                        .unwrap_or_default()
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.push_command_output(
+                            "/findings",
+                            if body.is_empty() {
+                                "No findings stored for this conversation.".to_string()
+                            } else {
+                                body
+                            },
+                        );
+                        self.activities
+                            .push("Findings opened in transcript.".to_string());
+                    }
+                    "add" => {
+                        let kind = parts.next();
+                        let value = parts.next();
+                        if let (Some(kind), Some(value)) = (kind, value) {
+                            let note = command
+                                .splitn(5, ' ')
+                                .nth(4)
+                                .map(str::trim)
+                                .filter(|text| !text.is_empty());
+                            let finding = self.orchestrator.store().add_finding(
+                                &self.current_conversation_id,
+                                kind,
+                                value,
+                                note,
+                            )?;
+                            self.activities.push(format!(
+                                "Finding stored: {} [{}] {}",
+                                finding.finding_id, finding.kind, finding.value
+                            ));
+                        } else {
+                            self.activities
+                                .push("Usage: /findings add <kind> <value> [note]".to_string());
+                        }
+                    }
+                    "remove" | "delete" => {
+                        if let Some(finding_id) = parts.next() {
+                            if self.orchestrator.store().remove_finding(finding_id)? {
+                                self.activities
+                                    .push(format!("Finding removed: {finding_id}"));
+                            } else {
+                                self.activities
+                                    .push(format!("Finding not found: {finding_id}"));
+                            }
+                        } else {
+                            self.activities
+                                .push("Usage: /findings remove <finding-id>".to_string());
+                        }
+                    }
+                    _ => {
+                        self.activities.push(
+                            "Usage: /findings [list] | /findings add <kind> <value> [note] | /findings remove <finding-id>"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            "/search" => {
+                let query = command.strip_prefix("/search").unwrap_or("").trim();
+                if query.is_empty() {
+                    self.activities.push("Usage: /search <query>".to_string());
+                } else {
+                    let results = self.orchestrator.store().search_local(query)?;
+                    let body = results
+                        .into_iter()
+                        .take(20)
+                        .map(|result| {
+                            format!("- `{}` {}: {}", result.scope, result.title, result.snippet)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.push_command_output(
+                        "/search",
+                        if body.is_empty() {
+                            format!("No local matches for `{query}`.")
+                        } else {
+                            body
+                        },
+                    );
+                    self.activities
+                        .push("Search results opened in transcript.".to_string());
+                }
             }
             "/permissions" => {
                 let sub = parts.next().unwrap_or_default();
@@ -776,7 +1177,7 @@ impl App {
             "/mcp" => {
                 let sub = parts.next().unwrap_or_default();
                 match sub {
-                    "" | "status" => self.show_mcp_server_status(),
+                    "" | "status" => self.show_mcp_server_status().await,
                     "reset" => {
                         self.persist_enabled_mcp_servers(None)?;
                         if self.configured_mcp_servers.is_empty() {
@@ -885,20 +1286,22 @@ impl App {
                 }
             }
             "/compact" => {
+                self.status = "Compacting conversation".to_string();
                 self.activities
                     .push("Compacting conversation...".to_string());
                 let orchestrator = self.orchestrator.clone();
                 let conv_id = self.current_conversation_id.clone();
                 let ui_tx = self.ui_tx.clone();
                 tokio::spawn(async move {
-                    match orchestrator.compact_conversation(&conv_id, ui_tx).await {
-                        Ok(_) => {}
-                        Err(err) => {
+                    let result = orchestrator
+                        .compact_conversation(&conv_id, ui_tx.clone())
+                        .await
+                        .map_err(|err| {
                             tracing::error!(error = %err, "compaction failed");
-                        }
-                    }
+                            format!("{err:#}")
+                        });
+                    let _ = ui_tx.send(UiEvent::CompactionFinished(result));
                 });
-                self.activities.push("Conversation compacted.".to_string());
             }
             "/recipes" => {
                 let recipes = self.orchestrator.recipes().list();
@@ -908,7 +1311,7 @@ impl App {
                         .push("Recipe list opened in transcript.".to_string());
                 } else {
                     let body = recipes
-                        .into_iter()
+                        .iter()
                         .map(|recipe| {
                             let desc = recipe.description.as_deref().unwrap_or("No description.");
                             format!("- `{}`: {}", recipe.name, desc)
@@ -1004,8 +1407,14 @@ impl App {
     }
 
     async fn dispatch_message(&mut self, message: String) -> Result<()> {
+        let message = expand_prompt_file_references(
+            &message,
+            &self.agent_permissions,
+            discover_project_root().as_deref(),
+        )?;
         self.inflight = true;
         self.status = "Dispatching message".to_string();
+        self.persistent_warning = None;
         let orchestrator = self.orchestrator.clone();
         let ui_tx = self.ui_tx.clone();
         let conversation_id = self.current_conversation_id.clone();
@@ -1022,6 +1431,9 @@ impl App {
     fn handle_ui_event(&mut self, event: UiEvent) -> Result<()> {
         match event {
             UiEvent::Progress(progress) => {
+                if progress.kind == "tool_limit" {
+                    self.persistent_warning = Some(progress.message.clone());
+                }
                 let tool_prefix = progress
                     .tool_name
                     .as_deref()
@@ -1061,6 +1473,24 @@ impl App {
                     }
                 }
             }
+            UiEvent::CompactionFinished(result) => match result {
+                Ok(summary) => {
+                    self.status = "Conversation compacted".to_string();
+                    self.activities.push(format!(
+                        "Conversation compacted. Summary: {} chars",
+                        summary.len()
+                    ));
+                }
+                Err(err) => {
+                    self.status = "Compaction failed".to_string();
+                    self.activities.push(format!("ERROR // {err}"));
+                    error!(
+                        conversation_id = %self.current_conversation_id,
+                        error = %err,
+                        "conversation compaction failed in TUI"
+                    );
+                }
+            },
         }
         Ok(())
     }
@@ -1080,6 +1510,8 @@ impl App {
     fn status_line(&self) -> String {
         if self.inflight {
             format!("{} {}", SPINNER[self.spinner_index], self.status)
+        } else if let Some(warning) = &self.persistent_warning {
+            format!("WARNING // {warning}")
         } else {
             self.status.clone()
         }
@@ -1107,6 +1539,7 @@ impl App {
         self.enabled_mcp_servers = conversation.enabled_mcp_servers;
         self.agent_permissions = conversation.agent_permissions;
         self.message_scroll = 0;
+        self.persistent_warning = None;
     }
 
     fn push_command_output(&mut self, command: &str, body: impl Into<String>) {
@@ -1168,10 +1601,28 @@ impl App {
         (known, unknown)
     }
 
-    fn show_mcp_server_status(&mut self) {
+    async fn show_mcp_server_status(&mut self) {
+        let tool_counts = if self.agent_permissions.allows_network() {
+            match self.orchestrator.mcp_tool_counts_by_server(None).await {
+                Ok(counts) => Some(counts),
+                Err(err) => {
+                    self.activities
+                        .push(format!("MCP tool counts unavailable: {err}"));
+                    None
+                }
+            }
+        } else {
+            self.activities.push(
+                "MCP tool counts unavailable: network access is disabled by the current permissions."
+                    .to_string(),
+            );
+            None
+        };
+
         let statuses = build_mcp_server_statuses(
             &self.configured_mcp_servers,
             self.enabled_mcp_servers.as_deref(),
+            tool_counts.as_ref(),
         );
 
         if statuses.is_empty() {
@@ -1189,7 +1640,11 @@ impl App {
                 } else {
                     "disabled"
                 };
-                format!("- `{}`: {}", status.name, state)
+                let tool_count = status
+                    .tool_count
+                    .map(|count| format!("{count} tools"))
+                    .unwrap_or_else(|| "tool count unavailable".to_string());
+                format!("- `{}`: {} ({tool_count})", status.name, state)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1234,17 +1689,20 @@ impl App {
 struct McpServerStatus {
     name: String,
     enabled: bool,
+    tool_count: Option<usize>,
 }
 
 fn build_mcp_server_statuses(
     configured_mcp_servers: &[String],
     enabled_mcp_servers: Option<&[String]>,
+    tool_counts: Option<&std::collections::HashMap<String, usize>>,
 ) -> Vec<McpServerStatus> {
     configured_mcp_servers
         .iter()
         .map(|name| McpServerStatus {
             name: name.clone(),
             enabled: is_mcp_server_enabled(name, enabled_mcp_servers),
+            tool_count: tool_counts.and_then(|counts| counts.get(name).copied()),
         })
         .collect()
 }
@@ -1273,110 +1731,11 @@ fn canonicalize_mcp_filter(
     }
 }
 
-fn render_mcp_status_line(
-    configured_mcp_servers: &[String],
-    enabled_mcp_servers: Option<&[String]>,
-) -> Line<'static> {
-    if configured_mcp_servers.is_empty() {
-        return Line::from(vec![
-            Span::styled(
-                "MCP",
-                Style::default()
-                    .fg(neon_gold())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled("none configured", Style::default().fg(muted_synth())),
-        ]);
-    }
-
-    let mut spans = vec![Span::styled(
-        "MCP",
-        Style::default()
-            .fg(neon_gold())
-            .add_modifier(Modifier::BOLD),
-    )];
-
-    for status in build_mcp_server_statuses(configured_mcp_servers, enabled_mcp_servers) {
-        spans.push(Span::raw("   "));
-        spans.push(Span::styled(
-            "●",
-            Style::default().fg(if status.enabled {
-                neon_lime()
-            } else {
-                signal_red()
-            }),
-        ));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            status.name,
-            Style::default().fg(if status.enabled {
-                synth_text()
-            } else {
-                muted_synth()
-            }),
-        ));
-    }
-
-    Line::from(spans)
-}
-
-fn render_agent_permissions_line(agent_permissions: &AgentPermissions) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            "PERMS",
-            Style::default()
-                .fg(neon_gold())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!(
-                "net:{}",
-                if agent_permissions.allows_network() {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-            Style::default().fg(if agent_permissions.allows_network() {
-                neon_lime()
-            } else {
-                signal_red()
-            }),
-        ),
-        Span::raw("   "),
-        Span::styled(
-            format!(
-                "fs:{}",
-                if agent_permissions.yolo {
-                    "all"
-                } else {
-                    agent_permissions.filesystem.label()
-                }
-            ),
-            Style::default().fg(match agent_permissions.filesystem {
-                FilesystemAccess::None if !agent_permissions.yolo => signal_red(),
-                FilesystemAccess::ReadOnly if !agent_permissions.yolo => neon_cyan(),
-                _ => neon_lime(),
-            }),
-        ),
-        Span::raw("   "),
-        Span::styled(
-            format!("yolo:{}", if agent_permissions.yolo { "on" } else { "off" }),
-            Style::default().fg(if agent_permissions.yolo {
-                neon_pink()
-            } else {
-                muted_synth()
-            }),
-        ),
-    ])
-}
-
 fn max_message_scroll(total_lines: u16, viewport_lines: u16) -> u16 {
     total_lines.saturating_sub(viewport_lines)
 }
 
+#[cfg(test)]
 fn ordered_messages(messages: &[Message]) -> Vec<&Message> {
     messages.iter().rev().collect()
 }
@@ -1396,8 +1755,13 @@ fn build_help_markdown() -> String {
         "- `/list`: List recent conversations",
         "- `/use <id>`: Switch conversation",
         "- `/show [id]`: Load and display a conversation",
+        "- `/history`: Show recent transcript history for the current conversation",
         "- `/delete <id>`: Delete a conversation",
         "- `/compact`: Compact the current conversation",
+        "- `/jobs`: Show remembered jobs for the current conversation",
+        "- `/scratch [show|set|append|clear]`: Manage the local scratchpad for this conversation",
+        "- `/findings [list|add|remove]`: Manage structured findings for this conversation",
+        "- `/search <query>`: Search conversations, scratchpads, and findings locally",
         "",
         "### Recipes",
         "- `/recipes`: List installed recipes",
@@ -1422,8 +1786,7 @@ fn build_help_markdown() -> String {
         "- `/yolo on|off`: Shortcut for YOLO mode",
         "",
         "### Session",
-        "- `/model`: Show the current model note",
-        "- `/logging`: Show the logging note",
+        "- `/logging`: Show current tracing and audit log locations",
         "- `/help`: Open this command reference",
         "- `/exit` or `/quit`: Leave the TUI",
         "",
@@ -1431,6 +1794,7 @@ fn build_help_markdown() -> String {
         "- `Enter`: Send the current input",
         "- `<<<` then `>>>`: Capture and send multiline input",
         "- `Up` / `Down`: Scroll the transcript",
+        "- `Ctrl+Up` / `Ctrl+Down`: Browse session-only input history",
         "- `PageUp` / `PageDown`: Page through the transcript",
         "- `Home` / `End`: Jump to the latest transcript position",
     ]
@@ -1475,18 +1839,33 @@ fn build_scroll_indicator_lines(
         .map(|index| {
             let (glyph, style) = if index >= thumb_offset && index < thumb_offset + thumb_size {
                 (
-                    "█",
+                    "▐",
                     Style::default()
                         .fg(neon_pink())
                         .bg(panel_ink())
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                ("│", Style::default().fg(muted_synth()).bg(panel_ink()))
+                ("░", Style::default().fg(muted_synth()).bg(panel_ink()))
             };
             Line::from(Span::styled(glyph.to_string(), style))
         })
         .collect()
+}
+
+fn count_wrapped_rows(lines: &[Line<'_>], width: u16) -> usize {
+    let width = usize::from(width.max(1));
+    lines
+        .iter()
+        .map(|line| {
+            let line_width = line.width();
+            if line_width == 0 {
+                1
+            } else {
+                line_width.div_ceil(width)
+            }
+        })
+        .sum()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1573,7 +1952,7 @@ impl MarkdownRenderer {
                 MdEvent::Rule => {
                     self.flush_line();
                     self.lines.push(Line::from(Span::styled(
-                        "╶──────────────────────╴",
+                        "────────────────────",
                         Style::default().fg(muted_synth()),
                     )));
                 }
@@ -1785,7 +2164,7 @@ impl MarkdownRenderer {
 
     fn push_code_block_line(&mut self, line: &str) {
         let mut spans = vec![Span::styled(
-            "│ ",
+            "▏ ",
             Style::default().fg(neon_cyan()).bg(input_ink()),
         )];
         spans.push(Span::styled(
@@ -1844,16 +2223,16 @@ impl MarkdownRenderer {
     fn push_prefixes(&mut self) {
         if self.quote_depth > 0 {
             self.current_spans.push(Span::styled(
-                format!("{} ", "▍".repeat(self.quote_depth)),
+                format!("{} ", "▏".repeat(self.quote_depth)),
                 self.current_quote_style(),
             ));
         }
         if let Some(level) = self.heading_level {
             let (marker, color) = match level {
-                HeadingLevel::H1 => ("▓ ", neon_pink()),
-                HeadingLevel::H2 => ("◆ ", neon_cyan()),
-                HeadingLevel::H3 => ("◇ ", neon_gold()),
-                _ => ("• ", neon_gold()),
+                HeadingLevel::H1 => ("■ ", neon_pink()),
+                HeadingLevel::H2 => ("▪ ", neon_cyan()),
+                HeadingLevel::H3 => ("• ", neon_gold()),
+                _ => ("· ", neon_gold()),
             };
             self.current_spans.push(Span::styled(
                 marker,
@@ -1889,7 +2268,7 @@ impl MarkdownRenderer {
                 *index += 1;
                 prefix
             }
-            None => format!("{indent}• "),
+            None => format!("{indent}- "),
         }
     }
 
@@ -1930,7 +2309,7 @@ fn render_quote_label(kind: BlockQuoteKind) -> Line<'static> {
     };
     Line::from(vec![
         Span::styled(
-            "▌ ",
+            "▎ ",
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -1942,9 +2321,9 @@ fn render_quote_label(kind: BlockQuoteKind) -> Line<'static> {
 
 fn render_code_block_chrome(language: Option<&str>, top: bool) -> Line<'static> {
     let label = match (top, language) {
-        (true, Some(language)) if !language.is_empty() => format!("┌─ code: {language}"),
-        (true, _) => "┌─ code".to_string(),
-        (false, _) => "└─".to_string(),
+        (true, Some(language)) if !language.is_empty() => format!(" code [{language}] "),
+        (true, _) => " code ".to_string(),
+        (false, _) => " end ".to_string(),
     };
     Line::from(Span::styled(
         label,
@@ -1987,22 +2366,25 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use crate::{
-        config::{AppConfig, AzureOpenAiConfig, McpRuntimeConfig, McpServerConfig},
+        config::{
+            AppConfig, AzureOpenAiConfig, LocalToolsConfig, McpRuntimeConfig, McpServerConfig,
+        },
         orchestrator::Orchestrator,
-        types::{AgentPermissions, FilesystemAccess, Message},
+        prompt_expansion::expand_prompt_file_references,
+        types::{AgentPermissions, FilesystemAccess, Message, UiEvent},
     };
 
     use super::{
         App, McpServerStatus, build_mcp_server_statuses, build_scroll_indicator_lines,
-        canonicalize_mcp_filter, max_message_scroll, neon_gold, neon_pink, ordered_messages,
-        render_markdown,
+        canonicalize_mcp_filter, count_wrapped_rows, max_message_scroll, neon_gold, neon_pink,
+        ordered_messages, render_markdown,
     };
 
     fn test_config(data_dir: PathBuf, mcp_servers: &[&str]) -> AppConfig {
         AppConfig {
             prompt: None,
             data_dir: Some(data_dir),
-            azure_openai: AzureOpenAiConfig {
+            azure_openai: Some(AzureOpenAiConfig {
                 api_key: "test-key".to_string(),
                 api_version: "2024-10-21".to_string(),
                 endpoint: "https://example.invalid".to_string(),
@@ -2010,8 +2392,9 @@ mod tests {
                 temperature: 0.2,
                 top_p: 1.0,
                 max_output_tokens: 512,
-            },
+            }),
             agent_permissions: AgentPermissions::default(),
+            local_tools: LocalToolsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: mcp_servers
                 .iter()
@@ -2064,13 +2447,13 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.spans.iter().any(|span| span.content == "• "))
+                .any(|line| line.spans.iter().any(|span| span.content == "- "))
         );
-        assert!(lines.iter().any(|line| {
-            line.spans
+        assert!(
+            lines
                 .iter()
-                .any(|span| span.content.contains("┌") && span.content.contains("code"))
-        }));
+                .any(|line| { line.spans.iter().any(|span| span.content.contains("code")) })
+        );
         assert!(lines.iter().any(|line| {
             line.spans
                 .iter()
@@ -2115,6 +2498,13 @@ mod tests {
     }
 
     #[test]
+    fn counts_wrapped_rows_using_transcript_width() {
+        let lines = render_markdown("12345\n\n123456");
+
+        assert_eq!(count_wrapped_rows(&lines, 5), 5);
+    }
+
+    #[test]
     fn latest_messages_sort_first_in_stack() {
         let messages = vec![
             Message {
@@ -2142,7 +2532,7 @@ mod tests {
         let lines = build_scroll_indicator_lines(20, 5, 0);
 
         assert_eq!(lines.len(), 5);
-        assert_eq!(lines[0].spans[0].content, "█");
+        assert_eq!(lines[0].spans[0].content, "▐");
     }
 
     #[test]
@@ -2150,7 +2540,7 @@ mod tests {
         let lines = build_scroll_indicator_lines(20, 5, 15);
 
         assert_eq!(lines.len(), 5);
-        assert_eq!(lines[4].spans[0].content, "█");
+        assert_eq!(lines[4].spans[0].content, "▐");
     }
 
     #[test]
@@ -2158,34 +2548,60 @@ mod tests {
         let configured = vec!["alpha".to_string(), "beta".to_string()];
 
         assert_eq!(
-            build_mcp_server_statuses(&configured, None),
+            build_mcp_server_statuses(&configured, None, None),
             vec![
                 McpServerStatus {
                     name: "alpha".to_string(),
                     enabled: true,
+                    tool_count: None,
                 },
                 McpServerStatus {
                     name: "beta".to_string(),
                     enabled: true,
+                    tool_count: None,
                 },
             ]
         );
         assert_eq!(
-            build_mcp_server_statuses(&configured, Some(&[])),
+            build_mcp_server_statuses(&configured, Some(&[]), None),
             vec![
                 McpServerStatus {
                     name: "alpha".to_string(),
                     enabled: false,
+                    tool_count: None,
                 },
                 McpServerStatus {
                     name: "beta".to_string(),
                     enabled: false,
+                    tool_count: None,
                 },
             ]
         );
         assert_eq!(
             canonicalize_mcp_filter(&configured, Vec::new()),
             Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn mcp_statuses_include_tool_counts_when_available() {
+        let configured = vec!["alpha".to_string(), "beta".to_string()];
+        let counts = HashMap::from([("alpha".to_string(), 4usize), ("beta".to_string(), 9usize)]);
+
+        assert_eq!(
+            build_mcp_server_statuses(&configured, None, Some(&counts)),
+            vec![
+                McpServerStatus {
+                    name: "alpha".to_string(),
+                    enabled: true,
+                    tool_count: Some(4),
+                },
+                McpServerStatus {
+                    name: "beta".to_string(),
+                    enabled: true,
+                    tool_count: Some(9),
+                },
+            ]
         );
     }
 
@@ -2292,5 +2708,146 @@ mod tests {
             .load(&app.current_conversation_id)
             .unwrap();
         assert_eq!(convo.pending_recipe.as_deref(), Some("ip-reputation"));
+    }
+
+    #[test]
+    fn prompt_expansion_is_available_to_tui_flow() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("note.md"), "hello from tui").unwrap();
+
+        let expanded = expand_prompt_file_references(
+            "Use @note.md",
+            &AgentPermissions::default(),
+            Some(dir.path()),
+        )
+        .unwrap();
+
+        assert!(expanded.contains("[file: note.md]"));
+        assert!(expanded.contains("hello from tui"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_message_rejects_invalid_file_reference_before_inflight() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        let err = app
+            .dispatch_message("Use @missing.md".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("failed to resolve referenced file")
+        );
+        assert!(!app.inflight);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn multiline_capture_preserves_blank_lines() {
+        let (_dir, mut app) = test_app(&[]).await;
+        app.multiline_buffer = Some(Vec::new());
+
+        app.handle_submission("first".to_string()).await.unwrap();
+        app.handle_submission(String::new()).await.unwrap();
+        app.handle_submission("third".to_string()).await.unwrap();
+
+        assert_eq!(
+            app.multiline_buffer,
+            Some(vec![
+                "first".to_string(),
+                "".to_string(),
+                "third".to_string()
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_completion_updates_status_when_event_arrives() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        app.handle_command("/compact").await.unwrap();
+        assert_eq!(app.status, "Compacting conversation");
+        assert_eq!(app.activities.last().unwrap(), "Compacting conversation...");
+
+        app.handle_ui_event(UiEvent::CompactionFinished(Ok("summary".to_string())))
+            .unwrap();
+
+        assert_eq!(app.status, "Conversation compacted");
+        assert!(
+            app.activities
+                .last()
+                .unwrap()
+                .contains("Conversation compacted. Summary: 7 chars")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scratchpad_commands_round_trip() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        app.handle_command("/scratch set first line").await.unwrap();
+        app.handle_command("/scratch append second line")
+            .await
+            .unwrap();
+        app.handle_command("/scratch").await.unwrap();
+
+        let body = &app.command_output.last().unwrap().content;
+        assert!(body.contains("first line"));
+        assert!(body.contains("second line"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn findings_and_search_commands_surface_results() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        app.handle_command("/findings add ip 1.2.3.4 confirmed beacon")
+            .await
+            .unwrap();
+        app.handle_command("/findings").await.unwrap();
+        assert!(
+            app.command_output
+                .last()
+                .unwrap()
+                .content
+                .contains("1.2.3.4")
+        );
+
+        app.handle_command("/search 1.2.3.4").await.unwrap();
+        assert!(
+            app.command_output
+                .last()
+                .unwrap()
+                .content
+                .contains("finding")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_history_recalls_previous_entries() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        app.handle_submission("/logging".to_string()).await.unwrap();
+        app.handle_submission("/help".to_string()).await.unwrap();
+
+        app.navigate_input_history(true);
+        assert_eq!(app.input, "/help");
+
+        app.navigate_input_history(true);
+        assert_eq!(app.input, "/logging");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_history_restores_draft_when_exiting_navigation() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        app.handle_submission("/help".to_string()).await.unwrap();
+        app.input = "draft query".to_string();
+
+        app.navigate_input_history(true);
+        assert_eq!(app.input, "/help");
+
+        app.navigate_input_history(false);
+        assert_eq!(app.input, "draft query");
+        assert_eq!(app.input_history_cursor, None);
     }
 }

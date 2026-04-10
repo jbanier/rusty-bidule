@@ -15,7 +15,10 @@ use tokio::sync::{Mutex, mpsc::unbounded_channel};
 use tracing::info;
 
 use crate::{
+    config::AppConfig,
     orchestrator::Orchestrator,
+    paths::discover_project_root,
+    prompt_expansion::expand_prompt_file_references,
     recipes::RecipeRegistry,
     types::{ConversationSummary, ProgressEvent, RunTurnResult, UiEvent},
 };
@@ -28,6 +31,7 @@ static INDEX_HTML: &str = include_str!("static/index.html");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobState {
+    pub conversation_id: Option<String>,
     pub status: String,
     pub events: Vec<ProgressEvent>,
     pub result: Option<RunTurnResult>,
@@ -92,6 +96,11 @@ struct McpServersBody {
     enabled: Option<Vec<String>>,
 }
 
+#[derive(Deserialize)]
+struct ConfigUpdateBody {
+    config: AppConfig,
+}
+
 // ---------------------------------------------------------------------------
 // Error helper
 // ---------------------------------------------------------------------------
@@ -101,7 +110,22 @@ struct AppError(anyhow::Error);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let body = json!({"error": self.0.to_string()});
-        (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(body)).into_response()
+        let status = if body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not found")
+        {
+            StatusCode::NOT_FOUND
+        } else if body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid")
+        {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, axum::Json(body)).into_response()
     }
 }
 
@@ -144,6 +168,7 @@ async fn get_conversation(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
     let convo = state.orchestrator.store().load(&id)?;
     Ok(axum::Json(serde_json::to_value(&convo)?))
 }
@@ -152,6 +177,7 @@ async fn delete_conversation(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
+    validate_resource_id(&id, "conversation")?;
     state.orchestrator.store().delete(&id)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -161,12 +187,21 @@ async fn post_message(
     Path(id): Path<String>,
     axum::Json(body): axum::Json<PostMessageBody>,
 ) -> AppResult<(StatusCode, axum::Json<serde_json::Value>)> {
+    validate_resource_id(&id, "conversation")?;
+    let conversation = state.orchestrator.store().load(&id)?;
+    let content = expand_prompt_file_references(
+        &body.content,
+        &conversation.agent_permissions,
+        discover_project_root().as_deref(),
+    )?;
+    ensure_no_active_job_for_conversation(&state, &id).await?;
     let job_id = new_job_id();
     {
         let mut jobs = state.jobs.lock().await;
         jobs.insert(
             job_id.clone(),
             JobState {
+                conversation_id: Some(id.clone()),
                 status: "running".to_string(),
                 events: Vec::new(),
                 result: None,
@@ -180,8 +215,6 @@ async fn post_message(
     let jobs = state.jobs.clone();
     let conversation_id = id.clone();
     let job_id_clone = job_id.clone();
-    let content = body.content;
-
     tokio::spawn(async move {
         let (ui_tx, mut ui_rx) = unbounded_channel::<UiEvent>();
 
@@ -190,11 +223,14 @@ async fn post_message(
         let job_id_ev = job_id_clone.clone();
         tokio::spawn(async move {
             while let Some(event) = ui_rx.recv().await {
-                if let UiEvent::Progress(p) = event {
-                    let mut lock = jobs_ev.lock().await;
-                    if let Some(job) = lock.get_mut(&job_id_ev) {
-                        job.events.push(p);
+                match event {
+                    UiEvent::Progress(p) => {
+                        let mut lock = jobs_ev.lock().await;
+                        if let Some(job) = lock.get_mut(&job_id_ev) {
+                            job.events.push(p);
+                        }
                     }
+                    UiEvent::Finished(_) | UiEvent::CompactionFinished(_) => {}
                 }
             }
         });
@@ -228,10 +264,57 @@ async fn post_message(
 async fn compact_conversation(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
-) -> AppResult<axum::Json<serde_json::Value>> {
-    let (ui_tx, _ui_rx) = unbounded_channel::<UiEvent>();
-    let summary = state.orchestrator.compact_conversation(&id, ui_tx).await?;
-    Ok(axum::Json(json!({"summary": summary})))
+) -> AppResult<(StatusCode, axum::Json<serde_json::Value>)> {
+    validate_resource_id(&id, "conversation")?;
+    ensure_no_active_job_for_conversation(&state, &id).await?;
+    let job_id = new_job_id();
+    {
+        let mut jobs = state.jobs.lock().await;
+        jobs.insert(
+            job_id.clone(),
+            JobState {
+                conversation_id: Some(id.clone()),
+                status: "running".to_string(),
+                events: Vec::new(),
+                result: None,
+                error: None,
+                completed_at: None,
+            },
+        );
+    }
+
+    let orchestrator = state.orchestrator.clone();
+    let jobs = state.jobs.clone();
+    let conversation_id = id.clone();
+    let job_id_clone = job_id.clone();
+    tokio::spawn(async move {
+        let (ui_tx, _ui_rx) = unbounded_channel::<UiEvent>();
+        let result = orchestrator
+            .compact_conversation(&conversation_id, ui_tx)
+            .await;
+        let mut lock = jobs.lock().await;
+        if let Some(job) = lock.get_mut(&job_id_clone) {
+            match result {
+                Ok(summary) => mark_job_completed(
+                    job,
+                    "done",
+                    Some(RunTurnResult {
+                        reply: summary,
+                        tool_calls: 0,
+                    }),
+                    None,
+                ),
+                Err(err) => {
+                    mark_job_completed(job, "failed", None, Some(format!("{err:#}")));
+                }
+            }
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        axum::Json(json!({"job_id": job_id, "conversation_id": id})),
+    ))
 }
 
 async fn list_recipes(
@@ -258,6 +341,7 @@ async fn use_recipe(
     Path(id): Path<String>,
     axum::Json(body): axum::Json<RecipeUseBody>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
     let store = state.orchestrator.store();
     let mut convo = store.load(&id)?;
     convo.pending_recipe = Some(body.name);
@@ -269,6 +353,7 @@ async fn clear_recipe(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
     let store = state.orchestrator.store();
     let mut convo = store.load(&id)?;
     convo.pending_recipe = None;
@@ -280,6 +365,7 @@ async fn get_mcp_servers(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
     let convo = state.orchestrator.store().load(&id)?;
     Ok(axum::Json(json!({"enabled": convo.enabled_mcp_servers})))
 }
@@ -289,6 +375,7 @@ async fn put_mcp_servers(
     Path(id): Path<String>,
     axum::Json(body): axum::Json<McpServersBody>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
     let store = state.orchestrator.store();
     let mut convo = store.load(&id)?;
     convo.enabled_mcp_servers = body.enabled;
@@ -300,6 +387,7 @@ async fn delete_mcp_servers(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
+    validate_resource_id(&id, "conversation")?;
     let store = state.orchestrator.store();
     let mut convo = store.load(&id)?;
     convo.enabled_mcp_servers = None;
@@ -307,10 +395,74 @@ async fn delete_mcp_servers(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn list_conversation_jobs(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let jobs = state.orchestrator.store().load_job_state(&id)?;
+    Ok(axum::Json(json!(jobs)))
+}
+
+async fn get_config(State(state): State<WebAppState>) -> AppResult<axum::Json<serde_json::Value>> {
+    Ok(axum::Json(serde_json::to_value(
+        state.orchestrator.config(),
+    )?))
+}
+
+async fn put_config(
+    axum::Json(body): axum::Json<ConfigUpdateBody>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    let path = current_config_path();
+    body.config.save(&path)?;
+    Ok(axum::Json(json!({
+        "saved_to": path,
+        "reload_required": true
+    })))
+}
+
+async fn list_oauth_servers(
+    State(state): State<WebAppState>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    let servers = state
+        .orchestrator
+        .config()
+        .mcp_servers
+        .into_iter()
+        .filter(|server| {
+            matches!(
+                server.auth,
+                Some(crate::config::McpAuthConfig::OauthPublic(_))
+            )
+        })
+        .map(|server| json!({"name": server.name, "url": server.url}))
+        .collect::<Vec<_>>();
+    Ok(axum::Json(json!(servers)))
+}
+
+async fn start_oauth_server(
+    State(state): State<WebAppState>,
+    Path(server_name): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&server_name, "server")?;
+    state.orchestrator.login_mcp_server(&server_name).await?;
+    Ok(axum::Json(
+        json!({"server": server_name, "status": "authorized"}),
+    ))
+}
+
+async fn oauth_callback(Path(server_name): Path<String>) -> Html<String> {
+    Html(format!(
+        "<html><body><h1>OAuth callback received for {}</h1><p>The Rust runtime currently completes OAuth through the MCP login flow.</p></body></html>",
+        server_name
+    ))
+}
+
 async fn get_job(
     State(state): State<WebAppState>,
     Path(job_id): Path<String>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&job_id, "job")?;
     let jobs = state.jobs.lock().await;
     let job = jobs
         .get(&job_id)
@@ -322,6 +474,7 @@ async fn delete_job(
     State(state): State<WebAppState>,
     Path(job_id): Path<String>,
 ) -> AppResult<StatusCode> {
+    validate_resource_id(&job_id, "job")?;
     let mut jobs = state.jobs.lock().await;
     jobs.remove(&job_id)
         .ok_or_else(|| anyhow::anyhow!("job '{job_id}' not found"))?;
@@ -348,6 +501,8 @@ pub async fn run_web_server(
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route("/oauth/callback/{server_name}", get(oauth_callback))
+        .route("/api/config", get(get_config).put(put_config))
         .route(
             "/api/conversations",
             get(list_conversations).post(create_conversation),
@@ -371,6 +526,12 @@ pub async fn run_web_server(
                 .put(put_mcp_servers)
                 .delete(delete_mcp_servers),
         )
+        .route("/api/conversations/{id}/jobs", get(list_conversation_jobs))
+        .route("/api/mcp/oauth-servers", get(list_oauth_servers))
+        .route(
+            "/api/mcp/oauth-servers/{server_name}/start",
+            post(start_oauth_server),
+        )
         .route("/api/recipes", get(list_recipes))
         .route("/api/jobs/{job_id}", get(get_job).delete(delete_job))
         .with_state(state);
@@ -382,6 +543,41 @@ pub async fn run_web_server(
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn ensure_no_active_job_for_conversation(
+    state: &WebAppState,
+    conversation_id: &str,
+) -> AppResult<()> {
+    let jobs = state.jobs.lock().await;
+    if jobs.values().any(|job| {
+        job.status == "running" && job.conversation_id.as_deref() == Some(conversation_id)
+    }) {
+        return Err(anyhow::anyhow!(
+            "conversation '{conversation_id}' already has a running web job"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_resource_id(value: &str, kind: &str) -> AppResult<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(anyhow::anyhow!("invalid {kind} id '{value}'").into());
+    }
+    Ok(())
+}
+
+fn current_config_path() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("RUSTY_BIDULE_CONFIG") {
+        return path.into();
+    }
+    std::path::PathBuf::from("config/config.local.yaml")
 }
 
 fn mark_job_completed(
@@ -419,11 +615,39 @@ fn spawn_job_registry_sweeper(jobs: JobRegistry) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
+    use axum::{
+        extract::{Path, State},
+        response::IntoResponse,
+    };
     use chrono::Duration as ChronoDuration;
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
 
-    use super::{COMPLETED_JOB_TTL, JobState, evict_expired_jobs};
+    use crate::{
+        config::{AppConfig, LocalToolsConfig, McpRuntimeConfig},
+        orchestrator::Orchestrator,
+        recipes::RecipeRegistry,
+        types::AgentPermissions,
+    };
+
+    use super::{
+        COMPLETED_JOB_TTL, JobState, PostMessageBody, WebAppState, evict_expired_jobs, post_message,
+    };
+
+    fn test_config(data_dir: std::path::PathBuf) -> AppConfig {
+        AppConfig {
+            prompt: None,
+            data_dir: Some(data_dir),
+            azure_openai: None,
+            agent_permissions: AgentPermissions::default(),
+            local_tools: LocalToolsConfig::default(),
+            mcp_runtime: McpRuntimeConfig::default(),
+            mcp_servers: Vec::new(),
+            tracing: None,
+        }
+    }
 
     #[test]
     fn evicts_only_completed_jobs_past_ttl() {
@@ -432,6 +656,7 @@ mod tests {
             (
                 "running".to_string(),
                 JobState {
+                    conversation_id: None,
                     status: "running".to_string(),
                     events: Vec::new(),
                     result: None,
@@ -442,6 +667,7 @@ mod tests {
             (
                 "fresh".to_string(),
                 JobState {
+                    conversation_id: None,
                     status: "done".to_string(),
                     events: Vec::new(),
                     result: None,
@@ -452,6 +678,7 @@ mod tests {
             (
                 "expired".to_string(),
                 JobState {
+                    conversation_id: None,
                     status: "failed".to_string(),
                     events: Vec::new(),
                     result: None,
@@ -466,5 +693,34 @@ mod tests {
         assert!(jobs.contains_key("running"));
         assert!(jobs.contains_key("fresh"));
         assert!(!jobs.contains_key("expired"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_message_rejects_invalid_file_reference_before_creating_job() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let err = post_message(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+            axum::Json(PostMessageBody {
+                content: "Use @missing.md".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        let response = err.into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(state.jobs.lock().await.is_empty());
     }
 }

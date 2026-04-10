@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::{McpRuntimeConfig, McpServerConfig},
+    config::{McpAuthConfig, McpRuntimeConfig, McpServerConfig},
     oauth::OAuthProvider,
 };
 
@@ -147,7 +147,7 @@ impl McpManager {
 
         info!(server = server_name, "starting explicit MCP login");
         let server = &self.servers[index];
-        let auth = self.oauth.authorize_server(&server.config).await?;
+        let auth = self.oauth.authorize_server_forced(&server.config).await?;
         if auth.is_none() {
             bail!("server '{server_name}' is not configured for OAuth login");
         }
@@ -463,6 +463,13 @@ fn build_headers(
         let header_name = HeaderName::from_bytes(name.as_bytes())?;
         let header_value = HeaderValue::from_str(value)?;
         headers.insert(header_name, header_value);
+    }
+    if let Some(McpAuthConfig::StaticHeaders(static_headers)) = &config.auth {
+        for (name, value) in &static_headers.headers {
+            let header_name = HeaderName::from_bytes(name.as_bytes())?;
+            let header_value = HeaderValue::from_str(value)?;
+            headers.insert(header_name, header_value);
+        }
     }
     if let Some(bearer_token) = bearer_token {
         headers.insert(

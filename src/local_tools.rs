@@ -1,18 +1,21 @@
 use std::{
-    collections::HashMap,
     ffi::OsStr,
     path::{Path, PathBuf},
+    process::Stdio,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::{Duration as ChronoDuration, Utc};
+use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 use tokio::time::Duration;
 
 use crate::{
     azure::AzureTool,
     conversation_store::ConversationStore,
     skills::{SkillRegistry, SkillTool},
-    types::{AgentPermissions, FilesystemAccess},
+    types::{AgentPermissions, FilesystemAccess, RememberedJob},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,12 +32,27 @@ struct SkillLaunchSpec {
 
 impl SkillLaunchSpec {
     fn new(skill_dir: &Path, script: &str) -> Result<Self> {
+        let skill_dir = std::fs::canonicalize(skill_dir)
+            .with_context(|| format!("failed to canonicalize skill dir {}", skill_dir.display()))?;
         let script_path = skill_dir.join(script);
         if !script_path.is_file() {
             bail!(
                 "skill script not found: {} (resolved from '{}' in {})",
                 script_path.display(),
                 script,
+                skill_dir.display()
+            );
+        }
+        let script_path = std::fs::canonicalize(&script_path).with_context(|| {
+            format!(
+                "failed to canonicalize skill script {}",
+                script_path.display()
+            )
+        })?;
+        if !script_path.starts_with(&skill_dir) {
+            bail!(
+                "skill script escapes skill directory: {} is outside {}",
+                script_path.display(),
                 skill_dir.display()
             );
         }
@@ -101,6 +119,8 @@ pub struct LocalToolExecutor {
     conversation_id: String,
     skills: Option<SkillRegistry>,
     permissions: AgentPermissions,
+    enabled_local_tools: Option<Vec<String>>,
+    execution_timeout: Duration,
 }
 
 impl LocalToolExecutor {
@@ -109,34 +129,43 @@ impl LocalToolExecutor {
         conversation_id: impl Into<String>,
         skills: Option<SkillRegistry>,
         permissions: AgentPermissions,
+        enabled_local_tools: Option<Vec<String>>,
+        execution_timeout: Duration,
     ) -> Self {
         Self {
             store,
             conversation_id: conversation_id.into(),
             skills,
             permissions,
+            enabled_local_tools,
+            execution_timeout,
         }
     }
 
     pub fn is_local_tool(&self, name: &str) -> bool {
-        matches!(
+        let advertised = matches!(
             name,
             "local__sleep"
                 | "local__remember_job"
+                | "local__update_job"
                 | "local__get_job"
                 | "local__list_jobs"
                 | "local__forget_job"
+                | "local__configure_mcp_servers"
                 | "local__run_skill"
-        )
+        );
+        advertised && self.is_tool_enabled(name)
     }
 
     pub async fn execute(&self, name: &str, arguments: Value) -> Result<String> {
         match name {
             "local__sleep" => self.exec_sleep(arguments).await,
             "local__remember_job" => self.exec_remember_job(arguments),
+            "local__update_job" => self.exec_update_job(arguments),
             "local__get_job" => self.exec_get_job(arguments),
             "local__list_jobs" => self.exec_list_jobs(),
             "local__forget_job" => self.exec_forget_job(arguments),
+            "local__configure_mcp_servers" => self.exec_configure_mcp_servers(arguments),
             "local__run_skill" => self.exec_run_skill(arguments).await,
             _ => Err(anyhow!("unknown local tool: {name}")),
         }
@@ -160,30 +189,27 @@ impl LocalToolExecutor {
         Ok(format!("Slept for {capped:.1}s"))
     }
 
-    fn jobs_path(&self) -> PathBuf {
-        self.store
-            .conversation_dir(&self.conversation_id)
-            .expect("conversation_id should be validated by store callers")
-            .join("jobs.json")
+    fn is_tool_enabled(&self, name: &str) -> bool {
+        self.enabled_local_tools
+            .as_ref()
+            .map(|enabled| enabled.iter().any(|tool| tool == name))
+            .unwrap_or(true)
     }
 
-    fn load_jobs(&self) -> Result<HashMap<String, Value>> {
-        let path = self.jobs_path();
-        if !path.exists() {
-            return Ok(HashMap::new());
-        }
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let map: HashMap<String, Value> = serde_json::from_str(&raw)?;
-        Ok(map)
+    fn load_jobs(&self) -> Result<Vec<RememberedJob>> {
+        self.store.load_job_state(&self.conversation_id)
     }
 
-    fn save_jobs(&self, jobs: &HashMap<String, Value>) -> Result<()> {
-        let path = self.jobs_path();
-        let payload = serde_json::to_string_pretty(jobs)?;
-        std::fs::write(&path, payload)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        Ok(())
+    fn save_jobs(&self, jobs: &[RememberedJob]) -> Result<()> {
+        self.store.save_job_state(&self.conversation_id, jobs)
+    }
+
+    fn upsert_job(&self, record: RememberedJob) -> Result<()> {
+        let mut jobs = self.load_jobs()?;
+        jobs.retain(|job| job.alias != record.alias);
+        jobs.push(record);
+        jobs.sort_by(|a, b| a.alias.cmp(&b.alias));
+        self.save_jobs(&jobs)
     }
 
     fn exec_remember_job(&self, arguments: Value) -> Result<String> {
@@ -198,18 +224,124 @@ impl LocalToolExecutor {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("remember_job: missing 'transaction_id'"))?
             .to_string();
-        let record = json!({
-            "alias": alias,
-            "transaction_id": transaction_id,
-            "source_tool": arguments.get("source_tool"),
-            "status": arguments.get("status"),
-            "notes": arguments.get("notes"),
-            "stored_at": chrono::Utc::now().to_rfc3339(),
-        });
+        let mut record = RememberedJob::new(alias.clone(), transaction_id);
+        record.source_tool = arguments
+            .get("source_tool")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        record.status = arguments
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        record.notes = arguments
+            .get("notes")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        record.mode = arguments
+            .get("mode")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        record.poll_interval_seconds = arguments
+            .get("poll_interval_seconds")
+            .and_then(Value::as_u64);
+        record.next_poll_at = parse_optional_datetime(arguments.get("next_poll_at"))?;
+        record.lease_expires_at = parse_optional_datetime(arguments.get("lease_expires_at"))?;
+        record.result_expires_at = parse_optional_datetime(arguments.get("result_expires_at"))?;
+        record.automation_prompt = arguments
+            .get("automation_prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        record.retrieval_state = arguments
+            .get("retrieval_state")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        record.result_artifacts_json = arguments.get("result_artifacts_json").cloned();
+        record.last_error = arguments
+            .get("last_error")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let mut jobs = self.load_jobs()?;
-        jobs.insert(alias.clone(), record);
+        jobs.retain(|job| job.alias != alias);
+        jobs.push(record);
+        jobs.sort_by(|a, b| a.alias.cmp(&b.alias));
         self.save_jobs(&jobs)?;
         Ok(format!("Job '{alias}' stored."))
+    }
+
+    fn exec_update_job(&self, arguments: Value) -> Result<String> {
+        self.require_filesystem_write("local__update_job")?;
+        let alias = arguments
+            .get("alias")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("update_job: missing 'alias'"))?;
+        let mut jobs = self.load_jobs()?;
+        let job = jobs
+            .iter_mut()
+            .find(|job| job.alias == alias)
+            .ok_or_else(|| anyhow!("Job '{alias}' not found."))?;
+
+        if let Some(value) = arguments.get("transaction_id").and_then(Value::as_str) {
+            job.transaction_id = value.to_string();
+        }
+        if let Some(value) = arguments.get("source_tool").and_then(Value::as_str) {
+            job.source_tool = Some(value.to_string());
+        }
+        if arguments.get("status").is_some() {
+            job.status = arguments
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if arguments.get("notes").is_some() {
+            job.notes = arguments
+                .get("notes")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if arguments.get("mode").is_some() {
+            job.mode = arguments
+                .get("mode")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if arguments.get("poll_interval_seconds").is_some() {
+            job.poll_interval_seconds = arguments
+                .get("poll_interval_seconds")
+                .and_then(Value::as_u64);
+        }
+        if arguments.get("next_poll_at").is_some() {
+            job.next_poll_at = parse_optional_datetime(arguments.get("next_poll_at"))?;
+        }
+        if arguments.get("lease_expires_at").is_some() {
+            job.lease_expires_at = parse_optional_datetime(arguments.get("lease_expires_at"))?;
+        }
+        if arguments.get("result_expires_at").is_some() {
+            job.result_expires_at = parse_optional_datetime(arguments.get("result_expires_at"))?;
+        }
+        if arguments.get("automation_prompt").is_some() {
+            job.automation_prompt = arguments
+                .get("automation_prompt")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if arguments.get("retrieval_state").is_some() {
+            job.retrieval_state = arguments
+                .get("retrieval_state")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if arguments.get("result_artifacts_json").is_some() {
+            job.result_artifacts_json = arguments.get("result_artifacts_json").cloned();
+        }
+        if arguments.get("last_error").is_some() {
+            job.last_error = arguments
+                .get("last_error")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        job.updated_at = chrono::Utc::now();
+        self.save_jobs(&jobs)?;
+        Ok(format!("Job '{alias}' updated."))
     }
 
     fn exec_get_job(&self, arguments: Value) -> Result<String> {
@@ -220,7 +352,8 @@ impl LocalToolExecutor {
             .ok_or_else(|| anyhow!("get_job: missing 'alias'"))?;
         let jobs = self.load_jobs()?;
         let record = jobs
-            .get(alias)
+            .iter()
+            .find(|job| job.alias == alias)
             .ok_or_else(|| anyhow!("Job '{alias}' not found."))?;
         Ok(serde_json::to_string_pretty(record)?)
     }
@@ -241,11 +374,58 @@ impl LocalToolExecutor {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("forget_job: missing 'alias'"))?;
         let mut jobs = self.load_jobs()?;
-        if jobs.remove(alias).is_none() {
+        let original_len = jobs.len();
+        jobs.retain(|job| job.alias != alias);
+        if jobs.len() == original_len {
             return Err(anyhow!("Job '{alias}' not found."));
         }
         self.save_jobs(&jobs)?;
         Ok(format!("Job '{alias}' removed."))
+    }
+
+    fn exec_configure_mcp_servers(&self, arguments: Value) -> Result<String> {
+        self.require_filesystem_write("local__configure_mcp_servers")?;
+        let action = arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("configure_mcp_servers: missing 'action'"))?;
+        let server_names = arguments
+            .get("server_names")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut conversation = self.store.load(&self.conversation_id)?;
+        let next = match action {
+            "reset" => None,
+            "only" => Some(server_names),
+            "enable" => {
+                let mut enabled = conversation.enabled_mcp_servers.clone().unwrap_or_default();
+                for name in server_names {
+                    if !enabled.contains(&name) {
+                        enabled.push(name);
+                    }
+                }
+                Some(enabled)
+            }
+            "disable" => {
+                let mut enabled = conversation.enabled_mcp_servers.clone().unwrap_or_default();
+                enabled.retain(|name| !server_names.contains(name));
+                Some(enabled)
+            }
+            other => bail!("configure_mcp_servers: unsupported action '{other}'"),
+        };
+        conversation.enabled_mcp_servers = next.clone();
+        self.store.save(&conversation)?;
+        Ok(format!(
+            "Conversation MCP selection updated to {}.",
+            serde_json::to_string(&next)?
+        ))
     }
 
     async fn exec_run_skill(&self, arguments: Value) -> Result<String> {
@@ -264,71 +444,202 @@ impl LocalToolExecutor {
             .and_then(Value::as_str)
             .unwrap_or("{}");
         let params: Value = serde_json::from_str(parameters_str).unwrap_or_else(|_| json!({}));
+        let timeout_seconds = arguments
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .unwrap_or(self.execution_timeout.as_secs());
 
-        let (skill, tool) = registry
-            .find_tool(skill_name, tool_slug)
+        let (skill, tools) = registry
+            .find_tools(skill_name, tool_slug)
             .ok_or_else(|| anyhow!("skill '{skill_name}' / tool '{tool_slug:?}' not found"))?;
 
-        self.require_skill_permissions(skill_name, tool)?;
+        let mut outputs = Vec::new();
+        for tool in tools {
+            self.require_skill_permissions(&skill.name, tool)?;
+            if tool.server.is_some() && tool.script.is_none() {
+                outputs.push(format!(
+                    "[{}] MCP-backed skill tool metadata cannot be executed through the local runner.",
+                    tool.slug
+                ));
+                continue;
+            }
 
-        if let Some(ref server) = tool.server {
-            return Err(anyhow!(
-                "MCP-backed skill tool '{server}' must be called via the MCP server directly"
-            ));
+            let script = tool
+                .script
+                .as_deref()
+                .ok_or_else(|| anyhow!("skill tool has no script defined"))?;
+
+            let launch = SkillLaunchSpec::new(&skill.skill_dir, script)?;
+            let output = self
+                .run_skill_process(&launch, &params, timeout_seconds)
+                .await?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow!(
+                    "skill script exited with {}: {}",
+                    output.status,
+                    stderr
+                ));
+            }
+
+            outputs.push(self.format_skill_output(
+                &tool.slug,
+                String::from_utf8_lossy(&output.stdout).as_ref(),
+            )?);
         }
 
-        let script = tool
-            .script
-            .as_deref()
-            .ok_or_else(|| anyhow!("skill tool has no script defined"))?;
+        Ok(outputs.join("\n\n"))
+    }
 
-        let launch = SkillLaunchSpec::new(&skill.skill_dir, script)?;
-        let mut cmd = launch.command_with_interpreter(match &launch.program {
-            SkillProgram::Direct(_) => None,
-            SkillProgram::Python(_) => Some("python3"),
-        });
-        apply_skill_arguments(&mut cmd, &params);
-
-        let output = match &launch.program {
-            SkillProgram::Direct(_) => cmd.output().await.with_context(|| {
-                format!(
-                    "failed to execute skill script {}",
-                    launch.display_program()
-                )
-            })?,
-            SkillProgram::Python(_) => match cmd.output().await {
-                Ok(output) => output,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let mut fallback = launch.command_with_interpreter(Some("python"));
-                    apply_skill_arguments(&mut fallback, &params);
-                    fallback.output().await.with_context(|| {
-                        format!(
-                            "failed to execute python skill script {} with python3 or python",
+    async fn run_skill_process(
+        &self,
+        launch: &SkillLaunchSpec,
+        params: &Value,
+        timeout_seconds: u64,
+    ) -> Result<std::process::Output> {
+        match &launch.program {
+            SkillProgram::Direct(_) => {
+                let mut cmd = launch.command_with_interpreter(None);
+                apply_skill_arguments(&mut cmd, params);
+                self.run_skill_command(cmd, timeout_seconds)
+                    .await
+                    .map_err(|err| {
+                        anyhow!(
+                            "failed to execute skill script {}: {err}",
                             launch.display_program()
                         )
-                    })?
+                    })
+            }
+            SkillProgram::Python(_) => {
+                let mut primary = launch.command_with_interpreter(Some("python3"));
+                apply_skill_arguments(&mut primary, params);
+                match self.run_skill_command(primary, timeout_seconds).await {
+                    Ok(output) => Ok(output),
+                    Err(err)
+                        if err.downcast_ref::<std::io::Error>().is_some_and(|io_err| {
+                            io_err.kind() == std::io::ErrorKind::NotFound
+                        }) =>
+                    {
+                        let mut fallback = launch.command_with_interpreter(Some("python"));
+                        apply_skill_arguments(&mut fallback, params);
+                        self.run_skill_command(fallback, timeout_seconds)
+                            .await
+                            .map_err(|err| {
+                                anyhow!(
+                                    "failed to execute python skill script {} with python3 or python: {err}",
+                                    launch.display_program()
+                                )
+                            })
+                    }
+                    Err(err) => Err(anyhow!(
+                        "failed to execute python skill script {} with python3: {err}",
+                        launch.display_program()
+                    )),
                 }
-                Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!(
-                            "failed to execute python skill script {} with python3",
-                            launch.display_program()
-                        )
-                    });
-                }
-            },
+            }
+        }
+    }
+
+    async fn run_skill_command(
+        &self,
+        mut cmd: tokio::process::Command,
+        timeout_seconds: u64,
+    ) -> Result<std::process::Output> {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture child stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture child stderr"))?;
+
+        let stdout_task = tokio::spawn(async move { read_stream(stdout).await });
+        let stderr_task = tokio::spawn(async move { read_stream(stderr).await });
+
+        let wait_result =
+            tokio::time::timeout(Duration::from_secs(timeout_seconds), child.wait()).await;
+        let status = match wait_result {
+            Ok(status) => status?,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(anyhow!(
+                    "skill execution timed out after {}s. If this is a long-running remote job, prefer a skill that returns a pending job record for async follow-up.",
+                    timeout_seconds
+                ));
+            }
         };
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!(
-                "skill script exited with {}: {}",
-                output.status,
-                stderr
-            ));
-        }
+        let stdout = stdout_task.await??;
+        let stderr = stderr_task.await??;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    fn format_skill_output(&self, tool_slug: &str, stdout: &str) -> Result<String> {
+        if let Some(envelope) = parse_skill_envelope(stdout)? {
+            match envelope.status.as_str() {
+                "ok" => {
+                    let body = envelope.output.unwrap_or_else(|| stdout.trim().to_string());
+                    Ok(format!("[{tool_slug}]\n{body}"))
+                }
+                "pending" => {
+                    self.require_filesystem_write("local__run_skill pending job persistence")?;
+                    let pending = envelope.pending_job.ok_or_else(|| {
+                        anyhow!("pending skill response is missing a job payload")
+                    })?;
+                    let record = self.build_pending_job_record(tool_slug, pending)?;
+                    let alias = record.alias.clone();
+                    let transaction_id = record.transaction_id.clone();
+                    let next_poll_at = record.next_poll_at.map(|value| value.to_rfc3339());
+                    self.upsert_job(record)?;
+                    Ok(format!(
+                        "[{tool_slug}]\nRemote job stored for follow-up.\nAlias: `{alias}`\nTransaction ID: `{transaction_id}`{}\nUse `local__get_job` or `local__list_jobs` to inspect it, or let auto-pull continue if configured.",
+                        next_poll_at
+                            .map(|value| format!("\nNext poll at: `{value}`"))
+                            .unwrap_or_default()
+                    ))
+                }
+                other => Err(anyhow!("unsupported skill response status '{other}'")),
+            }
+        } else {
+            Ok(format!("[{tool_slug}]\n{}", stdout))
+        }
+    }
+
+    fn build_pending_job_record(
+        &self,
+        tool_slug: &str,
+        pending: PendingSkillJob,
+    ) -> Result<RememberedJob> {
+        let alias = pending
+            .alias
+            .unwrap_or_else(|| format!("{tool_slug}-{}", pending.transaction_id));
+        let mut record = RememberedJob::new(alias, pending.transaction_id);
+        record.source_tool = Some(tool_slug.to_string());
+        record.status = Some(pending.status.unwrap_or_else(|| "pending".to_string()));
+        record.notes = pending.notes;
+        record.mode = Some(pending.mode.unwrap_or_else(|| "auto_pull".to_string()));
+        record.poll_interval_seconds = Some(pending.poll_interval_seconds.unwrap_or(30));
+        record.next_poll_at = match pending.next_poll_at {
+            Some(value) => Some(value),
+            None => record
+                .poll_interval_seconds
+                .map(|seconds| Utc::now() + ChronoDuration::seconds(seconds as i64)),
+        };
+        record.result_expires_at = pending.result_expires_at;
+        record.automation_prompt = pending.automation_prompt;
+        record.retrieval_state = pending.retrieval_state;
+        record.result_artifacts_json = pending.result_artifacts_json;
+        record.last_error = pending.last_error;
+        Ok(record)
     }
 
     fn require_filesystem_read(&self, capability: &str) -> Result<()> {
@@ -390,12 +701,102 @@ impl LocalToolExecutor {
     }
 }
 
+fn parse_optional_datetime(value: Option<&Value>) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let raw = value
+        .as_str()
+        .ok_or_else(|| anyhow!("expected RFC3339 timestamp string"))?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw)
+        .with_context(|| format!("invalid RFC3339 timestamp '{raw}'"))?;
+    Ok(Some(parsed.with_timezone(&chrono::Utc)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SkillEnvelope {
+    status: String,
+    #[serde(default)]
+    output: Option<String>,
+    #[serde(default, rename = "job")]
+    pending_job: Option<PendingSkillJob>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PendingSkillJob {
+    #[serde(default)]
+    alias: Option<String>,
+    transaction_id: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    poll_interval_seconds: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+    next_poll_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+    result_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    automation_prompt: Option<String>,
+    #[serde(default)]
+    retrieval_state: Option<String>,
+    #[serde(default)]
+    result_artifacts_json: Option<Value>,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+fn parse_skill_envelope(stdout: &str) -> Result<Option<SkillEnvelope>> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
+        return Ok(None);
+    }
+
+    match serde_json::from_str::<SkillEnvelope>(trimmed) {
+        Ok(value) => Ok(Some(value)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn deserialize_optional_datetime<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<chrono::DateTime<chrono::Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|raw| {
+            chrono::DateTime::parse_from_rfc3339(&raw)
+                .map(|value| value.with_timezone(&chrono::Utc))
+                .map_err(serde::de::Error::custom)
+        })
+        .transpose()
+}
+
+async fn read_stream<R>(mut reader: R) -> Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer).await?;
+    Ok(buffer)
+}
+
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     use serde_json::json;
     use tempfile::tempdir;
+    use tokio::time::Duration;
 
     use crate::{
         conversation_store::ConversationStore,
@@ -413,11 +814,15 @@ mod tests {
         fs::create_dir_all(&scripts_dir).unwrap();
         let script_path = scripts_dir.join("webex_room_message_fetch.py");
         fs::write(&script_path, "#!/usr/bin/env python3\nprint('ok')\n").unwrap();
+        let script_path = std::fs::canonicalize(script_path).unwrap();
 
         let launch =
             SkillLaunchSpec::new(&skill_dir, "scripts/webex_room_message_fetch.py").unwrap();
 
-        assert_eq!(launch.current_dir, skill_dir);
+        assert_eq!(
+            launch.current_dir,
+            std::fs::canonicalize(skill_dir).unwrap()
+        );
         assert_eq!(launch.program, SkillProgram::Python(script_path));
     }
 
@@ -429,10 +834,14 @@ mod tests {
         fs::create_dir_all(&scripts_dir).unwrap();
         let script_path = scripts_dir.join("tool.sh");
         fs::write(&script_path, "#!/bin/sh\necho ok\n").unwrap();
+        let script_path = std::fs::canonicalize(script_path).unwrap();
 
         let launch = SkillLaunchSpec::new(&skill_dir, "scripts/tool.sh").unwrap();
 
-        assert_eq!(launch.current_dir, skill_dir);
+        assert_eq!(
+            launch.current_dir,
+            std::fs::canonicalize(skill_dir).unwrap()
+        );
         assert_eq!(launch.program, SkillProgram::Direct(script_path));
     }
 
@@ -464,6 +873,8 @@ mod tests {
                 filesystem: FilesystemAccess::ReadOnly,
                 yolo: false,
             },
+            None,
+            Duration::from_secs(180),
         );
 
         let err = executor
@@ -513,6 +924,8 @@ Tools:
             &conversation.conversation_id,
             Some(skills),
             AgentPermissions::default(),
+            None,
+            Duration::from_secs(180),
         );
 
         let err = executor
@@ -525,10 +938,136 @@ Tools:
 
         assert!(err.to_string().contains("network access"));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_skill_stores_pending_jobs_from_structured_output() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("splunk-demo");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::write(
+            skill_dir.join("scripts/submit.py"),
+            r#"import json
+print(json.dumps({
+  "status": "pending",
+  "job": {
+    "alias": "splunk-search",
+    "transaction_id": "sid-123",
+    "status": "running",
+    "poll_interval_seconds": 45,
+    "automation_prompt": "Poll the Splunk job sid-123 and summarize the result when it finishes.",
+    "retrieval_state": "submitted"
+  }
+}))
+"#,
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: splunk-demo
+description: Demo long-running Splunk search submission
+---
+
+Tools:
+  - name: Submit
+    slug: submit
+    script: scripts/submit.py
+    filesystem: read_write
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let executor = LocalToolExecutor::new(
+            store.clone(),
+            &conversation.conversation_id,
+            Some(skills),
+            AgentPermissions {
+                allow_network: false,
+                filesystem: FilesystemAccess::ReadWrite,
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(180),
+        );
+
+        let output = executor
+            .execute(
+                "local__run_skill",
+                json!({"skill_name": "splunk-demo", "tool_slug": "submit"}),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("Remote job stored for follow-up."));
+        let jobs = store.load_job_state(&conversation.conversation_id).unwrap();
+        let job = jobs
+            .iter()
+            .find(|job| job.alias == "splunk-search")
+            .unwrap();
+        assert_eq!(job.transaction_id, "sid-123");
+        assert_eq!(job.mode.as_deref(), Some("auto_pull"));
+        assert_eq!(job.poll_interval_seconds, Some(45));
+        assert_eq!(job.retrieval_state.as_deref(), Some("submitted"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_skill_enforces_timeout() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("slow-skill");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        let script_path = skill_dir.join("scripts/slow.sh");
+        fs::write(&script_path, "#!/bin/sh\nsleep 2\necho done\n").unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: slow-skill
+description: Slow script
+---
+
+Tools:
+  - name: Slow
+    slug: slow
+    script: scripts/slow.sh
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            Some(skills),
+            AgentPermissions::default(),
+            None,
+            Duration::from_secs(1),
+        );
+
+        let err = executor
+            .execute(
+                "local__run_skill",
+                json!({"skill_name": "slow-skill", "tool_slug": "slow"}),
+            )
+            .await
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("timed out after"));
+        assert!(message.contains("long-running remote job"));
+    }
 }
 
-pub fn local_tool_definitions() -> Vec<AzureTool> {
-    vec![
+pub fn local_tool_definitions(enabled_local_tools: Option<&[String]>) -> Vec<AzureTool> {
+    let defs = vec![
         AzureTool {
             name: "local__sleep".to_string(),
             description: "Sleep for a specified number of seconds (max 300). Use to wait between polling operations.".to_string(),
@@ -543,7 +1082,7 @@ pub fn local_tool_definitions() -> Vec<AzureTool> {
         },
         AzureTool {
             name: "local__remember_job".to_string(),
-            description: "Store a job/transaction alias for later retrieval within this conversation. Requires filesystem write permission.".to_string(),
+            description: "Store a job/transaction alias for later retrieval within this conversation. Supports automation metadata. Requires filesystem write permission.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -551,9 +1090,42 @@ pub fn local_tool_definitions() -> Vec<AzureTool> {
                     "transaction_id": {"type": "string", "description": "The actual transaction or job ID"},
                     "source_tool": {"type": "string", "description": "Which tool created this job"},
                     "status": {"type": "string", "description": "Current job status"},
-                    "notes": {"type": "string", "description": "Additional notes"}
+                    "notes": {"type": "string", "description": "Additional notes"},
+                    "mode": {"type": "string", "description": "Tracking mode, for example auto_pull"},
+                    "poll_interval_seconds": {"type": "integer"},
+                    "next_poll_at": {"type": "string", "description": "RFC3339 timestamp"},
+                    "lease_expires_at": {"type": "string", "description": "RFC3339 timestamp"},
+                    "result_expires_at": {"type": "string", "description": "RFC3339 timestamp"},
+                    "automation_prompt": {"type": "string"},
+                    "retrieval_state": {"type": "string"},
+                    "result_artifacts_json": {},
+                    "last_error": {"type": "string"}
                 },
                 "required": ["alias", "transaction_id"]
+            }),
+        },
+        AzureTool {
+            name: "local__update_job".to_string(),
+            description: "Update a stored job record within this conversation. Requires filesystem write permission.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "alias": {"type": "string"},
+                    "transaction_id": {"type": "string"},
+                    "source_tool": {"type": "string"},
+                    "status": {"type": "string"},
+                    "notes": {"type": "string"},
+                    "mode": {"type": "string"},
+                    "poll_interval_seconds": {"type": "integer"},
+                    "next_poll_at": {"type": "string"},
+                    "lease_expires_at": {"type": "string"},
+                    "result_expires_at": {"type": "string"},
+                    "automation_prompt": {"type": "string"},
+                    "retrieval_state": {"type": "string"},
+                    "result_artifacts_json": {},
+                    "last_error": {"type": "string"}
+                },
+                "required": ["alias"]
             }),
         },
         AzureTool {
@@ -587,17 +1159,38 @@ pub fn local_tool_definitions() -> Vec<AzureTool> {
             }),
         },
         AzureTool {
+            name: "local__configure_mcp_servers".to_string(),
+            description: "Update the conversation-scoped MCP server selection for subsequent turns. Requires filesystem write permission.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["enable", "disable", "only", "reset"]},
+                    "server_names": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["action"]
+            }),
+        },
+        AzureTool {
             name: "local__run_skill".to_string(),
-            description: "Execute a skill script with parameters. Skill-specific network/filesystem permissions are enforced unless yolo mode is enabled.".to_string(),
+            description: "Execute one or more skill scripts with parameters. Omitting tool_slug runs every executable tool in the matched skill. Skill-specific network/filesystem permissions are enforced unless yolo mode is enabled. Local skill execution defaults to 180s and can be overridden with timeout_seconds. Scripts may return a JSON pending-job envelope so long-running remote work can be remembered and auto-polled.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "skill_name": {"type": "string", "description": "Name of the skill directory"},
                     "tool_slug": {"type": "string", "description": "Slug of the specific tool within the skill"},
-                    "parameters": {"type": "string", "description": "JSON string of parameters to pass to the script"}
+                    "parameters": {"type": "string", "description": "JSON string of parameters to pass to the script"},
+                    "timeout_seconds": {"type": "integer", "description": "Optional per-run timeout override for the local script execution"}
                 },
                 "required": ["skill_name"]
             }),
         },
-    ]
+    ];
+
+    defs.into_iter()
+        .filter(|tool| {
+            enabled_local_tools
+                .map(|enabled| enabled.iter().any(|name| name == &tool.name))
+                .unwrap_or(true)
+        })
+        .collect()
 }

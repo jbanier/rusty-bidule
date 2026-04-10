@@ -76,6 +76,8 @@ impl SkillRegistry {
         );
         out.push_str("- Use the skill directory name for `skill_name` when shown below, plus the tool `slug` as `tool_slug`.\n");
         out.push_str("- Pass `parameters` as a JSON string of CLI-style arguments.\n");
+        out.push_str("- Local skill execution defaults to a 180s timeout unless overridden by config or `timeout_seconds`.\n");
+        out.push_str("- A script may return JSON like `{\"status\":\"pending\",\"job\":{...}}` to store a long-running remote job for follow-up.\n");
         out.push_str(
             "- Do not claim a listed script-backed skill is unavailable because of MCP.\n",
         );
@@ -145,18 +147,28 @@ impl SkillRegistry {
         })
     }
 
-    pub fn find_tool<'a>(
+    pub fn find_skill_fuzzy(&self, name: &str) -> Option<&Skill> {
+        let needle = normalize_lookup(name);
+        self.skills.iter().find(|skill| {
+            normalize_lookup(&skill.name).contains(&needle)
+                || normalize_lookup(skill_lookup_name(skill)).contains(&needle)
+        })
+    }
+
+    pub fn find_tools<'a>(
         &'a self,
         skill_name: &str,
         tool_slug: Option<&str>,
-    ) -> Option<(&'a Skill, &'a SkillTool)> {
-        let skill = self.find_skill(skill_name)?;
-        let tool = if let Some(slug) = tool_slug {
-            skill.tools.iter().find(|t| t.slug == slug)?
+    ) -> Option<(&'a Skill, Vec<&'a SkillTool>)> {
+        let skill = self
+            .find_skill(skill_name)
+            .or_else(|| self.find_skill_fuzzy(skill_name))?;
+        let tools = if let Some(slug) = tool_slug {
+            vec![skill.tools.iter().find(|t| t.slug == slug)?]
         } else {
-            skill.tools.first()?
+            skill.tools.iter().collect::<Vec<_>>()
         };
-        Some((skill, tool))
+        Some((skill, tools))
     }
 }
 
@@ -166,6 +178,14 @@ fn skill_lookup_name(skill: &Skill) -> &str {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(skill.name.as_str())
+}
+
+fn normalize_lookup(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn parse_skill_md(path: &Path, skill_dir: PathBuf) -> Result<Skill> {

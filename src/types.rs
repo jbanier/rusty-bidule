@@ -127,6 +127,46 @@ pub struct ConversationSummary {
     pub message_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindingRecord {
+    pub finding_id: String,
+    pub conversation_id: String,
+    pub kind: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl FindingRecord {
+    pub fn new(
+        finding_id: String,
+        conversation_id: String,
+        kind: String,
+        value: String,
+        note: Option<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            finding_id,
+            conversation_id,
+            kind,
+            value,
+            note,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    pub scope: String,
+    pub title: String,
+    pub snippet: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressEvent {
     #[serde(rename = "type")]
@@ -146,6 +186,7 @@ pub struct RunTurnResult {
 pub enum UiEvent {
     Progress(ProgressEvent),
     Finished(Result<RunTurnResult, String>),
+    CompactionFinished(Result<String, String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -205,10 +246,7 @@ impl RememberedJob {
 
     pub fn is_due_for_poll(&self, now: DateTime<Utc>) -> bool {
         matches!(self.mode.as_deref(), Some("auto_pull"))
-            && self
-                .next_poll_at
-                .map(|due| due <= now)
-                .unwrap_or(false)
+            && self.next_poll_at.map(|due| due <= now).unwrap_or(false)
             && self
                 .lease_expires_at
                 .map(|lease| lease <= now)

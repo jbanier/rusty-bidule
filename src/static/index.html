@@ -6,24 +6,28 @@
 <title>Rusty Bidule - CSIRT AI Assistant</title>
 <style>
   :root {
-    --bg: #09111b;
-    --bg-elevated: rgba(14, 24, 38, 0.92);
-    --panel: rgba(17, 29, 46, 0.86);
-    --panel-strong: rgba(21, 36, 56, 0.96);
-    --panel-soft: rgba(11, 20, 33, 0.76);
-    --border: rgba(109, 185, 255, 0.16);
-    --border-strong: rgba(99, 229, 255, 0.32);
-    --text: #edf4ff;
-    --muted: #93a6bf;
-    --muted-soft: #6d809a;
+    --bg: #08111a;
+    --bg-soft: rgba(9, 18, 29, 0.94);
+    --panel: rgba(16, 28, 44, 0.9);
+    --panel-soft: rgba(12, 22, 35, 0.82);
+    --panel-strong: rgba(19, 33, 52, 0.96);
+    --border: rgba(110, 186, 255, 0.16);
+    --border-strong: rgba(98, 230, 255, 0.28);
+    --text: #ecf4ff;
+    --muted: #91a7c4;
+    --muted-soft: #6f829d;
     --accent: #67e8f9;
-    --accent-soft: rgba(103, 232, 249, 0.18);
-    --highlight: #76ffb4;
-    --highlight-soft: rgba(118, 255, 180, 0.14);
-    --user-accent: #7c9cff;
-    --shadow: 0 20px 60px rgba(0, 0, 0, 0.32);
-    --radius-lg: 24px;
-    --radius-md: 18px;
+    --accent-soft: rgba(103, 232, 249, 0.14);
+    --ok: #7dffb8;
+    --ok-soft: rgba(125, 255, 184, 0.14);
+    --warn: #ffcf74;
+    --warn-soft: rgba(255, 207, 116, 0.14);
+    --danger: #ff8d8d;
+    --danger-soft: rgba(255, 141, 141, 0.14);
+    --shadow: 0 22px 60px rgba(0, 0, 0, 0.32);
+    --radius-xl: 24px;
+    --radius-lg: 20px;
+    --radius-md: 16px;
     --radius-sm: 12px;
   }
 
@@ -41,9 +45,9 @@
     font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
     color: var(--text);
     background:
-      radial-gradient(circle at top left, rgba(99, 229, 255, 0.16), transparent 28%),
-      radial-gradient(circle at top right, rgba(124, 156, 255, 0.14), transparent 26%),
-      linear-gradient(180deg, #0b1521 0%, #081018 48%, #070d15 100%);
+      radial-gradient(circle at top left, rgba(103, 232, 249, 0.14), transparent 24%),
+      radial-gradient(circle at top right, rgba(124, 156, 255, 0.12), transparent 28%),
+      linear-gradient(180deg, #0a121c 0%, #081019 48%, #060d14 100%);
     overflow: hidden;
   }
 
@@ -56,84 +60,16 @@
       linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
       linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
     background-size: 28px 28px;
-    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.38), transparent 88%);
+    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.34), transparent 88%);
   }
 
-  .app-shell {
-    height: 100vh;
-    display: grid;
-    grid-template-columns: 320px minmax(0, 1fr);
-    gap: 18px;
-    padding: 18px;
-  }
-
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow);
-    backdrop-filter: blur(20px);
-  }
-
-  #sidebar {
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-
-  .sidebar-top {
-    padding: 22px 22px 18px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(103, 232, 249, 0.1), rgba(103, 232, 249, 0.02));
-  }
-
-  .eyebrow {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border-radius: 999px;
-    background: rgba(103, 232, 249, 0.08);
-    color: var(--accent);
-    font-size: 0.75rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .eyebrow::before {
-    content: "";
-    width: 7px;
-    height: 7px;
-    border-radius: 999px;
-    background: currentColor;
-    box-shadow: 0 0 16px currentColor;
-  }
-
-  .brand {
-    margin-top: 14px;
-  }
-
-  .brand h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    letter-spacing: 0.01em;
-  }
-
-  .brand p {
-    margin-top: 8px;
-    color: var(--muted);
-    line-height: 1.5;
-    font-size: 0.92rem;
-  }
-
-  .sidebar-actions {
-    margin-top: 18px;
-    display: flex;
-    gap: 10px;
+  button,
+  input,
+  textarea {
+    font: inherit;
   }
 
   button {
-    font: inherit;
     border: none;
     cursor: pointer;
     transition: transform 140ms ease, background 140ms ease, border-color 140ms ease, opacity 140ms ease;
@@ -143,348 +79,561 @@
     transform: translateY(-1px);
   }
 
-  #new-btn {
-    flex: 1;
-    padding: 11px 14px;
-    border-radius: 14px;
-    background: linear-gradient(135deg, rgba(103, 232, 249, 0.22), rgba(124, 156, 255, 0.28));
-    border: 1px solid rgba(103, 232, 249, 0.28);
-    color: var(--text);
-    font-weight: 600;
-  }
-
-  .sidebar-meta {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    padding: 18px 22px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .meta-card {
-    background: var(--panel-soft);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    border-radius: 16px;
-    padding: 12px;
-  }
-
-  .meta-label {
-    color: var(--muted-soft);
-    font-size: 0.74rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .meta-value {
-    margin-top: 6px;
-    font-size: 1rem;
-    font-weight: 600;
-  }
-
-  .sidebar-section {
-    padding: 16px 22px 10px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .sidebar-section h2 {
-    font-size: 0.84rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .sidebar-section span {
-    color: var(--muted-soft);
-    font-size: 0.78rem;
-  }
-
-  #conversation-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 14px 16px;
-  }
-
-  .conversation-group + .conversation-group {
-    margin-top: 14px;
-  }
-
-  .conversation-group-label {
-    margin: 0 8px 8px;
-    color: var(--muted-soft);
-    font-size: 0.72rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .convo-item {
-    padding: 14px;
-    border-radius: 16px;
-    background: transparent;
-    border: 1px solid transparent;
-    cursor: pointer;
-    transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
-  }
-
-  .convo-item + .convo-item {
-    margin-top: 8px;
-  }
-
-  .convo-item:hover {
-    background: rgba(255, 255, 255, 0.035);
-    border-color: rgba(255, 255, 255, 0.08);
-  }
-
-  .convo-item.active {
-    background: linear-gradient(135deg, rgba(103, 232, 249, 0.12), rgba(124, 156, 255, 0.16));
-    border-color: var(--border-strong);
-  }
-
-  .convo-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .convo-title {
-    font-size: 0.95rem;
-    font-weight: 600;
-  }
-
-  .convo-badge {
-    padding: 4px 8px;
-    border-radius: 999px;
-    background: rgba(118, 255, 180, 0.1);
-    color: var(--highlight);
-    font-size: 0.72rem;
-    white-space: nowrap;
-  }
-
-  .convo-id {
-    margin-top: 8px;
-    color: var(--muted-soft);
-    font-size: 0.8rem;
-    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-  }
-
-  .convo-meta {
-    margin-top: 8px;
-    color: var(--muted);
-    font-size: 0.8rem;
-  }
-
-  #chat-area {
-    display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
-    overflow: hidden;
-  }
-
-  .chat-header {
-    padding: 22px 24px 18px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    background: linear-gradient(180deg, rgba(124, 156, 255, 0.08), rgba(124, 156, 255, 0.01));
-  }
-
-  .header-actions {
-    margin-top: 14px;
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .title-editor {
-    margin-top: 14px;
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .title-editor input {
-    min-width: min(340px, 100%);
-    flex: 1;
-    background: rgba(4, 10, 19, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    color: var(--text);
-    font: inherit;
-    padding: 10px 12px;
-  }
-
-  .chat-header h2 {
-    font-size: 1.15rem;
-    margin-top: 10px;
-  }
-
-  .chat-header p {
-    margin-top: 8px;
-    color: var(--muted);
-    line-height: 1.5;
-    max-width: 60ch;
-  }
-
-  .context-pill {
-    min-width: 220px;
-    padding: 14px 16px;
-    border-radius: 18px;
-    background: var(--panel-soft);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .context-pill .label {
-    color: var(--muted-soft);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-size: 0.7rem;
-  }
-
-  .context-pill .value {
-    margin-top: 6px;
-    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-    font-size: 0.85rem;
-    color: var(--accent);
-    word-break: break-word;
-  }
-
-  #workbench {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 14px;
-    padding: 18px 24px 0;
-  }
-
-  .tool-card {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    min-height: 0;
-    padding: 16px;
-    border-radius: 20px;
-    background: rgba(9, 17, 29, 0.74);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .tool-card-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .tool-card h3 {
-    font-size: 0.95rem;
-  }
-
-  .tool-card p {
-    margin-top: 5px;
-    color: var(--muted);
-    font-size: 0.82rem;
-    line-height: 1.5;
-  }
-
-  .mini-pill {
-    padding: 5px 9px;
-    border-radius: 999px;
-    background: rgba(103, 232, 249, 0.08);
-    color: var(--accent);
-    font-size: 0.72rem;
-    white-space: nowrap;
-  }
-
-  .tool-card textarea,
-  .tool-card input {
-    width: 100%;
-    background: rgba(4, 10, 19, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 14px;
-    color: var(--text);
-    font: inherit;
-    padding: 11px 12px;
-  }
-
-  .tool-card textarea {
-    min-height: 132px;
-    resize: vertical;
-    line-height: 1.55;
-  }
-
-  .tool-card textarea:focus,
-  .tool-card input:focus {
-    outline: 1px solid rgba(103, 232, 249, 0.28);
-    border-color: rgba(103, 232, 249, 0.22);
-  }
-
-  .inline-fields {
-    display: grid;
-    grid-template-columns: 108px minmax(0, 1fr);
-    gap: 8px;
-  }
-
-  .tool-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .tool-btn {
-    padding: 10px 12px;
-    border-radius: 12px;
-    background: rgba(103, 232, 249, 0.12);
-    border: 1px solid rgba(103, 232, 249, 0.16);
-    color: var(--text);
-    font-size: 0.84rem;
-    font-weight: 600;
-  }
-
-  .tool-btn.secondary {
-    background: rgba(255, 255, 255, 0.04);
-    border-color: rgba(255, 255, 255, 0.08);
-  }
-
-  .tool-btn:disabled {
+  button:disabled {
     opacity: 0.45;
     cursor: not-allowed;
     transform: none;
   }
 
-  .archive-btn {
+  input,
+  textarea {
+    width: 100%;
+    background: rgba(6, 12, 20, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: 11px 12px;
+  }
+
+  input:focus,
+  textarea:focus {
+    outline: 1px solid rgba(103, 232, 249, 0.28);
+    border-color: rgba(103, 232, 249, 0.22);
+  }
+
+  .page {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: rgba(14, 24, 37, 0.92);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(20px);
+  }
+
+  .hamburger {
+    width: 42px;
+    height: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    background: rgba(103, 232, 249, 0.12);
+    border: 1px solid rgba(103, 232, 249, 0.2);
+    color: var(--text);
+    font-size: 1.1rem;
+    font-weight: 700;
+  }
+
+  .topbar-title {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .topbar-title h1 {
+    font-size: 1.02rem;
+    font-weight: 700;
+  }
+
+  .topbar-title p {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+
+  .topbar-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .status-chip {
+    padding: 8px 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  .layout {
+    min-height: 0;
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(320px, 1fr) minmax(0, 1.7fr) minmax(260px, 320px);
+    gap: 14px;
+  }
+
+  .panel {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--panel);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(20px);
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: linear-gradient(180deg, rgba(103, 232, 249, 0.08), rgba(103, 232, 249, 0.02));
+  }
+
+  .panel-header h2 {
+    font-size: 0.92rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .panel-header p {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 0.84rem;
+    line-height: 1.55;
+  }
+
+  .left-top {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .primary-btn,
+  .secondary-btn,
+  .ghost-btn,
+  .danger-btn {
     padding: 10px 12px;
     border-radius: 12px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
     color: var(--text);
-    font-size: 0.82rem;
+    font-size: 0.84rem;
     font-weight: 600;
   }
 
-  .collection {
+  .primary-btn {
+    background: linear-gradient(135deg, rgba(103, 232, 249, 0.22), rgba(124, 156, 255, 0.24));
+    border: 1px solid rgba(103, 232, 249, 0.22);
+  }
+
+  .secondary-btn {
+    background: rgba(103, 232, 249, 0.12);
+    border: 1px solid rgba(103, 232, 249, 0.18);
+  }
+
+  .ghost-btn {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .danger-btn {
+    background: rgba(255, 141, 141, 0.12);
+    border: 1px solid rgba(255, 141, 141, 0.18);
+  }
+
+  .conversation-groups {
     min-height: 0;
-    max-height: 220px;
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+  }
+
+  .conversation-group + .conversation-group {
+    margin-top: 16px;
+  }
+
+  .group-label {
+    margin: 0 6px 8px;
+    color: var(--muted-soft);
+    font-size: 0.74rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .conversation-card {
+    padding: 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid transparent;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .conversation-card + .conversation-card {
+    margin-top: 8px;
+  }
+
+  .conversation-card:hover {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .conversation-card.active {
+    background: linear-gradient(135deg, rgba(103, 232, 249, 0.11), rgba(124, 156, 255, 0.14));
+    border-color: var(--border-strong);
+  }
+
+  .conversation-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .conversation-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1.35;
+  }
+
+  .conversation-id {
+    margin-top: 7px;
+    color: var(--muted-soft);
+    font-size: 0.76rem;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  }
+
+  .conversation-meta {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+
+  .conversation-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+  }
+
+  .tiny-btn {
+    padding: 7px 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+
+  .chat-header {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .conversation-context {
+    padding: 16px 20px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: linear-gradient(180deg, rgba(124, 156, 255, 0.08), rgba(124, 156, 255, 0.02));
+  }
+
+  .context-title {
+    font-size: 1.18rem;
+    font-weight: 700;
+  }
+
+  .context-subtitle {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 0.86rem;
+  }
+
+  #messages {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.01), transparent);
+  }
+
+  .message {
+    max-width: min(760px, 92%);
+    padding: 16px 18px;
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(10, 18, 30, 0.78);
+  }
+
+  .message.assistant {
+    align-self: flex-start;
+    border-color: rgba(103, 232, 249, 0.14);
+  }
+
+  .message.user {
+    align-self: flex-end;
+    background: linear-gradient(135deg, rgba(124, 156, 255, 0.18), rgba(103, 232, 249, 0.11));
+    border-color: rgba(124, 156, 255, 0.2);
+  }
+
+  .message-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .role-tag {
+    color: var(--accent);
+    font-size: 0.74rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .message.user .role-tag {
+    color: #c9d7ff;
+  }
+
+  .meta {
+    color: var(--muted-soft);
+    font-size: 0.78rem;
+  }
+
+  .content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.65;
+  }
+
+  .composer-wrap {
+    padding: 0 20px 18px;
+  }
+
+  .composer {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--panel-strong);
+    padding: 14px;
+  }
+
+  #msg-input {
+    min-height: 120px;
+    resize: vertical;
+    border: none;
+    background: transparent;
+    padding: 0;
+    line-height: 1.6;
+  }
+
+  #msg-input:focus {
+    outline: none;
+    border: none;
+  }
+
+  .composer-footer {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .composer-hint {
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+
+  .mcp-body {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+  }
+
+  .mcp-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .mcp-card {
+    padding: 14px;
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .mcp-card + .mcp-card {
+    margin-top: 8px;
+  }
+
+  .mcp-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .mcp-name {
+    font-size: 0.92rem;
+    font-weight: 700;
+  }
+
+  .mcp-status {
+    margin-top: 6px;
+    font-size: 0.79rem;
+    color: var(--muted);
+  }
+
+  .status-enabled {
+    color: var(--ok);
+  }
+
+  .status-disabled {
+    color: var(--danger);
+  }
+
+  .status-unknown {
+    color: var(--warn);
+  }
+
+  #status-bar {
+    padding: 12px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    color: var(--muted);
+    font-size: 0.82rem;
+    background: rgba(5, 10, 17, 0.54);
+  }
+
+  .empty-state {
+    margin: auto;
+    max-width: 520px;
+    padding: 32px 28px;
+    border-radius: 24px;
+    text-align: center;
+    background: rgba(10, 18, 30, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .empty-state h3 {
+    font-size: 1.28rem;
+  }
+
+  .empty-state p {
+    margin-top: 10px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  .drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.36);
+    backdrop-filter: blur(4px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms ease;
+  }
+
+  .drawer-backdrop.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .drawer {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    bottom: 16px;
+    width: min(420px, calc(100vw - 32px));
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: rgba(10, 18, 30, 0.96);
+    box-shadow: var(--shadow);
+    transform: translateX(calc(-100% - 24px));
+    transition: transform 180ms ease;
+    z-index: 20;
+    overflow-y: auto;
+  }
+
+  .drawer.open {
+    transform: translateX(0);
+  }
+
+  .drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .drawer-header h2 {
+    font-size: 0.96rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .drawer-section {
+    padding: 14px;
+    border-radius: var(--radius-lg);
+    background: var(--panel-soft);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .drawer-section h3 {
+    font-size: 0.92rem;
+  }
+
+  .drawer-section p {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+
+  .stack {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .inline {
+    display: flex;
+    gap: 8px;
+  }
+
+  .inline > * {
+    flex: 1;
+  }
+
+  .collection {
+    max-height: 260px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    margin-top: 12px;
   }
 
   .collection-empty {
     padding: 12px;
-    border-radius: 14px;
+    border-radius: 12px;
     background: rgba(255, 255, 255, 0.03);
     color: var(--muted);
     font-size: 0.82rem;
-    line-height: 1.5;
   }
 
   .finding-item,
   .search-item {
     padding: 12px;
-    border-radius: 14px;
+    border-radius: 12px;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.05);
   }
@@ -509,18 +658,7 @@
   .search-title {
     margin-top: 6px;
     font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-    font-size: 0.84rem;
-    word-break: break-word;
-  }
-
-  .finding-note,
-  .search-snippet {
-    margin-top: 8px;
-    color: var(--muted);
     font-size: 0.82rem;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
   }
 
   .finding-fields {
@@ -529,415 +667,184 @@
     gap: 8px;
   }
 
-  .finding-fields input {
-    width: 100%;
-  }
-
-  .finding-remove {
-    padding: 6px 8px;
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: var(--muted);
-    font-size: 0.75rem;
-  }
-
-  #messages {
-    overflow-y: auto;
-    padding: 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .message {
-    max-width: min(820px, 88%);
-    padding: 16px 18px;
-    border-radius: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(10, 18, 30, 0.8);
-  }
-
-  .message.assistant {
-    align-self: flex-start;
-    border-color: rgba(103, 232, 249, 0.14);
-    box-shadow: inset 0 1px 0 rgba(103, 232, 249, 0.05);
-  }
-
-  .message.user {
-    align-self: flex-end;
-    background: linear-gradient(135deg, rgba(124, 156, 255, 0.18), rgba(103, 232, 249, 0.12));
-    border-color: rgba(124, 156, 255, 0.2);
-  }
-
-  .message-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 10px;
-  }
-
-  .role-tag {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.74rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--muted);
-  }
-
-  .role-tag::before {
-    content: "";
-    width: 8px;
-    height: 8px;
-    border-radius: 999px;
-    background: currentColor;
-  }
-
-  .message.user .role-tag {
-    color: #c8d6ff;
-  }
-
-  .message.assistant .role-tag {
-    color: var(--accent);
-  }
-
-  .meta {
-    color: var(--muted-soft);
-    font-size: 0.78rem;
-  }
-
-  .content {
-    white-space: pre-wrap;
-    word-break: break-word;
-    line-height: 1.7;
-    color: var(--text);
-  }
-
-  .empty-state {
-    margin: auto;
-    max-width: 580px;
-    text-align: center;
-    padding: 36px 28px;
-    border-radius: 28px;
-    background: rgba(10, 18, 30, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .empty-state h3 {
-    font-size: 1.4rem;
-    margin-top: 14px;
-  }
-
-  .empty-state p {
-    margin-top: 10px;
-    color: var(--muted);
-    line-height: 1.65;
-  }
-
-  .empty-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 64px;
-    height: 64px;
-    border-radius: 20px;
-    background: linear-gradient(135deg, rgba(103, 232, 249, 0.18), rgba(124, 156, 255, 0.18));
-    border: 1px solid rgba(103, 232, 249, 0.24);
-    font-size: 1.6rem;
-  }
-
-  #input-area {
-    padding: 0 24px 18px;
-  }
-
-  .composer {
-    background: var(--panel-strong);
-    border: 1px solid var(--border);
-    border-radius: 24px;
-    padding: 16px;
-  }
-
-  .composer textarea {
-    width: 100%;
-    min-height: 120px;
-    resize: vertical;
-    background: transparent;
-    border: none;
-    color: var(--text);
-    font: inherit;
-    line-height: 1.6;
-  }
-
-  .composer textarea:focus {
-    outline: none;
-  }
-
-  .composer textarea::placeholder {
-    color: var(--muted-soft);
-  }
-
-  .composer-footer {
-    margin-top: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .composer-hint {
-    color: var(--muted);
-    font-size: 0.82rem;
-  }
-
-  #send-btn {
-    padding: 12px 18px;
-    border-radius: 14px;
-    background: linear-gradient(135deg, rgba(103, 232, 249, 0.24), rgba(118, 255, 180, 0.22));
-    border: 1px solid rgba(103, 232, 249, 0.28);
-    color: var(--text);
-    font-weight: 600;
-  }
-
-  #send-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-    transform: none;
-  }
-
-  #status-bar {
-    margin: 0 24px 22px;
-    padding: 12px 16px;
-    border-radius: 16px;
-    background: rgba(8, 15, 24, 0.82);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    color: var(--muted);
-    font-size: 0.84rem;
-  }
-
-  .status-live {
-    color: var(--accent);
-  }
-
   .spinner {
     display: inline-block;
     margin-right: 8px;
     color: var(--accent);
   }
 
-  @media (max-width: 960px) {
+  @media (max-width: 1180px) {
+    .layout {
+      grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.4fr) 260px;
+    }
+  }
+
+  @media (max-width: 980px) {
     body {
       overflow: auto;
     }
 
-    .app-shell {
+    .page {
       height: auto;
       min-height: 100vh;
+    }
+
+    .layout {
       grid-template-columns: 1fr;
     }
 
-    #sidebar,
-    #chat-area {
-      min-height: 0;
-    }
-
-    .chat-header {
-      flex-direction: column;
-    }
-
-    #workbench {
-      grid-template-columns: 1fr;
-    }
-
-    .context-pill {
-      min-width: 0;
-      width: 100%;
-    }
-
-    .message {
-      max-width: 100%;
-    }
-  }
-
-  @media (max-width: 640px) {
-    .app-shell {
-      padding: 10px;
-      gap: 10px;
-    }
-
-    .sidebar-top,
-    .chat-header,
-    #workbench,
-    #messages,
-    #input-area {
-      padding-left: 16px;
-      padding-right: 16px;
-    }
-
-    .sidebar-meta {
-      grid-template-columns: 1fr;
-      padding-left: 16px;
-      padding-right: 16px;
-    }
-
-    #conversation-list {
-      padding-left: 10px;
-      padding-right: 10px;
-    }
-
-    .composer-footer {
-      flex-direction: column;
-      align-items: stretch;
-    }
-
-    .inline-fields {
-      grid-template-columns: 1fr;
-    }
-
-    #status-bar {
-      margin: 0 16px 16px;
+    .panel {
+      min-height: 360px;
     }
   }
 </style>
 </head>
 <body>
-  <div class="app-shell">
-    <aside id="sidebar" class="panel">
-      <div class="sidebar-top">
-        <div class="eyebrow">CSIRT Workspace</div>
-        <div class="brand">
-          <h1>Rusty Bidule</h1>
-          <p>Clearer conversation flow for investigation work, with a restrained neon edge instead of a crowded terminal look.</p>
-        </div>
-        <div class="sidebar-actions">
-          <button id="new-btn" onclick="newConversation()">New Conversation</button>
-        </div>
-      </div>
+  <div class="drawer-backdrop" id="drawer-backdrop" onclick="closeDrawer()"></div>
+  <aside class="drawer" id="utility-drawer">
+    <div class="drawer-header">
+      <h2>Utilities</h2>
+      <button class="ghost-btn" onclick="closeDrawer()">Close</button>
+    </div>
 
-      <div class="sidebar-meta">
-        <div class="meta-card">
-          <div class="meta-label">Threads</div>
-          <div id="conversation-count" class="meta-value">0</div>
-        </div>
-        <div class="meta-card">
-          <div class="meta-label">Status</div>
-          <div id="sidebar-status" class="meta-value">Ready</div>
+    <section class="drawer-section">
+      <h3>Scratchpad</h3>
+      <p>Conversation-local notes kept outside the live model context.</p>
+      <div class="stack">
+        <textarea id="scratchpad-input" placeholder="Capture hypotheses, pivots, or analyst notes here." rows="6"></textarea>
+        <div class="inline">
+          <button id="scratchpad-save-btn" class="secondary-btn" onclick="saveScratchpad()">Save Notes</button>
+          <button id="scratchpad-clear-btn" class="ghost-btn" onclick="clearScratchpad()">Clear</button>
         </div>
       </div>
+    </section>
 
-      <div class="sidebar-section">
-        <h2>Recent Conversations</h2>
-        <span id="conversation-caption">Active only</span>
+    <section class="drawer-section">
+      <h3>Findings</h3>
+      <p>Structured local findings for the active conversation.</p>
+      <div class="stack">
+        <input id="finding-filter-text" placeholder="filter by text" oninput="applyFindingFilters()" />
+        <div class="inline">
+          <input id="finding-filter-tag" placeholder="tag filter" oninput="applyFindingFilters()" />
+          <input id="finding-filter-confidence" placeholder="min confidence" oninput="applyFindingFilters()" />
+        </div>
+        <div class="inline">
+          <input id="finding-kind" placeholder="kind" />
+          <input id="finding-value" placeholder="value" />
+        </div>
+        <input id="finding-note" placeholder="note (optional)" />
+        <input id="finding-tags" placeholder="tags (comma-separated)" />
+        <div class="inline">
+          <input id="finding-confidence" placeholder="confidence 0-100" />
+          <input id="finding-artifact" placeholder="source artifact (optional)" />
+        </div>
+        <button id="finding-add-btn" class="secondary-btn" onclick="addFinding()">Add Finding</button>
+        <div id="findings-list" class="collection"></div>
       </div>
+    </section>
 
-      <div id="conversation-list"></div>
-    </aside>
+    <section class="drawer-section">
+      <h3>Search</h3>
+      <p>Search local conversations, scratchpads, and findings.</p>
+      <div class="stack">
+        <div class="inline">
+          <input id="search-input" placeholder="Search local history" onkeydown="handleSearchKey(event)" />
+          <button id="search-btn" class="secondary-btn" onclick="runSearch()">Search</button>
+        </div>
+        <div id="search-results" class="collection"></div>
+      </div>
+    </section>
 
-    <main id="chat-area" class="panel">
-      <div class="chat-header">
-        <div>
-          <div class="eyebrow">Assistant Session</div>
-          <h2 id="conversation-title-heading">Focused, readable transcript</h2>
-          <p>Each message is separated into cleaner cards with less visual noise, stronger labels, and a more comfortable writing area.</p>
-          <div class="title-editor">
-            <input id="conversation-title-input" placeholder="Set a conversation title" />
-            <button id="title-save-btn" class="archive-btn" onclick="saveConversationTitle()" disabled>Save Title</button>
+    <section class="drawer-section">
+      <h3>Conversation Actions</h3>
+      <p>Archive, export, and other per-conversation functions.</p>
+      <div class="stack">
+        <button id="archive-btn" class="ghost-btn" onclick="toggleArchiveConversation()" disabled>Archive Conversation</button>
+        <button id="export-btn" class="ghost-btn" onclick="exportConversationSummary()" disabled>Export Summary</button>
+      </div>
+    </section>
+  </aside>
+
+  <div class="page">
+    <header class="topbar">
+      <button class="hamburger" onclick="toggleDrawer()">☰</button>
+      <div class="topbar-title">
+        <h1>Rusty Bidule</h1>
+        <p>Conversation-centric browser workspace with MCP visibility and local utilities.</p>
+      </div>
+      <div class="topbar-status">
+        <div class="status-chip" id="conversation-caption">No conversation selected</div>
+        <div class="status-chip" id="sidebar-status">Ready</div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="panel">
+        <div class="panel-header">
+          <h2>Conversations</h2>
+          <p>Active and archived threads. Rename or delete directly from the list.</p>
+          <div class="left-top">
+            <button id="new-btn" class="primary-btn" onclick="newConversation()">New Conversation</button>
+            <div class="status-chip"><span id="conversation-count">0</span> active</div>
           </div>
-          <div class="header-actions">
-            <button id="archive-btn" class="archive-btn" onclick="toggleArchiveConversation()" disabled>Archive Conversation</button>
-            <button id="export-btn" class="archive-btn" onclick="exportConversationSummary()" disabled>Export Summary</button>
-          </div>
         </div>
-        <div class="context-pill">
-          <div class="label">Current Conversation</div>
-          <div id="conversation-context" class="value">No conversation selected</div>
-        </div>
-      </div>
+        <div id="conversation-list" class="conversation-groups"></div>
+      </aside>
 
-      <section id="workbench">
-        <section class="tool-card">
-          <div class="tool-card-header">
+      <main class="panel">
+        <div class="conversation-context">
+          <div class="chat-header">
             <div>
-              <h3>Scratchpad</h3>
-              <p>Conversation-local notes kept on disk outside the live model context.</p>
+              <div class="context-title" id="conversation-title-heading">Focused, readable transcript</div>
+              <div class="context-subtitle" id="conversation-context">No conversation selected</div>
             </div>
-            <div class="mini-pill" id="scratchpad-status">idle</div>
-          </div>
-          <textarea id="scratchpad-input" placeholder="Capture hypotheses, pivots, or analyst notes here." oninput="updateWorkspaceState()"></textarea>
-          <div class="tool-actions">
-            <button id="scratchpad-save-btn" class="tool-btn" onclick="saveScratchpad()">Save Notes</button>
-            <button id="scratchpad-clear-btn" class="tool-btn secondary" onclick="clearScratchpad()">Clear</button>
-          </div>
-        </section>
-
-        <section class="tool-card">
-          <div class="tool-card-header">
-            <div>
-              <h3>Findings</h3>
-              <p>Store confirmed indicators or observations for the active conversation.</p>
+            <div class="title-editor">
+              <input id="conversation-title-input" placeholder="Rename conversation" />
+              <button id="title-save-btn" class="secondary-btn" onclick="saveConversationTitle()" disabled>Save</button>
             </div>
-            <div class="mini-pill" id="findings-status">0 stored</div>
-          </div>
-          <div class="inline-fields">
-            <input id="finding-kind" placeholder="kind" />
-            <input id="finding-value" placeholder="value" />
-          </div>
-          <input id="finding-note" placeholder="note (optional)" />
-          <input id="finding-tags" placeholder="tags (comma-separated)" />
-          <div class="inline-fields">
-            <input id="finding-confidence" placeholder="confidence 0-100" />
-            <input id="finding-artifact" placeholder="source artifact (optional)" />
-          </div>
-          <div class="tool-actions">
-            <button id="finding-add-btn" class="tool-btn" onclick="addFinding()">Add Finding</button>
-          </div>
-          <div id="findings-list" class="collection"></div>
-        </section>
-
-        <section class="tool-card">
-          <div class="tool-card-header">
-            <div>
-              <h3>Cross-Session Search</h3>
-              <p>Search conversation text, scratchpads, and findings without leaving the browser.</p>
-            </div>
-            <div class="mini-pill" id="search-status">ready</div>
-          </div>
-          <div class="tool-actions">
-            <input id="search-input" placeholder="Search local history" onkeydown="handleSearchKey(event)" />
-            <button id="search-btn" class="tool-btn" onclick="runSearch()">Search</button>
-          </div>
-          <div id="search-results" class="collection"></div>
-        </section>
-      </section>
-
-      <div id="messages">
-        <div class="empty-state">
-          <div class="empty-icon">+</div>
-          <h3>Start or select a conversation</h3>
-          <p>Pick an existing thread from the left or create a new one to begin. The transcript and composer will stay streamlined once a thread is active.</p>
-        </div>
-      </div>
-
-      <div id="input-area">
-        <div class="composer">
-          <textarea id="msg-input" placeholder="Type your message here. Use Ctrl+Enter to send." onkeydown="handleInputKey(event)" oninput="updateComposerState()"></textarea>
-          <div class="composer-footer">
-            <div class="composer-hint">Write normally, then press <strong>Ctrl+Enter</strong> to send.</div>
-            <button id="send-btn" onclick="sendMessage()" disabled>Send Message</button>
           </div>
         </div>
-      </div>
 
-      <div id="status-bar">Ready</div>
-    </main>
+        <div id="messages">
+          <div class="empty-state">
+            <h3>Start or select a conversation</h3>
+            <p>Choose a thread on the left, then continue the conversation in the center column.</p>
+          </div>
+        </div>
+
+        <div class="composer-wrap">
+          <div class="composer">
+            <textarea id="msg-input" placeholder="Type your message here. Use Ctrl+Enter to send." onkeydown="handleInputKey(event)" oninput="updateComposerState()"></textarea>
+            <div class="composer-footer">
+              <div class="composer-hint">Press <strong>Ctrl+Enter</strong> to send. The center panel follows the selected conversation.</div>
+              <button id="send-btn" class="primary-btn" onclick="sendMessage()" disabled>Send Message</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="status-bar">Ready</div>
+      </main>
+
+      <aside class="panel">
+        <div class="panel-header">
+          <h2>MCP Servers</h2>
+          <p>Conversation-scoped MCP availability with enabled or disabled status.</p>
+        </div>
+        <div class="mcp-body">
+          <div class="mcp-actions">
+            <button class="secondary-btn" onclick="resetMcpServers()" id="mcp-reset-btn" disabled>Enable All</button>
+          </div>
+          <div id="mcp-list"></div>
+        </div>
+      </aside>
+    </div>
   </div>
 
 <script>
 let currentConvoId = null;
 let currentConvoArchived = false;
 let currentConvoTitle = '';
+let currentFindings = [];
 let pollTimer = null;
 let activeJobId = null;
 let persistentWarning = '';
@@ -951,13 +858,11 @@ async function api(method, path, body) {
   return res.json();
 }
 
-function setStatus(msg, spinning) {
-  const bar = document.getElementById('status-bar');
-  const sidebar = document.getElementById('sidebar-status');
-  const showWarning = !spinning && persistentWarning && !msg.toLowerCase().startsWith('error');
-  const statusText = showWarning ? `Warning: ${persistentWarning}` : msg;
-  bar.innerHTML = spinning ? `<span class="spinner">⣾</span><span class="status-live">${escHtml(msg)}</span>` : escHtml(statusText);
-  sidebar.textContent = spinning ? 'Working' : statusText.toLowerCase().startsWith('error') ? 'Error' : showWarning ? 'Warning' : 'Ready';
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function shortId(id) {
@@ -969,51 +874,10 @@ function formatTime(ts) {
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
 
-function updateConversationContext() {
-  document.getElementById('conversation-context').textContent = currentConvoId ? shortId(currentConvoId) : 'No conversation selected';
-  document.getElementById('conversation-title-heading').textContent = currentConvoTitle || 'Focused, readable transcript';
-  document.getElementById('conversation-caption').textContent = 'Active and archived';
-  const archiveBtn = document.getElementById('archive-btn');
-  archiveBtn.disabled = !currentConvoId;
-  archiveBtn.textContent = currentConvoArchived ? 'Restore Conversation' : 'Archive Conversation';
-  document.getElementById('export-btn').disabled = !currentConvoId;
-  document.getElementById('title-save-btn').disabled = !currentConvoId;
-  document.getElementById('conversation-title-input').disabled = !currentConvoId;
-}
-
-function updateComposerState() {
-  const input = document.getElementById('msg-input');
-  const send = document.getElementById('send-btn');
-  send.disabled = !currentConvoId || !input.value.trim() || Boolean(activeJobId);
-}
-
-function updateWorkspaceState() {
-  const hasConversation = Boolean(currentConvoId);
-  document.getElementById('scratchpad-save-btn').disabled = !hasConversation;
-  document.getElementById('scratchpad-clear-btn').disabled = !hasConversation;
-  document.getElementById('scratchpad-input').disabled = !hasConversation;
-  document.getElementById('finding-add-btn').disabled = !hasConversation;
-  document.getElementById('finding-kind').disabled = !hasConversation;
-  document.getElementById('finding-value').disabled = !hasConversation;
-  document.getElementById('finding-note').disabled = !hasConversation;
-  document.getElementById('finding-tags').disabled = !hasConversation;
-  document.getElementById('finding-confidence').disabled = !hasConversation;
-  document.getElementById('finding-artifact').disabled = !hasConversation;
-  document.getElementById('archive-btn').disabled = !hasConversation;
-  document.getElementById('export-btn').disabled = !hasConversation;
-  document.getElementById('title-save-btn').disabled = !hasConversation;
-  document.getElementById('conversation-title-input').disabled = !hasConversation;
-  if (!hasConversation) {
-    document.getElementById('conversation-title-input').value = '';
-    document.getElementById('scratchpad-status').textContent = 'select thread';
-    document.getElementById('findings-status').textContent = 'select thread';
-  }
-}
-
 function createEmptyState(title, description) {
   const wrapper = document.createElement('div');
   wrapper.className = 'empty-state';
-  wrapper.innerHTML = `<div class="empty-icon">+</div><h3>${escHtml(title)}</h3><p>${escHtml(description)}</p>`;
+  wrapper.innerHTML = `<h3>${escHtml(title)}</h3><p>${escHtml(description)}</p>`;
   return wrapper;
 }
 
@@ -1024,31 +888,83 @@ function createCollectionEmptyState(message) {
   return wrapper;
 }
 
+function setStatus(msg, spinning) {
+  const bar = document.getElementById('status-bar');
+  const sidebar = document.getElementById('sidebar-status');
+  const showWarning = !spinning && persistentWarning && !msg.toLowerCase().startsWith('error');
+  const statusText = showWarning ? `Warning: ${persistentWarning}` : msg;
+  bar.innerHTML = spinning
+    ? `<span class="spinner">⣾</span><span>${escHtml(msg)}</span>`
+    : escHtml(statusText);
+  sidebar.textContent = spinning ? 'Working' : statusText.toLowerCase().startsWith('error') ? 'Error' : showWarning ? 'Warning' : 'Ready';
+}
+
+function toggleDrawer() {
+  document.getElementById('utility-drawer').classList.toggle('open');
+  document.getElementById('drawer-backdrop').classList.toggle('open');
+}
+
+function closeDrawer() {
+  document.getElementById('utility-drawer').classList.remove('open');
+  document.getElementById('drawer-backdrop').classList.remove('open');
+}
+
+function updateConversationContext() {
+  document.getElementById('conversation-title-heading').textContent = currentConvoTitle || 'Focused, readable transcript';
+  document.getElementById('conversation-context').textContent = currentConvoId
+    ? `${shortId(currentConvoId)}${currentConvoArchived ? ' · archived' : ''}`
+    : 'No conversation selected';
+  document.getElementById('conversation-caption').textContent = currentConvoTitle || (currentConvoId ? shortId(currentConvoId) : 'No conversation selected');
+  document.getElementById('conversation-title-input').value = currentConvoTitle;
+  document.getElementById('title-save-btn').disabled = !currentConvoId;
+  document.getElementById('archive-btn').disabled = !currentConvoId;
+  document.getElementById('archive-btn').textContent = currentConvoArchived ? 'Restore Conversation' : 'Archive Conversation';
+  document.getElementById('export-btn').disabled = !currentConvoId;
+}
+
+function updateComposerState() {
+  const input = document.getElementById('msg-input');
+  document.getElementById('send-btn').disabled = !currentConvoId || !input.value.trim() || Boolean(activeJobId);
+}
+
+function updateUtilityState() {
+  const hasConversation = Boolean(currentConvoId);
+  for (const id of [
+    'scratchpad-input', 'scratchpad-save-btn', 'scratchpad-clear-btn',
+    'finding-filter-text', 'finding-filter-tag', 'finding-filter-confidence',
+    'finding-kind', 'finding-value', 'finding-note', 'finding-tags',
+    'finding-confidence', 'finding-artifact', 'finding-add-btn',
+    'search-input', 'search-btn'
+  ]) {
+    document.getElementById(id).disabled = !hasConversation;
+  }
+  document.getElementById('mcp-reset-btn').disabled = !hasConversation;
+}
+
 async function loadConversations() {
   try {
     const convos = await api('GET', '/conversations?include_archived=true');
     const list = document.getElementById('conversation-list');
-    const activeConvos = convos.filter(c => !c.archived_at);
-    const archivedConvos = convos.filter(c => c.archived_at);
-    document.getElementById('conversation-count').textContent = String(activeConvos.length);
     list.innerHTML = '';
+    const activeConvos = convos.filter(convo => !convo.archived_at);
+    const archivedConvos = convos.filter(convo => convo.archived_at);
+    document.getElementById('conversation-count').textContent = String(activeConvos.length);
 
     if (!convos.length) {
       currentConvoTitle = '';
       currentConvoArchived = false;
-      list.appendChild(createEmptyState('No conversations yet', 'Create a new thread to start chatting with the assistant.'));
+      list.appendChild(createEmptyState('No conversations yet', 'Create a new thread to start working in the browser interface.'));
       updateConversationContext();
       updateComposerState();
-      updateWorkspaceState();
+      updateUtilityState();
       return;
     }
 
     renderConversationGroup(list, 'Active', activeConvos);
     renderConversationGroup(list, 'Archived', archivedConvos);
-
     updateConversationContext();
     updateComposerState();
-    updateWorkspaceState();
+    updateUtilityState();
   } catch (e) {
     setStatus('Error loading conversations: ' + e.message);
   }
@@ -1061,42 +977,63 @@ function renderConversationGroup(container, label, conversations) {
   group.className = 'conversation-group';
 
   const heading = document.createElement('div');
-  heading.className = 'conversation-group-label';
+  heading.className = 'group-label';
   heading.textContent = label;
   group.appendChild(heading);
 
-  for (const c of conversations) {
-      const div = document.createElement('div');
-      div.className = 'convo-item' + (c.conversation_id === currentConvoId ? ' active' : '');
-      div.onclick = () => switchConversation(c.conversation_id);
+  for (const convo of conversations) {
+    const card = document.createElement('article');
+    card.className = 'conversation-card' + (convo.conversation_id === currentConvoId ? ' active' : '');
+    card.onclick = event => {
+      if (event.target.closest('button')) return;
+      switchConversation(convo.conversation_id);
+    };
 
-      const title = document.createElement('div');
-      title.className = 'convo-title';
-      title.textContent = c.title || `Conversation ${shortId(c.conversation_id)}`;
+    const top = document.createElement('div');
+    top.className = 'conversation-top';
 
-      const badge = document.createElement('div');
-      badge.className = 'convo-badge';
-      badge.textContent = `${c.message_count} msgs`;
+    const left = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'conversation-title';
+    title.textContent = convo.title || `Conversation ${shortId(convo.conversation_id)}`;
+    const id = document.createElement('div');
+    id.className = 'conversation-id';
+    id.textContent = convo.conversation_id;
+    const meta = document.createElement('div');
+    meta.className = 'conversation-meta';
+    meta.textContent = convo.archived_at
+      ? `Archived ${formatTime(convo.archived_at)} · ${convo.message_count} msgs`
+      : `Updated ${formatTime(convo.updated_at)} · ${convo.message_count} msgs`;
+    left.appendChild(title);
+    left.appendChild(id);
+    left.appendChild(meta);
 
-      const head = document.createElement('div');
-      head.className = 'convo-head';
-      head.appendChild(title);
-      head.appendChild(badge);
+    top.appendChild(left);
+    card.appendChild(top);
 
-      const id = document.createElement('div');
-      id.className = 'convo-id';
-      id.textContent = c.conversation_id;
+    const actions = document.createElement('div');
+    actions.className = 'conversation-actions';
 
-      const meta = document.createElement('div');
-      meta.className = 'convo-meta';
-      meta.textContent = c.archived_at
-        ? `Archived ${formatTime(c.archived_at)}`
-        : `Updated ${formatTime(c.updated_at)}`;
+    const rename = document.createElement('button');
+    rename.className = 'tiny-btn';
+    rename.textContent = 'Rename';
+    rename.onclick = async event => {
+      event.stopPropagation();
+      await promptRenameConversation(convo);
+    };
 
-      div.appendChild(head);
-      div.appendChild(id);
-      div.appendChild(meta);
-      group.appendChild(div);
+    const remove = document.createElement('button');
+    remove.className = 'tiny-btn';
+    remove.textContent = 'Delete';
+    remove.onclick = async event => {
+      event.stopPropagation();
+      await deleteConversation(convo.conversation_id);
+    };
+
+    actions.appendChild(rename);
+    actions.appendChild(remove);
+    card.appendChild(actions);
+    group.appendChild(card);
   }
 
   container.appendChild(group);
@@ -1105,15 +1042,13 @@ function renderConversationGroup(container, label, conversations) {
 async function newConversation() {
   try {
     setStatus('Creating conversation...', true);
-    const c = await api('POST', '/conversations');
-    currentConvoId = c.conversation_id;
-    currentConvoTitle = c.title || '';
+    const convo = await api('POST', '/conversations');
+    currentConvoId = convo.conversation_id;
+    currentConvoTitle = '';
     currentConvoArchived = false;
     persistentWarning = '';
     await loadConversations();
-    await loadMessages();
-    await loadWorkspaceData();
-    updateComposerState();
+    await loadConversationState();
     document.getElementById('msg-input').focus();
     setStatus('Conversation ready');
   } catch (e) {
@@ -1126,82 +1061,84 @@ async function switchConversation(id) {
   persistentWarning = '';
   setStatus('Loading conversation...', true);
   await loadConversations();
-  await loadMessages();
-  await loadWorkspaceData();
-  updateComposerState();
+  await loadConversationState();
   setStatus('Conversation loaded');
 }
 
-async function loadWorkspaceData() {
+async function promptRenameConversation(convo) {
+  const next = window.prompt('Conversation title', convo.title || '');
+  if (next === null) return;
+  try {
+    await api('PUT', `/conversations/${convo.conversation_id}`, { title: next.trim() || null });
+    if (convo.conversation_id === currentConvoId) {
+      currentConvoTitle = next.trim();
+    }
+    await loadConversations();
+    updateConversationContext();
+    setStatus(next.trim() ? 'Conversation renamed' : 'Conversation title cleared');
+  } catch (e) {
+    setStatus('Error renaming conversation: ' + e.message);
+  }
+}
+
+async function deleteConversation(conversationId) {
+  if (!window.confirm(`Delete ${conversationId}?`)) return;
+  try {
+    await api('DELETE', `/conversations/${conversationId}`);
+    if (conversationId === currentConvoId) {
+      currentConvoId = null;
+      currentConvoTitle = '';
+      currentConvoArchived = false;
+      currentFindings = [];
+      renderMessages([]);
+      renderFindings([]);
+      renderMcpStatuses([]);
+    }
+    await loadConversations();
+    if (!currentConvoId) {
+      updateConversationContext();
+      updateComposerState();
+      updateUtilityState();
+    }
+    setStatus('Conversation deleted');
+  } catch (e) {
+    setStatus('Error deleting conversation: ' + e.message);
+  }
+}
+
+async function loadConversationState() {
   if (!currentConvoId) {
-    document.getElementById('scratchpad-input').value = '';
+    currentFindings = [];
+    renderMessages([]);
     renderFindings([]);
-    clearSearchResults('Search across local sessions, notes, and findings.');
-    updateWorkspaceState();
+    renderMcpStatuses([]);
+    clearSearchResults('Search local conversations, scratchpads, and findings.');
+    updateConversationContext();
+    updateComposerState();
+    updateUtilityState();
     return;
   }
 
-  await Promise.all([loadScratchpad(), loadFindings()]);
-  updateWorkspaceState();
+  await Promise.all([
+    loadMessages(),
+    loadScratchpad(),
+    loadFindings(),
+    loadMcpStatuses(),
+  ]);
+  updateConversationContext();
+  updateComposerState();
+  updateUtilityState();
 }
 
 async function loadMessages() {
   if (!currentConvoId) return;
   try {
-    const c = await api('GET', `/conversations/${currentConvoId}`);
-    currentConvoTitle = c.title || '';
-    currentConvoArchived = Boolean(c.archived_at);
-    document.getElementById('conversation-title-input').value = currentConvoTitle;
-    updateConversationContext();
-    updateWorkspaceState();
-    renderMessages(c.messages || []);
+    const convo = await api('GET', `/conversations/${currentConvoId}`);
+    currentConvoTitle = convo.title || '';
+    currentConvoArchived = Boolean(convo.archived_at);
+    renderMessages(convo.messages || []);
   } catch (e) {
     setStatus('Error loading messages: ' + e.message);
-  }
-}
-
-async function toggleArchiveConversation() {
-  if (!currentConvoId) return;
-  try {
-    if (currentConvoArchived) {
-      await api('POST', `/conversations/${currentConvoId}/unarchive`);
-      currentConvoArchived = false;
-      setStatus('Conversation restored');
-    } else {
-      await api('POST', `/conversations/${currentConvoId}/archive`);
-      currentConvoArchived = true;
-      setStatus('Conversation archived');
-    }
-    await loadConversations();
-    updateConversationContext();
-  } catch (e) {
-    setStatus('Error updating archive state: ' + e.message);
-  }
-}
-
-async function saveConversationTitle() {
-  if (!currentConvoId) return;
-  const title = document.getElementById('conversation-title-input').value.trim();
-  try {
-    const updated = await api('PUT', `/conversations/${currentConvoId}`, {
-      title: title || null,
-    });
-    currentConvoTitle = updated.title || '';
-    await loadConversations();
-    updateConversationContext();
-    setStatus(currentConvoTitle ? 'Conversation title updated' : 'Conversation title cleared');
-  } catch (e) {
-    setStatus('Error saving conversation title: ' + e.message);
-  }
-}
-
-async function exportConversationSummary() {
-  if (!currentConvoId) return;
-  try {
-    const result = await api('POST', `/conversations/${currentConvoId}/export-summary`);
-    setStatus(`Session summary exported to ${result.saved_to}`);
-  } catch (e) {
-    setStatus('Error exporting session summary: ' + e.message);
   }
 }
 
@@ -1210,7 +1147,7 @@ function renderMessages(messages) {
   container.innerHTML = '';
 
   if (!messages.length) {
-    container.appendChild(createEmptyState('No messages yet', 'This thread is ready. Write the first prompt in the composer below.'));
+    container.appendChild(createEmptyState('No messages yet', 'Write the first prompt in the center composer to start the conversation.'));
     return;
   }
 
@@ -1245,28 +1182,129 @@ function renderMessages(messages) {
   container.scrollTop = container.scrollHeight;
 }
 
+function handleInputKey(event) {
+  if (event.key === 'Enter' && event.ctrlKey) {
+    event.preventDefault();
+    sendMessage();
+  }
+}
+
+async function sendMessage() {
+  if (!currentConvoId || activeJobId) return;
+  const input = document.getElementById('msg-input');
+  const content = input.value.trim();
+  if (!content) return;
+
+  input.value = '';
+  updateComposerState();
+  persistentWarning = '';
+  setStatus('Sending message...', true);
+
+  try {
+    const result = await api('POST', `/conversations/${currentConvoId}/messages`, { content });
+    activeJobId = result.job_id;
+    updateComposerState();
+    pollJob(activeJobId);
+  } catch (e) {
+    activeJobId = null;
+    updateComposerState();
+    setStatus('Error: ' + e.message);
+  }
+}
+
+async function pollJob(jobId) {
+  try {
+    const job = await api('GET', `/jobs/${jobId}`);
+    const toolLimitEvent = job.events.findLast?.(event => event.type === 'tool_limit')
+      || [...job.events].reverse().find(event => event.type === 'tool_limit');
+    persistentWarning = toolLimitEvent ? toolLimitEvent.message : persistentWarning;
+
+    if (job.status === 'running') {
+      const lastEvent = job.events.length ? job.events[job.events.length - 1].message : 'Processing request...';
+      setStatus(lastEvent, true);
+      pollTimer = setTimeout(() => pollJob(jobId), 500);
+      return;
+    }
+
+    clearTimeout(pollTimer);
+    activeJobId = null;
+    await loadConversationState();
+    updateComposerState();
+
+    if (job.status === 'done') {
+      const toolInfo = job.result ? `${job.result.tool_calls} tool calls` : 'No tool calls';
+      setStatus(persistentWarning || `Done. ${toolInfo}`);
+    } else {
+      setStatus('Error: ' + (job.error || 'unknown error'));
+    }
+  } catch (e) {
+    activeJobId = null;
+    updateComposerState();
+    setStatus('Poll error: ' + e.message);
+  }
+}
+
+async function saveConversationTitle() {
+  if (!currentConvoId) return;
+  const title = document.getElementById('conversation-title-input').value.trim();
+  try {
+    const updated = await api('PUT', `/conversations/${currentConvoId}`, { title: title || null });
+    currentConvoTitle = updated.title || '';
+    await loadConversations();
+    updateConversationContext();
+    setStatus(currentConvoTitle ? 'Conversation title updated' : 'Conversation title cleared');
+  } catch (e) {
+    setStatus('Error saving conversation title: ' + e.message);
+  }
+}
+
+async function toggleArchiveConversation() {
+  if (!currentConvoId) return;
+  try {
+    if (currentConvoArchived) {
+      await api('POST', `/conversations/${currentConvoId}/unarchive`);
+      currentConvoArchived = false;
+      setStatus('Conversation restored');
+    } else {
+      await api('POST', `/conversations/${currentConvoId}/archive`);
+      currentConvoArchived = true;
+      setStatus('Conversation archived');
+    }
+    await loadConversations();
+    updateConversationContext();
+  } catch (e) {
+    setStatus('Error updating archive state: ' + e.message);
+  }
+}
+
+async function exportConversationSummary() {
+  if (!currentConvoId) return;
+  try {
+    const result = await api('POST', `/conversations/${currentConvoId}/export-summary`);
+    setStatus(`Session summary exported to ${result.saved_to}`);
+  } catch (e) {
+    setStatus('Error exporting session summary: ' + e.message);
+  }
+}
+
 async function loadScratchpad() {
   if (!currentConvoId) return;
   try {
     const scratchpad = await api('GET', `/conversations/${currentConvoId}/scratchpad`);
     document.getElementById('scratchpad-input').value = scratchpad.body || '';
-    document.getElementById('scratchpad-status').textContent = scratchpad.body?.trim() ? 'saved' : 'empty';
   } catch (e) {
-    document.getElementById('scratchpad-status').textContent = 'error';
     setStatus('Error loading scratchpad: ' + e.message);
   }
 }
 
 async function saveScratchpad() {
   if (!currentConvoId) return;
-  const body = document.getElementById('scratchpad-input').value;
-  document.getElementById('scratchpad-status').textContent = 'saving';
   try {
-    await api('PUT', `/conversations/${currentConvoId}/scratchpad`, { body });
-    document.getElementById('scratchpad-status').textContent = body.trim() ? 'saved' : 'empty';
+    await api('PUT', `/conversations/${currentConvoId}/scratchpad`, {
+      body: document.getElementById('scratchpad-input').value,
+    });
     setStatus('Scratchpad saved');
   } catch (e) {
-    document.getElementById('scratchpad-status').textContent = 'error';
     setStatus('Error saving scratchpad: ' + e.message);
   }
 }
@@ -1280,10 +1318,9 @@ async function clearScratchpad() {
 async function loadFindings() {
   if (!currentConvoId) return;
   try {
-    const findings = await api('GET', `/conversations/${currentConvoId}/findings`);
-    renderFindings(findings || []);
+    currentFindings = await api('GET', `/conversations/${currentConvoId}/findings`) || [];
+    applyFindingFilters();
   } catch (e) {
-    document.getElementById('findings-status').textContent = 'error';
     setStatus('Error loading findings: ' + e.message);
   }
 }
@@ -1291,17 +1328,18 @@ async function loadFindings() {
 function renderFindings(findings) {
   const list = document.getElementById('findings-list');
   list.innerHTML = '';
+  const total = currentFindings.length;
   document.getElementById('findings-status').textContent = currentConvoId
-    ? `${findings.length} stored`
+    ? findings.length === total ? `${total} stored` : `${findings.length}/${total} shown`
     : 'select thread';
 
   if (!currentConvoId) {
-    list.appendChild(createCollectionEmptyState('Select a conversation to view and store findings.'));
+    list.appendChild(createCollectionEmptyState('Select a conversation to view findings.'));
     return;
   }
 
   if (!findings.length) {
-    list.appendChild(createCollectionEmptyState('No findings stored for this conversation yet.'));
+    list.appendChild(createCollectionEmptyState('No findings match the current filter.'));
     return;
   }
 
@@ -1313,17 +1351,21 @@ function renderFindings(findings) {
     head.className = 'finding-head';
 
     const meta = document.createElement('div');
-    const kind = document.createElement('div');
+    const kind = document.createElement('input');
     kind.className = 'finding-kind';
-    kind.textContent = finding.kind;
-    const value = document.createElement('div');
+    kind.value = finding.kind || '';
+    kind.placeholder = 'kind';
+
+    const value = document.createElement('input');
     value.className = 'finding-value';
-    value.textContent = finding.value;
+    value.value = finding.value || '';
+    value.placeholder = 'value';
+
     meta.appendChild(kind);
     meta.appendChild(value);
 
     const remove = document.createElement('button');
-    remove.className = 'finding-remove';
+    remove.className = 'tiny-btn';
     remove.textContent = 'Remove';
     remove.onclick = () => removeFinding(finding.finding_id);
 
@@ -1351,15 +1393,16 @@ function renderFindings(findings) {
     artifact.placeholder = 'source artifact';
 
     const actions = document.createElement('div');
-    actions.className = 'tool-actions';
+    actions.className = 'inline';
+
     const save = document.createElement('button');
-    save.className = 'tool-btn secondary';
+    save.className = 'secondary-btn';
     save.textContent = 'Save';
     save.onclick = async () => {
       try {
         await updateFinding(finding.finding_id, {
-          kind: finding.kind,
-          value: finding.value,
+          kind: kind.value.trim(),
+          value: value.value.trim(),
           note: note.value.trim() || null,
           tags: parseTags(tags.value),
           confidence: parseConfidence(confidence.value),
@@ -1369,75 +1412,15 @@ function renderFindings(findings) {
         setStatus('Error updating finding: ' + e.message);
       }
     };
-    actions.appendChild(save);
 
+    actions.appendChild(save);
     fields.appendChild(note);
     fields.appendChild(tags);
     fields.appendChild(confidence);
     fields.appendChild(artifact);
     fields.appendChild(actions);
     item.appendChild(fields);
-
     list.appendChild(item);
-  }
-}
-
-async function addFinding() {
-  if (!currentConvoId) return;
-  const kindInput = document.getElementById('finding-kind');
-  const valueInput = document.getElementById('finding-value');
-  const noteInput = document.getElementById('finding-note');
-  const tagsInput = document.getElementById('finding-tags');
-  const confidenceInput = document.getElementById('finding-confidence');
-  const artifactInput = document.getElementById('finding-artifact');
-  const kind = kindInput.value.trim();
-  const value = valueInput.value.trim();
-  const note = noteInput.value.trim();
-
-  if (!kind || !value) {
-    setStatus('Error: finding kind and value are required');
-    return;
-  }
-
-  try {
-    await api('POST', `/conversations/${currentConvoId}/findings`, {
-      kind,
-      value,
-      note: note || undefined,
-      tags: parseTags(tagsInput.value),
-      confidence: parseConfidence(confidenceInput.value),
-      source_artifact: artifactInput.value.trim() || undefined,
-    });
-    kindInput.value = '';
-    valueInput.value = '';
-    noteInput.value = '';
-    tagsInput.value = '';
-    confidenceInput.value = '';
-    artifactInput.value = '';
-    await loadFindings();
-    setStatus('Finding stored');
-  } catch (e) {
-    setStatus('Error storing finding: ' + e.message);
-  }
-}
-
-async function removeFinding(findingId) {
-  try {
-    await api('DELETE', `/findings/${findingId}`);
-    await loadFindings();
-    setStatus('Finding removed');
-  } catch (e) {
-    setStatus('Error removing finding: ' + e.message);
-  }
-}
-
-async function updateFinding(findingId, payload) {
-  try {
-    await api('PUT', `/findings/${findingId}`, payload);
-    await loadFindings();
-    setStatus('Finding updated');
-  } catch (e) {
-    setStatus('Error updating finding: ' + e.message);
   }
 }
 
@@ -1458,6 +1441,79 @@ function parseConfidence(value) {
   return parsed;
 }
 
+function applyFindingFilters() {
+  const text = document.getElementById('finding-filter-text').value.trim().toLowerCase();
+  const tag = document.getElementById('finding-filter-tag').value.trim().toLowerCase();
+  const minConfidenceRaw = document.getElementById('finding-filter-confidence').value.trim();
+  const minConfidence = minConfidenceRaw ? Number.parseInt(minConfidenceRaw, 10) : null;
+
+  const filtered = currentFindings.filter(finding => {
+    const haystack = [
+      finding.kind,
+      finding.value,
+      finding.note || '',
+      ...(finding.tags || []),
+      finding.source_artifact || '',
+      finding.confidence ?? '',
+    ].join(' ').toLowerCase();
+    if (text && !haystack.includes(text)) return false;
+    if (tag && !(finding.tags || []).some(item => item.toLowerCase().includes(tag))) return false;
+    if (Number.isInteger(minConfidence) && (finding.confidence ?? -1) < minConfidence) return false;
+    return true;
+  });
+
+  renderFindings(filtered);
+}
+
+async function addFinding() {
+  if (!currentConvoId) return;
+  const kind = document.getElementById('finding-kind').value.trim();
+  const value = document.getElementById('finding-value').value.trim();
+  const note = document.getElementById('finding-note').value.trim();
+  if (!kind || !value) {
+    setStatus('Error: finding kind and value are required');
+    return;
+  }
+
+  try {
+    await api('POST', `/conversations/${currentConvoId}/findings`, {
+      kind,
+      value,
+      note: note || undefined,
+      tags: parseTags(document.getElementById('finding-tags').value),
+      confidence: parseConfidence(document.getElementById('finding-confidence').value),
+      source_artifact: document.getElementById('finding-artifact').value.trim() || undefined,
+    });
+    for (const id of ['finding-kind', 'finding-value', 'finding-note', 'finding-tags', 'finding-confidence', 'finding-artifact']) {
+      document.getElementById(id).value = '';
+    }
+    await loadFindings();
+    setStatus('Finding stored');
+  } catch (e) {
+    setStatus('Error storing finding: ' + e.message);
+  }
+}
+
+async function updateFinding(findingId, payload) {
+  try {
+    await api('PUT', `/findings/${findingId}`, payload);
+    await loadFindings();
+    setStatus('Finding updated');
+  } catch (e) {
+    setStatus('Error updating finding: ' + e.message);
+  }
+}
+
+async function removeFinding(findingId) {
+  try {
+    await api('DELETE', `/findings/${findingId}`);
+    await loadFindings();
+    setStatus('Finding removed');
+  } catch (e) {
+    setStatus('Error removing finding: ' + e.message);
+  }
+}
+
 function handleSearchKey(event) {
   if (event.key === 'Enter') {
     event.preventDefault();
@@ -1469,23 +1525,19 @@ function clearSearchResults(message) {
   const results = document.getElementById('search-results');
   results.innerHTML = '';
   results.appendChild(createCollectionEmptyState(message));
-  document.getElementById('search-status').textContent = 'ready';
 }
 
 async function runSearch() {
-  const input = document.getElementById('search-input');
-  const query = input.value.trim();
+  const query = document.getElementById('search-input').value.trim();
   if (!query) {
-    clearSearchResults('Enter a query to search local conversations, notes, and findings.');
+    clearSearchResults('Enter a query to search local history.');
     return;
   }
 
-  document.getElementById('search-status').textContent = 'searching';
   try {
     const results = await api('GET', `/search?q=${encodeURIComponent(query)}`);
     renderSearchResults(results || [], query);
   } catch (e) {
-    document.getElementById('search-status').textContent = 'error';
     setStatus('Error running search: ' + e.message);
   }
 }
@@ -1493,7 +1545,6 @@ async function runSearch() {
 function renderSearchResults(results, query) {
   const container = document.getElementById('search-results');
   container.innerHTML = '';
-  document.getElementById('search-status').textContent = `${results.length} hits`;
 
   if (!results.length) {
     container.appendChild(createCollectionEmptyState(`No local matches for "${query}".`));
@@ -1515,93 +1566,117 @@ function renderSearchResults(results, query) {
     title.className = 'search-title';
     title.textContent = result.title;
 
-    head.appendChild(scope);
-    head.appendChild(title);
-
     const snippet = document.createElement('div');
-    snippet.className = 'search-snippet';
+    snippet.className = 'content';
+    snippet.style.marginTop = '8px';
     snippet.textContent = result.snippet;
 
+    head.appendChild(scope);
+    head.appendChild(title);
     item.appendChild(head);
     item.appendChild(snippet);
     container.appendChild(item);
   }
 }
 
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+async function loadMcpStatuses() {
+  const list = document.getElementById('mcp-list');
+  list.innerHTML = '';
 
-function handleInputKey(e) {
-  if (e.key === 'Enter' && e.ctrlKey) {
-    e.preventDefault();
-    sendMessage();
+  if (!currentConvoId) {
+    renderMcpStatuses([]);
+    return;
   }
-}
-
-async function sendMessage() {
-  if (!currentConvoId || activeJobId) return;
-
-  const input = document.getElementById('msg-input');
-  const content = input.value.trim();
-  if (!content) return;
-
-  input.value = '';
-  persistentWarning = '';
-  updateComposerState();
-  setStatus('Sending message...', true);
 
   try {
-    const result = await api('POST', `/conversations/${currentConvoId}/messages`, { content });
-    activeJobId = result.job_id;
-    updateComposerState();
-    pollJob(activeJobId);
+    const statuses = await api('GET', `/conversations/${currentConvoId}/mcp-statuses`);
+    renderMcpStatuses(statuses || []);
   } catch (e) {
-    setStatus('Error: ' + e.message);
-    activeJobId = null;
-    updateComposerState();
+    list.appendChild(createCollectionEmptyState('Unable to load MCP server status.'));
+    setStatus('Error loading MCP servers: ' + e.message);
   }
 }
 
-async function pollJob(jobId) {
+function renderMcpStatuses(statuses) {
+  const list = document.getElementById('mcp-list');
+  list.innerHTML = '';
+
+  if (!currentConvoId) {
+    list.appendChild(createCollectionEmptyState('Select a conversation to view MCP status.'));
+    return;
+  }
+
+  if (!statuses.length) {
+    list.appendChild(createCollectionEmptyState('No MCP servers configured.'));
+    return;
+  }
+
+  for (const status of statuses) {
+    const card = document.createElement('article');
+    card.className = 'mcp-card';
+
+    const top = document.createElement('div');
+    top.className = 'mcp-top';
+
+    const meta = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'mcp-name';
+    name.textContent = status.name;
+    const state = document.createElement('div');
+    state.className = 'mcp-status ' + (status.enabled ? 'status-enabled' : 'status-disabled');
+    state.textContent = status.enabled ? 'Enabled' : 'Disabled';
+    meta.appendChild(name);
+    meta.appendChild(state);
+
+    const toggle = document.createElement('button');
+    toggle.className = status.enabled ? 'ghost-btn' : 'secondary-btn';
+    toggle.textContent = status.enabled ? 'Disable' : 'Enable';
+    toggle.onclick = () => setMcpServerEnabled(status.name, !status.enabled, statuses);
+
+    top.appendChild(meta);
+    top.appendChild(toggle);
+    card.appendChild(top);
+    list.appendChild(card);
+  }
+}
+
+async function setMcpServerEnabled(serverName, enabled, statuses) {
   try {
-    const job = await api('GET', `/jobs/${jobId}`);
-    const toolLimitEvent = job.events.findLast?.(event => event.type === 'tool_limit')
-      || [...job.events].reverse().find(event => event.type === 'tool_limit');
-    persistentWarning = toolLimitEvent ? toolLimitEvent.message : persistentWarning;
-    if (job.status === 'running') {
-      const lastEvent = job.events.length ? job.events[job.events.length - 1].message : 'Processing request...';
-      setStatus(lastEvent, true);
-      pollTimer = setTimeout(() => pollJob(jobId), 500);
-      return;
-    }
+    const next = statuses
+      .map(status => status.name)
+      .filter(name => {
+        if (name === serverName) return enabled;
+        return statuses.find(status => status.name === name)?.enabled;
+      });
 
-    clearTimeout(pollTimer);
-    activeJobId = null;
-    await loadMessages();
-    updateComposerState();
-
-    if (job.status === 'done') {
-      const toolInfo = job.result ? `${job.result.tool_calls} tool calls` : 'No tool calls';
-      setStatus(persistentWarning || `Done. ${toolInfo}`);
-      await loadWorkspaceData();
+    const allEnabled = next.length === statuses.length;
+    if (allEnabled) {
+      await api('DELETE', `/conversations/${currentConvoId}/mcp-servers`);
     } else {
-      setStatus('Error: ' + (job.error || 'unknown error'));
+      await api('PUT', `/conversations/${currentConvoId}/mcp-servers`, { enabled: next });
     }
+    await loadMcpStatuses();
+    setStatus(`MCP server ${enabled ? 'enabled' : 'disabled'}: ${serverName}`);
   } catch (e) {
-    activeJobId = null;
-    updateComposerState();
-    setStatus('Poll error: ' + e.message);
+    setStatus('Error updating MCP server filter: ' + e.message);
+  }
+}
+
+async function resetMcpServers() {
+  if (!currentConvoId) return;
+  try {
+    await api('DELETE', `/conversations/${currentConvoId}/mcp-servers`);
+    await loadMcpStatuses();
+    setStatus('All MCP servers enabled');
+  } catch (e) {
+    setStatus('Error resetting MCP servers: ' + e.message);
   }
 }
 
 updateConversationContext();
 updateComposerState();
-updateWorkspaceState();
-clearSearchResults('Search across local sessions, notes, and findings.');
+updateUtilityState();
+clearSearchResults('Search local conversations, scratchpads, and findings.');
 loadConversations().then(() => setStatus('Ready'));
 </script>
 </body>

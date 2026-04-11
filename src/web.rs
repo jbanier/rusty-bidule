@@ -105,6 +105,12 @@ struct McpServersBody {
     enabled: Option<Vec<String>>,
 }
 
+#[derive(Serialize)]
+struct McpServerStatusResponse {
+    name: String,
+    enabled: bool,
+}
+
 #[derive(Deserialize)]
 struct ConfigUpdateBody {
     config: AppConfig,
@@ -502,6 +508,27 @@ async fn delete_mcp_servers(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn get_mcp_statuses(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let convo = state.orchestrator.store().load(&id)?;
+    let enabled = convo.enabled_mcp_servers.as_deref();
+    let statuses = state
+        .orchestrator
+        .configured_mcp_server_names()
+        .into_iter()
+        .map(|name| McpServerStatusResponse {
+            enabled: enabled
+                .map(|servers| servers.iter().any(|server| server == &name))
+                .unwrap_or(true),
+            name,
+        })
+        .collect::<Vec<_>>();
+    Ok(axum::Json(serde_json::to_value(statuses)?))
+}
+
 async fn list_conversation_jobs(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
@@ -755,6 +782,10 @@ pub async fn run_web_server(
                 .put(put_mcp_servers)
                 .delete(delete_mcp_servers),
         )
+        .route(
+            "/api/conversations/{id}/mcp-statuses",
+            get(get_mcp_statuses),
+        )
         .route("/api/conversations/{id}/jobs", get(list_conversation_jobs))
         .route(
             "/api/conversations/{id}/scratchpad",
@@ -877,9 +908,9 @@ mod tests {
     use super::{
         COMPLETED_JOB_TTL, ConversationListQuery, ConversationTitleBody, FindingBody, JobState,
         PostMessageBody, ScratchpadBody, SearchQuery, WebAppState, archive_conversation,
-        create_finding, evict_expired_jobs, export_summary, get_export_summary, get_scratchpad,
-        list_conversations, list_findings, post_message, put_conversation_title, put_scratchpad,
-        search_local, unarchive_conversation, update_finding,
+        create_finding, evict_expired_jobs, export_summary, get_export_summary, get_mcp_statuses,
+        get_scratchpad, list_conversations, list_findings, post_message, put_conversation_title,
+        put_scratchpad, search_local, unarchive_conversation, update_finding,
     };
 
     fn test_config(data_dir: std::path::PathBuf) -> AppConfig {
@@ -1032,6 +1063,55 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(listed[0]["title"], "Phishing review");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_status_handler_reflects_filter_state() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.mcp_servers = vec![
+            crate::config::McpServerConfig {
+                name: "alpha".to_string(),
+                transport: "streamable_http".to_string(),
+                url: "http://127.0.0.1/alpha".to_string(),
+                headers: HashMap::new(),
+                timeout: None,
+                sse_read_timeout: None,
+                client_session_timeout_seconds: None,
+                auth: None,
+            },
+            crate::config::McpServerConfig {
+                name: "beta".to_string(),
+                transport: "streamable_http".to_string(),
+                url: "http://127.0.0.1/beta".to_string(),
+                headers: HashMap::new(),
+                timeout: None,
+                sse_read_timeout: None,
+                client_session_timeout_seconds: None,
+                auth: None,
+            },
+        ];
+        let orchestrator = Orchestrator::new(config).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let mut convo = orchestrator
+            .store()
+            .load(&conversation.conversation_id)
+            .unwrap();
+        convo.enabled_mcp_servers = Some(vec!["beta".to_string()]);
+        orchestrator.store().save(&convo).unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let statuses = get_mcp_statuses(State(state), Path(conversation.conversation_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(statuses.as_array().unwrap().len(), 2);
+        assert_eq!(statuses[0]["enabled"], false);
+        assert_eq!(statuses[1]["enabled"], true);
     }
 
     #[tokio::test(flavor = "current_thread")]

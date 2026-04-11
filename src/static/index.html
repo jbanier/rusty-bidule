@@ -207,6 +207,18 @@
     padding: 0 14px 16px;
   }
 
+  .conversation-group + .conversation-group {
+    margin-top: 14px;
+  }
+
+  .conversation-group-label {
+    margin: 0 8px 8px;
+    color: var(--muted-soft);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
   .convo-item {
     padding: 14px;
     border-radius: 16px;
@@ -278,6 +290,31 @@
     justify-content: space-between;
     gap: 16px;
     background: linear-gradient(180deg, rgba(124, 156, 255, 0.08), rgba(124, 156, 255, 0.01));
+  }
+
+  .header-actions {
+    margin-top: 14px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .title-editor {
+    margin-top: 14px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .title-editor input {
+    min-width: min(340px, 100%);
+    flex: 1;
+    background: rgba(4, 10, 19, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    color: var(--text);
+    font: inherit;
+    padding: 10px 12px;
   }
 
   .chat-header h2 {
@@ -416,6 +453,16 @@
     transform: none;
   }
 
+  .archive-btn {
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+  }
+
   .collection {
     min-height: 0;
     max-height: 220px;
@@ -474,6 +521,16 @@
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  .finding-fields {
+    margin-top: 10px;
+    display: grid;
+    gap: 8px;
+  }
+
+  .finding-fields input {
+    width: 100%;
   }
 
   .finding-remove {
@@ -772,7 +829,7 @@
 
       <div class="sidebar-section">
         <h2>Recent Conversations</h2>
-        <span id="conversation-caption">Select one</span>
+        <span id="conversation-caption">Active only</span>
       </div>
 
       <div id="conversation-list"></div>
@@ -782,8 +839,16 @@
       <div class="chat-header">
         <div>
           <div class="eyebrow">Assistant Session</div>
-          <h2>Focused, readable transcript</h2>
+          <h2 id="conversation-title-heading">Focused, readable transcript</h2>
           <p>Each message is separated into cleaner cards with less visual noise, stronger labels, and a more comfortable writing area.</p>
+          <div class="title-editor">
+            <input id="conversation-title-input" placeholder="Set a conversation title" />
+            <button id="title-save-btn" class="archive-btn" onclick="saveConversationTitle()" disabled>Save Title</button>
+          </div>
+          <div class="header-actions">
+            <button id="archive-btn" class="archive-btn" onclick="toggleArchiveConversation()" disabled>Archive Conversation</button>
+            <button id="export-btn" class="archive-btn" onclick="exportConversationSummary()" disabled>Export Summary</button>
+          </div>
         </div>
         <div class="context-pill">
           <div class="label">Current Conversation</div>
@@ -820,6 +885,11 @@
             <input id="finding-value" placeholder="value" />
           </div>
           <input id="finding-note" placeholder="note (optional)" />
+          <input id="finding-tags" placeholder="tags (comma-separated)" />
+          <div class="inline-fields">
+            <input id="finding-confidence" placeholder="confidence 0-100" />
+            <input id="finding-artifact" placeholder="source artifact (optional)" />
+          </div>
           <div class="tool-actions">
             <button id="finding-add-btn" class="tool-btn" onclick="addFinding()">Add Finding</button>
           </div>
@@ -866,6 +936,8 @@
 
 <script>
 let currentConvoId = null;
+let currentConvoArchived = false;
+let currentConvoTitle = '';
 let pollTimer = null;
 let activeJobId = null;
 let persistentWarning = '';
@@ -899,7 +971,14 @@ function formatTime(ts) {
 
 function updateConversationContext() {
   document.getElementById('conversation-context').textContent = currentConvoId ? shortId(currentConvoId) : 'No conversation selected';
-  document.getElementById('conversation-caption').textContent = currentConvoId ? 'Active thread' : 'Select one';
+  document.getElementById('conversation-title-heading').textContent = currentConvoTitle || 'Focused, readable transcript';
+  document.getElementById('conversation-caption').textContent = 'Active and archived';
+  const archiveBtn = document.getElementById('archive-btn');
+  archiveBtn.disabled = !currentConvoId;
+  archiveBtn.textContent = currentConvoArchived ? 'Restore Conversation' : 'Archive Conversation';
+  document.getElementById('export-btn').disabled = !currentConvoId;
+  document.getElementById('title-save-btn').disabled = !currentConvoId;
+  document.getElementById('conversation-title-input').disabled = !currentConvoId;
 }
 
 function updateComposerState() {
@@ -917,7 +996,15 @@ function updateWorkspaceState() {
   document.getElementById('finding-kind').disabled = !hasConversation;
   document.getElementById('finding-value').disabled = !hasConversation;
   document.getElementById('finding-note').disabled = !hasConversation;
+  document.getElementById('finding-tags').disabled = !hasConversation;
+  document.getElementById('finding-confidence').disabled = !hasConversation;
+  document.getElementById('finding-artifact').disabled = !hasConversation;
+  document.getElementById('archive-btn').disabled = !hasConversation;
+  document.getElementById('export-btn').disabled = !hasConversation;
+  document.getElementById('title-save-btn').disabled = !hasConversation;
+  document.getElementById('conversation-title-input').disabled = !hasConversation;
   if (!hasConversation) {
+    document.getElementById('conversation-title-input').value = '';
     document.getElementById('scratchpad-status').textContent = 'select thread';
     document.getElementById('findings-status').textContent = 'select thread';
   }
@@ -939,26 +1026,53 @@ function createCollectionEmptyState(message) {
 
 async function loadConversations() {
   try {
-    const convos = await api('GET', '/conversations');
+    const convos = await api('GET', '/conversations?include_archived=true');
     const list = document.getElementById('conversation-list');
-    document.getElementById('conversation-count').textContent = String(convos.length);
+    const activeConvos = convos.filter(c => !c.archived_at);
+    const archivedConvos = convos.filter(c => c.archived_at);
+    document.getElementById('conversation-count').textContent = String(activeConvos.length);
     list.innerHTML = '';
 
     if (!convos.length) {
+      currentConvoTitle = '';
+      currentConvoArchived = false;
       list.appendChild(createEmptyState('No conversations yet', 'Create a new thread to start chatting with the assistant.'));
       updateConversationContext();
       updateComposerState();
+      updateWorkspaceState();
       return;
     }
 
-    for (const c of convos) {
+    renderConversationGroup(list, 'Active', activeConvos);
+    renderConversationGroup(list, 'Archived', archivedConvos);
+
+    updateConversationContext();
+    updateComposerState();
+    updateWorkspaceState();
+  } catch (e) {
+    setStatus('Error loading conversations: ' + e.message);
+  }
+}
+
+function renderConversationGroup(container, label, conversations) {
+  if (!conversations.length) return;
+
+  const group = document.createElement('section');
+  group.className = 'conversation-group';
+
+  const heading = document.createElement('div');
+  heading.className = 'conversation-group-label';
+  heading.textContent = label;
+  group.appendChild(heading);
+
+  for (const c of conversations) {
       const div = document.createElement('div');
       div.className = 'convo-item' + (c.conversation_id === currentConvoId ? ' active' : '');
       div.onclick = () => switchConversation(c.conversation_id);
 
       const title = document.createElement('div');
       title.className = 'convo-title';
-      title.textContent = `Conversation ${shortId(c.conversation_id)}`;
+      title.textContent = c.title || `Conversation ${shortId(c.conversation_id)}`;
 
       const badge = document.createElement('div');
       badge.className = 'convo-badge';
@@ -975,20 +1089,17 @@ async function loadConversations() {
 
       const meta = document.createElement('div');
       meta.className = 'convo-meta';
-      meta.textContent = `Updated ${formatTime(c.updated_at)}`;
+      meta.textContent = c.archived_at
+        ? `Archived ${formatTime(c.archived_at)}`
+        : `Updated ${formatTime(c.updated_at)}`;
 
       div.appendChild(head);
       div.appendChild(id);
       div.appendChild(meta);
-      list.appendChild(div);
-    }
-
-    updateConversationContext();
-    updateComposerState();
-    updateWorkspaceState();
-  } catch (e) {
-    setStatus('Error loading conversations: ' + e.message);
+      group.appendChild(div);
   }
+
+  container.appendChild(group);
 }
 
 async function newConversation() {
@@ -996,6 +1107,8 @@ async function newConversation() {
     setStatus('Creating conversation...', true);
     const c = await api('POST', '/conversations');
     currentConvoId = c.conversation_id;
+    currentConvoTitle = c.title || '';
+    currentConvoArchived = false;
     persistentWarning = '';
     await loadConversations();
     await loadMessages();
@@ -1036,9 +1149,59 @@ async function loadMessages() {
   if (!currentConvoId) return;
   try {
     const c = await api('GET', `/conversations/${currentConvoId}`);
+    currentConvoTitle = c.title || '';
+    currentConvoArchived = Boolean(c.archived_at);
+    document.getElementById('conversation-title-input').value = currentConvoTitle;
+    updateConversationContext();
+    updateWorkspaceState();
     renderMessages(c.messages || []);
   } catch (e) {
     setStatus('Error loading messages: ' + e.message);
+  }
+}
+
+async function toggleArchiveConversation() {
+  if (!currentConvoId) return;
+  try {
+    if (currentConvoArchived) {
+      await api('POST', `/conversations/${currentConvoId}/unarchive`);
+      currentConvoArchived = false;
+      setStatus('Conversation restored');
+    } else {
+      await api('POST', `/conversations/${currentConvoId}/archive`);
+      currentConvoArchived = true;
+      setStatus('Conversation archived');
+    }
+    await loadConversations();
+    updateConversationContext();
+  } catch (e) {
+    setStatus('Error updating archive state: ' + e.message);
+  }
+}
+
+async function saveConversationTitle() {
+  if (!currentConvoId) return;
+  const title = document.getElementById('conversation-title-input').value.trim();
+  try {
+    const updated = await api('PUT', `/conversations/${currentConvoId}`, {
+      title: title || null,
+    });
+    currentConvoTitle = updated.title || '';
+    await loadConversations();
+    updateConversationContext();
+    setStatus(currentConvoTitle ? 'Conversation title updated' : 'Conversation title cleared');
+  } catch (e) {
+    setStatus('Error saving conversation title: ' + e.message);
+  }
+}
+
+async function exportConversationSummary() {
+  if (!currentConvoId) return;
+  try {
+    const result = await api('POST', `/conversations/${currentConvoId}/export-summary`);
+    setStatus(`Session summary exported to ${result.saved_to}`);
+  } catch (e) {
+    setStatus('Error exporting session summary: ' + e.message);
   }
 }
 
@@ -1168,12 +1331,52 @@ function renderFindings(findings) {
     head.appendChild(remove);
     item.appendChild(head);
 
-    if (finding.note) {
-      const note = document.createElement('div');
-      note.className = 'finding-note';
-      note.textContent = finding.note;
-      item.appendChild(note);
-    }
+    const fields = document.createElement('div');
+    fields.className = 'finding-fields';
+
+    const note = document.createElement('input');
+    note.value = finding.note || '';
+    note.placeholder = 'note';
+
+    const tags = document.createElement('input');
+    tags.value = (finding.tags || []).join(', ');
+    tags.placeholder = 'tags';
+
+    const confidence = document.createElement('input');
+    confidence.value = finding.confidence ?? '';
+    confidence.placeholder = 'confidence 0-100';
+
+    const artifact = document.createElement('input');
+    artifact.value = finding.source_artifact || '';
+    artifact.placeholder = 'source artifact';
+
+    const actions = document.createElement('div');
+    actions.className = 'tool-actions';
+    const save = document.createElement('button');
+    save.className = 'tool-btn secondary';
+    save.textContent = 'Save';
+    save.onclick = async () => {
+      try {
+        await updateFinding(finding.finding_id, {
+          kind: finding.kind,
+          value: finding.value,
+          note: note.value.trim() || null,
+          tags: parseTags(tags.value),
+          confidence: parseConfidence(confidence.value),
+          source_artifact: artifact.value.trim() || null,
+        });
+      } catch (e) {
+        setStatus('Error updating finding: ' + e.message);
+      }
+    };
+    actions.appendChild(save);
+
+    fields.appendChild(note);
+    fields.appendChild(tags);
+    fields.appendChild(confidence);
+    fields.appendChild(artifact);
+    fields.appendChild(actions);
+    item.appendChild(fields);
 
     list.appendChild(item);
   }
@@ -1184,6 +1387,9 @@ async function addFinding() {
   const kindInput = document.getElementById('finding-kind');
   const valueInput = document.getElementById('finding-value');
   const noteInput = document.getElementById('finding-note');
+  const tagsInput = document.getElementById('finding-tags');
+  const confidenceInput = document.getElementById('finding-confidence');
+  const artifactInput = document.getElementById('finding-artifact');
   const kind = kindInput.value.trim();
   const value = valueInput.value.trim();
   const note = noteInput.value.trim();
@@ -1198,10 +1404,16 @@ async function addFinding() {
       kind,
       value,
       note: note || undefined,
+      tags: parseTags(tagsInput.value),
+      confidence: parseConfidence(confidenceInput.value),
+      source_artifact: artifactInput.value.trim() || undefined,
     });
     kindInput.value = '';
     valueInput.value = '';
     noteInput.value = '';
+    tagsInput.value = '';
+    confidenceInput.value = '';
+    artifactInput.value = '';
     await loadFindings();
     setStatus('Finding stored');
   } catch (e) {
@@ -1217,6 +1429,33 @@ async function removeFinding(findingId) {
   } catch (e) {
     setStatus('Error removing finding: ' + e.message);
   }
+}
+
+async function updateFinding(findingId, payload) {
+  try {
+    await api('PUT', `/findings/${findingId}`, payload);
+    await loadFindings();
+    setStatus('Finding updated');
+  } catch (e) {
+    setStatus('Error updating finding: ' + e.message);
+  }
+}
+
+function parseTags(value) {
+  return String(value || '')
+    .split(',')
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
+function parseConfidence(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100) {
+    throw new Error('confidence must be an integer between 0 and 100');
+  }
+  return parsed;
 }
 
 function handleSearchKey(event) {

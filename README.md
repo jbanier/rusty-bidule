@@ -260,9 +260,13 @@ Login can be triggered from the TUI with `/login <server>`.
 Conversation management:
 
 - `/new`
-- `/list`
+- `/list [all|archived]`
 - `/use <id>`
 - `/show [id]`
+- `/title [text]`
+- `/archive [id]`
+- `/unarchive <id>`
+- `/export [id]`
 - `/delete <id>`
 - `/compact`
 
@@ -296,6 +300,7 @@ Local analyst state:
 - `/scratch clear`
 - `/findings` or `/findings list`
 - `/findings add <kind> <value> [note]`
+- `/findings update <finding-id> <kind|value|note|tags|confidence|artifact> <value>`
 - `/findings remove <finding-id>`
 - `/search <query>`
 

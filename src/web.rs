@@ -69,6 +69,8 @@ struct ConvoSummaryResponse {
     conversation_id: String,
     updated_at: String,
     message_count: usize,
+    title: Option<String>,
+    archived_at: Option<String>,
 }
 
 impl From<ConversationSummary> for ConvoSummaryResponse {
@@ -77,8 +79,15 @@ impl From<ConversationSummary> for ConvoSummaryResponse {
             conversation_id: s.conversation_id,
             updated_at: s.updated_at.to_rfc3339(),
             message_count: s.message_count,
+            title: s.title,
+            archived_at: s.archived_at.map(|value| value.to_rfc3339()),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ConversationListQuery {
+    include_archived: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +110,11 @@ struct ConfigUpdateBody {
     config: AppConfig,
 }
 
+#[derive(Deserialize)]
+struct ConversationTitleBody {
+    title: Option<String>,
+}
+
 #[derive(Serialize)]
 struct ScratchpadResponse {
     body: String,
@@ -112,10 +126,14 @@ struct ScratchpadBody {
 }
 
 #[derive(Deserialize)]
-struct FindingCreateBody {
+struct FindingBody {
     kind: String,
     value: String,
     note: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    confidence: Option<u8>,
+    source_artifact: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -174,8 +192,12 @@ async fn index() -> Html<&'static str> {
 
 async fn list_conversations(
     State(state): State<WebAppState>,
+    Query(query): Query<ConversationListQuery>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
-    let summaries = state.orchestrator.store().list_conversations()?;
+    let summaries = state
+        .orchestrator
+        .store()
+        .list_conversations_with_archived(query.include_archived.unwrap_or(false))?;
     let resp: Vec<ConvoSummaryResponse> = summaries.into_iter().map(Into::into).collect();
     Ok(axum::Json(json!(resp)))
 }
@@ -196,6 +218,19 @@ async fn get_conversation(
     Ok(axum::Json(serde_json::to_value(&convo)?))
 }
 
+async fn put_conversation_title(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<ConversationTitleBody>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let conversation = state
+        .orchestrator
+        .store()
+        .set_conversation_title(&id, body.title.as_deref())?;
+    Ok(axum::Json(serde_json::to_value(&conversation)?))
+}
+
 async fn delete_conversation(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
@@ -203,6 +238,55 @@ async fn delete_conversation(
     validate_resource_id(&id, "conversation")?;
     state.orchestrator.store().delete(&id)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn archive_conversation(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let conversation = state.orchestrator.store().archive_conversation(&id)?;
+    Ok(axum::Json(serde_json::to_value(&conversation)?))
+}
+
+async fn unarchive_conversation(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let conversation = state.orchestrator.store().unarchive_conversation(&id)?;
+    Ok(axum::Json(serde_json::to_value(&conversation)?))
+}
+
+async fn get_export_summary(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let export_path = state
+        .orchestrator
+        .store()
+        .export_conversation_summary(&id)?;
+    let payload = std::fs::read_to_string(&export_path).map_err(|err| {
+        anyhow::anyhow!("failed to read export '{}': {err}", export_path.display())
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&payload)?;
+    Ok(axum::Json(value))
+}
+
+async fn export_summary(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let export_path = state
+        .orchestrator
+        .store()
+        .export_conversation_summary(&id)?;
+    Ok(axum::Json(json!({
+        "conversation_id": id,
+        "saved_to": export_path.display().to_string(),
+    })))
 }
 
 async fn post_message(
@@ -471,7 +555,7 @@ async fn list_findings(
 async fn create_finding(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
-    axum::Json(body): axum::Json<FindingCreateBody>,
+    axum::Json(body): axum::Json<FindingBody>,
 ) -> AppResult<(StatusCode, axum::Json<serde_json::Value>)> {
     validate_resource_id(&id, "conversation")?;
     let finding = state.orchestrator.store().add_finding(
@@ -479,11 +563,36 @@ async fn create_finding(
         &body.kind,
         &body.value,
         body.note.as_deref(),
+        &body.tags,
+        body.confidence,
+        body.source_artifact.as_deref(),
     )?;
     Ok((
         StatusCode::CREATED,
         axum::Json(serde_json::to_value(finding)?),
     ))
+}
+
+async fn update_finding(
+    State(state): State<WebAppState>,
+    Path(finding_id): Path<String>,
+    axum::Json(body): axum::Json<FindingBody>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&finding_id, "finding")?;
+    let finding = state
+        .orchestrator
+        .store()
+        .update_finding(
+            &finding_id,
+            &body.kind,
+            &body.value,
+            body.note.as_deref(),
+            &body.tags,
+            body.confidence,
+            body.source_artifact.as_deref(),
+        )?
+        .ok_or_else(|| anyhow::anyhow!("finding '{finding_id}' not found"))?;
+    Ok(axum::Json(serde_json::to_value(finding)?))
 }
 
 async fn delete_finding(
@@ -615,7 +724,21 @@ pub async fn run_web_server(
         )
         .route(
             "/api/conversations/{id}",
-            get(get_conversation).delete(delete_conversation),
+            get(get_conversation)
+                .put(put_conversation_title)
+                .delete(delete_conversation),
+        )
+        .route(
+            "/api/conversations/{id}/archive",
+            post(archive_conversation),
+        )
+        .route(
+            "/api/conversations/{id}/unarchive",
+            post(unarchive_conversation),
+        )
+        .route(
+            "/api/conversations/{id}/export-summary",
+            get(get_export_summary).post(export_summary),
         )
         .route("/api/conversations/{id}/messages", post(post_message))
         .route(
@@ -643,7 +766,7 @@ pub async fn run_web_server(
         )
         .route(
             "/api/findings/{finding_id}",
-            axum::routing::delete(delete_finding),
+            axum::routing::delete(delete_finding).put(update_finding),
         )
         .route("/api/search", get(search_local))
         .route("/api/mcp/oauth-servers", get(list_oauth_servers))
@@ -752,9 +875,11 @@ mod tests {
     };
 
     use super::{
-        COMPLETED_JOB_TTL, FindingCreateBody, JobState, PostMessageBody, ScratchpadBody,
-        SearchQuery, WebAppState, create_finding, evict_expired_jobs, get_scratchpad,
-        list_findings, post_message, put_scratchpad, search_local,
+        COMPLETED_JOB_TTL, ConversationListQuery, ConversationTitleBody, FindingBody, JobState,
+        PostMessageBody, ScratchpadBody, SearchQuery, WebAppState, archive_conversation,
+        create_finding, evict_expired_jobs, export_summary, get_export_summary, get_scratchpad,
+        list_conversations, list_findings, post_message, put_conversation_title, put_scratchpad,
+        search_local, unarchive_conversation, update_finding,
     };
 
     fn test_config(data_dir: std::path::PathBuf) -> AppConfig {
@@ -875,6 +1000,41 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn title_handler_updates_conversation_metadata() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let updated = put_conversation_title(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+            axum::Json(ConversationTitleBody {
+                title: Some("Phishing review".to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(updated["title"], "Phishing review");
+
+        let listed = list_conversations(
+            State(state),
+            axum::extract::Query(ConversationListQuery {
+                include_archived: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed[0]["title"], "Phishing review");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn findings_and_search_handlers_return_local_state() {
         let dir = tempdir().unwrap();
         let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
@@ -892,10 +1052,13 @@ mod tests {
         let response = create_finding(
             State(state.clone()),
             Path(conversation.conversation_id.clone()),
-            axum::Json(FindingCreateBody {
+            axum::Json(FindingBody {
                 kind: "ip".to_string(),
                 value: "5.6.7.8".to_string(),
                 note: Some("watchlist".to_string()),
+                tags: vec!["network".to_string()],
+                confidence: Some(70),
+                source_artifact: Some("ioc.txt".to_string()),
             }),
         )
         .await
@@ -907,6 +1070,7 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(findings.as_array().unwrap().len(), 1);
+        assert_eq!(findings[0]["confidence"], 70);
 
         let results = search_local(
             State(state),
@@ -918,5 +1082,132 @@ mod tests {
         .unwrap()
         .0;
         assert!(!results.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn archive_handlers_hide_conversation_from_default_list() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let _ = archive_conversation(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+        )
+        .await
+        .unwrap();
+
+        let active_only = list_conversations(
+            State(state.clone()),
+            axum::extract::Query(ConversationListQuery {
+                include_archived: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(active_only.as_array().unwrap().is_empty());
+
+        let with_archived = list_conversations(
+            State(state.clone()),
+            axum::extract::Query(ConversationListQuery {
+                include_archived: Some(true),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(with_archived.as_array().unwrap().len(), 1);
+
+        let restored = unarchive_conversation(State(state), Path(conversation.conversation_id))
+            .await
+            .unwrap()
+            .0;
+        assert!(restored["archived_at"].is_null());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn export_summary_handlers_write_and_return_snapshot() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        orchestrator
+            .store()
+            .save_scratchpad(&conversation.conversation_id, "browser note")
+            .unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let exported = export_summary(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            exported["saved_to"]
+                .as_str()
+                .unwrap()
+                .ends_with("-summary.json")
+        );
+
+        let snapshot = get_export_summary(State(state), Path(conversation.conversation_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(snapshot["scratchpad"], "browser note");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_finding_handler_replaces_metadata() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let finding = orchestrator
+            .store()
+            .add_finding(
+                &conversation.conversation_id,
+                "ip",
+                "1.2.3.4",
+                Some("initial"),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let updated = update_finding(
+            State(state),
+            Path(finding.finding_id),
+            axum::Json(FindingBody {
+                kind: "domain".to_string(),
+                value: "example.org".to_string(),
+                note: Some("promoted".to_string()),
+                tags: vec!["ioc".to_string(), "phishing".to_string()],
+                confidence: Some(95),
+                source_artifact: Some("mail.eml".to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(updated["kind"], "domain");
+        assert_eq!(updated["confidence"], 95);
+        assert_eq!(updated["source_artifact"], "mail.eml");
     }
 }

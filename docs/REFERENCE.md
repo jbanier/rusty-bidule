@@ -420,9 +420,13 @@ Supported arguments:
 | Command | Behavior |
 |---------|----------|
 | `/new` | Create a conversation |
-| `/list` | List conversations |
+| `/list [all|archived]` | List active, all, or archived conversations |
 | `/use <id>` | Switch conversation |
 | `/show [id]` | Switch to and display a conversation |
+| `/title [text]` | Set or clear the current conversation title |
+| `/archive [id]` | Archive the current or specified conversation |
+| `/unarchive <id>` | Restore an archived conversation |
+| `/export [id]` | Write a local JSON session summary under `data/exports/` |
 | `/delete <id>` | Delete a conversation |
 | `/login <server>` | Start MCP OAuth login |
 | `/compact` | Compact current conversation |
@@ -439,7 +443,7 @@ Supported arguments:
 | `/permissions reset` | Reset to config defaults |
 | `/yolo on|off` | Shortcut for YOLO toggle |
 | `/scratch [show|set|append|clear]` | Manage the per-conversation scratchpad |
-| `/findings [list|add|remove]` | Manage structured local findings |
+| `/findings [list|add|update|remove]` | Manage structured local findings, including tags, confidence, and artifact references |
 | `/search <query>` | Search conversations, scratchpads, and findings locally |
 | `/logging` | Show current logging note |
 | `/exit` or `/quit` | Exit the TUI |
@@ -452,10 +456,15 @@ Routes currently exposed by the Axum server:
 |--------|------|-------|
 | `GET` | `/` | Browser UI shell |
 | `GET` | `/healthz` | Health check |
-| `GET` | `/api/conversations` | List conversations |
+| `GET` | `/api/conversations` | List conversations, defaults to active only; `?include_archived=true` includes archived |
 | `POST` | `/api/conversations` | Create conversation |
 | `GET` | `/api/conversations/{id}` | Load conversation |
+| `PUT` | `/api/conversations/{id}` | Update conversation metadata such as the title |
 | `DELETE` | `/api/conversations/{id}` | Delete conversation |
+| `POST` | `/api/conversations/{id}/archive` | Archive conversation |
+| `POST` | `/api/conversations/{id}/unarchive` | Restore conversation |
+| `GET` | `/api/conversations/{id}/export-summary` | Generate and return the current JSON session summary |
+| `POST` | `/api/conversations/{id}/export-summary` | Generate and save the JSON session summary under `data/exports/` |
 | `POST` | `/api/conversations/{id}/messages` | Submit a message, preprocesses inline `@file` references, returns async job id |
 | `POST` | `/api/conversations/{id}/compact` | Compact conversation |
 | `POST` | `/api/conversations/{id}/recipe` | Set active recipe |
@@ -463,6 +472,13 @@ Routes currently exposed by the Axum server:
 | `GET` | `/api/conversations/{id}/mcp-servers` | Get effective conversation MCP filter |
 | `PUT` | `/api/conversations/{id}/mcp-servers` | Set conversation MCP filter |
 | `DELETE` | `/api/conversations/{id}/mcp-servers` | Reset conversation MCP filter |
+| `GET` | `/api/conversations/{id}/scratchpad` | Load conversation scratchpad |
+| `PUT` | `/api/conversations/{id}/scratchpad` | Save conversation scratchpad |
+| `GET` | `/api/conversations/{id}/findings` | List findings for a conversation |
+| `POST` | `/api/conversations/{id}/findings` | Add a finding to a conversation |
+| `PUT` | `/api/findings/{finding_id}` | Replace finding metadata such as note, tags, confidence, or artifact reference |
+| `DELETE` | `/api/findings/{finding_id}` | Remove a stored finding |
+| `GET` | `/api/search?q=...` | Search conversations, scratchpads, and findings locally |
 | `GET` | `/api/recipes` | List recipes |
 | `GET` | `/api/jobs/{job_id}` | Poll async job state |
 | `DELETE` | `/api/jobs/{job_id}` | Delete async job state |

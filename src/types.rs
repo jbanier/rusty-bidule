@@ -73,6 +73,10 @@ pub struct Conversation {
     pub conversation_id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<DateTime<Utc>>,
     /// Name of the recipe currently loaded into this conversation (if any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_recipe: Option<String>,
@@ -125,6 +129,8 @@ pub struct ConversationSummary {
     pub conversation_id: String,
     pub updated_at: DateTime<Utc>,
     pub message_count: usize,
+    pub title: Option<String>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,6 +141,12 @@ pub struct FindingRecord {
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -146,6 +158,9 @@ impl FindingRecord {
         kind: String,
         value: String,
         note: Option<String>,
+        tags: Vec<String>,
+        confidence: Option<u8>,
+        source_artifact: Option<String>,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -154,6 +169,9 @@ impl FindingRecord {
             kind,
             value,
             note,
+            tags,
+            confidence,
+            source_artifact,
             created_at: now,
             updated_at: now,
         }

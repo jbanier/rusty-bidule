@@ -43,6 +43,8 @@ impl ConversationStore {
             conversation_id: generate_conversation_id(now),
             created_at: now,
             updated_at: now,
+            title: None,
+            archived_at: None,
             pending_recipe: None,
             enabled_mcp_servers: None,
             active_compaction: None,
@@ -57,6 +59,13 @@ impl ConversationStore {
     }
 
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>> {
+        self.list_conversations_with_archived(false)
+    }
+
+    pub fn list_conversations_with_archived(
+        &self,
+        include_archived: bool,
+    ) -> Result<Vec<ConversationSummary>> {
         self.init()?;
         let mut summaries = Vec::new();
         for entry in fs::read_dir(&self.root)
@@ -72,10 +81,15 @@ impl ConversationStore {
             }
             let conversation: Conversation =
                 serde_json::from_str(&fs::read_to_string(&convo_path)?)?;
+            if !include_archived && conversation.archived_at.is_some() {
+                continue;
+            }
             summaries.push(ConversationSummary {
                 conversation_id: conversation.conversation_id,
                 updated_at: conversation.updated_at,
                 message_count: conversation.messages.len(),
+                title: conversation.title,
+                archived_at: conversation.archived_at,
             });
         }
         summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -188,6 +202,10 @@ impl ConversationStore {
         self.data_root.join("findings.json")
     }
 
+    fn export_root(&self) -> PathBuf {
+        self.data_root.join("exports")
+    }
+
     pub fn load_scratchpad(&self, conversation_id: &str) -> Result<String> {
         self.ensure_layout(conversation_id)?;
         let path = self.scratchpad_path(conversation_id)?;
@@ -227,6 +245,9 @@ impl ConversationStore {
         kind: &str,
         value: &str,
         note: Option<&str>,
+        tags: &[String],
+        confidence: Option<u8>,
+        source_artifact: Option<&str>,
     ) -> Result<FindingRecord> {
         validate_conversation_id(conversation_id)?;
         let now = Utc::now();
@@ -240,12 +261,48 @@ impl ConversationStore {
             kind.to_string(),
             value.to_string(),
             note.map(str::to_string),
+            normalize_tags(tags),
+            confidence,
+            source_artifact.map(str::to_string),
         );
         let mut findings = self.load_findings()?;
         findings.push(finding.clone());
         findings.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         self.save_findings(&findings)?;
         Ok(finding)
+    }
+
+    pub fn update_finding(
+        &self,
+        finding_id: &str,
+        kind: &str,
+        value: &str,
+        note: Option<&str>,
+        tags: &[String],
+        confidence: Option<u8>,
+        source_artifact: Option<&str>,
+    ) -> Result<Option<FindingRecord>> {
+        let mut findings = self.load_findings()?;
+        let mut updated = None;
+        for finding in &mut findings {
+            if finding.finding_id != finding_id {
+                continue;
+            }
+            finding.kind = kind.trim().to_string();
+            finding.value = value.trim().to_string();
+            finding.note = normalize_optional_text(note);
+            finding.tags = normalize_tags(tags);
+            finding.confidence = confidence;
+            finding.source_artifact = normalize_optional_text(source_artifact);
+            finding.updated_at = Utc::now();
+            updated = Some(finding.clone());
+            break;
+        }
+        if updated.is_some() {
+            findings.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            self.save_findings(&findings)?;
+        }
+        Ok(updated)
     }
 
     pub fn remove_finding(&self, finding_id: &str) -> Result<bool> {
@@ -259,6 +316,89 @@ impl ConversationStore {
         Ok(true)
     }
 
+    pub fn archive_conversation(&self, conversation_id: &str) -> Result<Conversation> {
+        let mut conversation = self.load(conversation_id)?;
+        let now = Utc::now();
+        conversation.archived_at = Some(now);
+        conversation.updated_at = now;
+        self.save(&conversation)?;
+        Ok(conversation)
+    }
+
+    pub fn unarchive_conversation(&self, conversation_id: &str) -> Result<Conversation> {
+        let mut conversation = self.load(conversation_id)?;
+        conversation.archived_at = None;
+        conversation.updated_at = Utc::now();
+        self.save(&conversation)?;
+        Ok(conversation)
+    }
+
+    pub fn set_conversation_title(
+        &self,
+        conversation_id: &str,
+        title: Option<&str>,
+    ) -> Result<Conversation> {
+        let mut conversation = self.load(conversation_id)?;
+        conversation.title = title
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        conversation.updated_at = Utc::now();
+        self.save(&conversation)?;
+        Ok(conversation)
+    }
+
+    pub fn export_conversation_summary(&self, conversation_id: &str) -> Result<PathBuf> {
+        let conversation = self.load(conversation_id)?;
+        let scratchpad = self.load_scratchpad(conversation_id)?;
+        let jobs = self.load_job_state(conversation_id)?;
+        let findings = self
+            .load_findings()?
+            .into_iter()
+            .filter(|finding| finding.conversation_id == conversation_id)
+            .collect::<Vec<_>>();
+
+        let active_compaction_summary = conversation
+            .active_compaction
+            .as_deref()
+            .map(|checkpoint_id| self.load_compaction(conversation_id, checkpoint_id))
+            .transpose()?;
+
+        let conversation_dir = self.conversation_dir(conversation_id)?;
+        let log_path = conversation_dir.join("logs/conversation.log");
+        let tool_output_dir = conversation_dir.join("tool_output");
+        let tool_output_files = if tool_output_dir.exists() {
+            fs::read_dir(&tool_output_dir)?
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let export_root = self.export_root();
+        fs::create_dir_all(&export_root)
+            .with_context(|| format!("failed to create {}", export_root.display()))?;
+        let export_path = export_root.join(format!("{conversation_id}-summary.json"));
+        let payload = serde_json::to_string_pretty(&serde_json::json!({
+            "exported_at": Utc::now().to_rfc3339(),
+            "conversation": conversation,
+            "scratchpad": scratchpad,
+            "jobs": jobs,
+            "findings": findings,
+            "active_compaction_summary": active_compaction_summary,
+            "artifacts": {
+                "conversation_dir": conversation_dir.display().to_string(),
+                "log_path": log_path.display().to_string(),
+                "tool_output_dir": tool_output_dir.display().to_string(),
+                "tool_output_files": tool_output_files,
+            }
+        }))?;
+        fs::write(&export_path, payload)
+            .with_context(|| format!("failed to write {}", export_path.display()))?;
+        Ok(export_path)
+    }
+
     pub fn search_local(&self, query: &str) -> Result<Vec<SearchResult>> {
         let needle = query.trim().to_ascii_lowercase();
         if needle.is_empty() {
@@ -267,7 +407,7 @@ impl ConversationStore {
 
         let mut results = Vec::new();
 
-        for summary in self.list_conversations()? {
+        for summary in self.list_conversations_with_archived(true)? {
             let conversation = self.load(&summary.conversation_id)?;
             for message in &conversation.messages {
                 if message.content.to_ascii_lowercase().contains(&needle) {
@@ -291,11 +431,18 @@ impl ConversationStore {
 
         for finding in self.load_findings()? {
             let haystack = format!(
-                "{} {} {} {}",
+                "{} {} {} {} {} {} {}",
                 finding.conversation_id,
                 finding.kind,
                 finding.value,
-                finding.note.as_deref().unwrap_or("")
+                finding.note.as_deref().unwrap_or(""),
+                finding.tags.join(" "),
+                finding
+                    .confidence
+                    .map(|value| value.to_string())
+                    .as_deref()
+                    .unwrap_or(""),
+                finding.source_artifact.as_deref().unwrap_or("")
             );
             if haystack.to_ascii_lowercase().contains(&needle) {
                 results.push(SearchResult {
@@ -303,13 +450,27 @@ impl ConversationStore {
                     title: format!("{} / {}", finding.conversation_id, finding.finding_id),
                     snippet: summarize_match(
                         &format!(
-                            "{}: {}{}",
+                            "{}: {}{}{}{}{}",
                             finding.kind,
                             finding.value,
                             finding
                                 .note
                                 .as_deref()
                                 .map(|note| format!(" // {note}"))
+                                .unwrap_or_default(),
+                            if finding.tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" // tags: {}", finding.tags.join(", "))
+                            },
+                            finding
+                                .confidence
+                                .map(|value| format!(" // confidence: {value}"))
+                                .unwrap_or_default(),
+                            finding
+                                .source_artifact
+                                .as_deref()
+                                .map(|path| format!(" // artifact: {path}"))
                                 .unwrap_or_default()
                         ),
                         query,
@@ -393,7 +554,7 @@ impl ConversationStore {
         now: chrono::DateTime<Utc>,
     ) -> Result<Vec<(String, RememberedJob)>> {
         let mut due = Vec::new();
-        for summary in self.list_conversations()? {
+        for summary in self.list_conversations_with_archived(true)? {
             let jobs = self.load_job_state(&summary.conversation_id)?;
             for job in jobs {
                 if job.is_due_for_poll(now) {
@@ -490,6 +651,21 @@ fn summarize_match(text: &str, query: &str) -> String {
     }
 }
 
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn normalize_tags(tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -567,6 +743,86 @@ mod tests {
     }
 
     #[test]
+    fn archived_conversations_are_hidden_from_default_list() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let active = store.create_conversation().unwrap();
+        let archived = store.create_conversation().unwrap();
+
+        store
+            .archive_conversation(&archived.conversation_id)
+            .unwrap();
+
+        let active_only = store.list_conversations().unwrap();
+        assert_eq!(active_only.len(), 1);
+        assert_eq!(active_only[0].conversation_id, active.conversation_id);
+
+        let with_archived = store.list_conversations_with_archived(true).unwrap();
+        assert_eq!(with_archived.len(), 2);
+        assert!(with_archived.iter().any(|summary| summary.conversation_id
+            == archived.conversation_id
+            && summary.archived_at.is_some()));
+    }
+
+    #[test]
+    fn titles_are_persisted_and_surface_in_summaries() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+
+        store
+            .set_conversation_title(&conversation.conversation_id, Some("Malware triage"))
+            .unwrap();
+
+        let loaded = store.load(&conversation.conversation_id).unwrap();
+        assert_eq!(loaded.title.as_deref(), Some("Malware triage"));
+        let summary = store.list_conversations().unwrap().pop().unwrap();
+        assert_eq!(summary.title.as_deref(), Some("Malware triage"));
+    }
+
+    #[test]
+    fn export_summary_writes_session_snapshot() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        store
+            .append_message(&conversation.conversation_id, "user", "Need export")
+            .unwrap();
+        store
+            .save_scratchpad(&conversation.conversation_id, "working notes")
+            .unwrap();
+        store
+            .add_finding(
+                &conversation.conversation_id,
+                "ip",
+                "1.2.3.4",
+                Some("pivot"),
+                &["urgent".to_string()],
+                Some(80),
+                Some("sample.bin"),
+            )
+            .unwrap();
+
+        let export_path = store
+            .export_conversation_summary(&conversation.conversation_id)
+            .unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&export_path).unwrap()).unwrap();
+        assert_eq!(
+            value["conversation"]["conversation_id"],
+            conversation.conversation_id
+        );
+        assert_eq!(value["scratchpad"], "working notes");
+        assert_eq!(value["findings"].as_array().unwrap().len(), 1);
+        assert_eq!(value["findings"][0]["confidence"], 80);
+        assert_eq!(
+            export_path.file_name().unwrap().to_string_lossy(),
+            format!("{}-summary.json", conversation.conversation_id)
+        );
+    }
+
+    #[test]
     fn local_search_finds_findings_and_messages() {
         let dir = tempdir().unwrap();
         let store = ConversationStore::new(dir.path(), AgentPermissions::default());
@@ -587,6 +843,9 @@ mod tests {
                 "ip",
                 "1.2.3.4",
                 Some("confirmed beacon"),
+                &["network".to_string()],
+                Some(90),
+                Some("ioc.txt"),
             )
             .unwrap();
 

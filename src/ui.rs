@@ -771,9 +771,26 @@ impl App {
                 self.activities.push(format!("Created {conversation_id}"));
             }
             "/list" => {
-                let conversations = self.orchestrator.store().list_conversations()?;
+                let list_mode = parts.next();
+                let include_archived = matches!(list_mode, Some("all" | "archived"));
+                let conversations = self
+                    .orchestrator
+                    .store()
+                    .list_conversations_with_archived(include_archived)?;
+                let archived_only = matches!(list_mode, Some("archived"));
+                let conversations = conversations
+                    .into_iter()
+                    .filter(|summary| !archived_only || summary.archived_at.is_some())
+                    .collect::<Vec<_>>();
                 if conversations.is_empty() {
-                    self.push_command_output("/list", "No conversations found.");
+                    self.push_command_output(
+                        "/list",
+                        if archived_only {
+                            "No archived conversations found."
+                        } else {
+                            "No conversations found."
+                        },
+                    );
                     self.activities
                         .push("Conversation list opened in transcript.".to_string());
                 } else {
@@ -782,8 +799,15 @@ impl App {
                         .take(12)
                         .map(|summary| {
                             format!(
-                                "- `{}`: {} messages",
-                                summary.conversation_id, summary.message_count
+                                "- `{}`: {} messages{} ({})",
+                                summary.title.as_deref().unwrap_or(&summary.conversation_id),
+                                summary.message_count,
+                                if summary.archived_at.is_some() {
+                                    " [archived]"
+                                } else {
+                                    ""
+                                },
+                                summary.conversation_id,
                             )
                         })
                         .collect::<Vec<_>>()
@@ -808,6 +832,21 @@ impl App {
                     .to_string();
                 self.switch_conversation(&target)?;
             }
+            "/title" => {
+                let title = command.strip_prefix("/title").unwrap_or("").trim();
+                let conversation = self.orchestrator.store().set_conversation_title(
+                    &self.current_conversation_id,
+                    if title.is_empty() { None } else { Some(title) },
+                )?;
+                let label = conversation
+                    .title
+                    .as_deref()
+                    .unwrap_or("untitled conversation")
+                    .to_string();
+                self.apply_conversation(conversation);
+                self.activities
+                    .push(format!("Conversation title set: {label}"));
+            }
             "/delete" => {
                 if let Some(target) = parts.next() {
                     self.orchestrator.store().delete(target)?;
@@ -822,6 +861,44 @@ impl App {
                     self.activities
                         .push("Usage: /delete <conversation-id>".to_string());
                 }
+            }
+            "/archive" => {
+                let target = parts
+                    .next()
+                    .unwrap_or(&self.current_conversation_id)
+                    .to_string();
+                self.orchestrator.store().archive_conversation(&target)?;
+                self.activities.push(format!("Archived {target}"));
+                if target == self.current_conversation_id {
+                    let conversation_id = self.orchestrator.ensure_default_conversation().await?;
+                    let conversation = self.orchestrator.store().load(&conversation_id)?;
+                    self.apply_conversation(conversation);
+                }
+            }
+            "/unarchive" => {
+                if let Some(target) = parts.next() {
+                    self.orchestrator.store().unarchive_conversation(target)?;
+                    self.activities.push(format!("Unarchived {target}"));
+                } else {
+                    self.activities
+                        .push("Usage: /unarchive <conversation-id>".to_string());
+                }
+            }
+            "/export" => {
+                let target = parts
+                    .next()
+                    .unwrap_or(&self.current_conversation_id)
+                    .to_string();
+                let export_path = self
+                    .orchestrator
+                    .store()
+                    .export_conversation_summary(&target)?;
+                self.push_command_output(
+                    "/export",
+                    format!("Session summary exported to `{}`", export_path.display()),
+                );
+                self.activities
+                    .push(format!("Session summary exported for {target}"));
             }
             "/help" => {
                 self.push_command_output("/help", build_help_markdown());
@@ -989,16 +1066,24 @@ impl App {
                                 finding.conversation_id == self.current_conversation_id
                             })
                             .map(|finding| {
+                                let mut suffix = finding
+                                    .note
+                                    .as_deref()
+                                    .map(|note| format!(" // {note}"))
+                                    .unwrap_or_default();
+                                if !finding.tags.is_empty() {
+                                    suffix
+                                        .push_str(&format!(" // tags: {}", finding.tags.join(",")));
+                                }
+                                if let Some(confidence) = finding.confidence {
+                                    suffix.push_str(&format!(" // confidence: {confidence}"));
+                                }
+                                if let Some(path) = finding.source_artifact.as_deref() {
+                                    suffix.push_str(&format!(" // artifact: {path}"));
+                                }
                                 format!(
                                     "- `{}` [{}] `{}`{}",
-                                    finding.finding_id,
-                                    finding.kind,
-                                    finding.value,
-                                    finding
-                                        .note
-                                        .as_deref()
-                                        .map(|note| format!(" // {note}"))
-                                        .unwrap_or_default()
+                                    finding.finding_id, finding.kind, finding.value, suffix
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -1028,6 +1113,9 @@ impl App {
                                 kind,
                                 value,
                                 note,
+                                &[],
+                                None,
+                                None,
                             )?;
                             self.activities.push(format!(
                                 "Finding stored: {} [{}] {}",
@@ -1036,6 +1124,84 @@ impl App {
                         } else {
                             self.activities
                                 .push("Usage: /findings add <kind> <value> [note]".to_string());
+                        }
+                    }
+                    "update" => {
+                        let finding_id = parts.next();
+                        let field = parts.next();
+                        let value = parts.collect::<Vec<_>>().join(" ");
+                        if let (Some(finding_id), Some(field)) = (finding_id, field) {
+                            let findings = self.orchestrator.store().load_findings()?;
+                            let Some(existing) = findings
+                                .into_iter()
+                                .find(|finding| finding.finding_id == finding_id)
+                            else {
+                                self.activities
+                                    .push(format!("Finding not found: {finding_id}"));
+                                return Ok(());
+                            };
+
+                            let mut kind = existing.kind;
+                            let mut current_value = existing.value;
+                            let mut note = existing.note;
+                            let mut tags = existing.tags;
+                            let mut confidence = existing.confidence;
+                            let mut source_artifact = existing.source_artifact;
+
+                            match field {
+                                "kind" => kind = value.trim().to_string(),
+                                "value" => current_value = value.trim().to_string(),
+                                "note" => note = normalize_field_text(&value),
+                                "tags" => tags = parse_tag_list(&value),
+                                "confidence" => {
+                                    confidence = if value.trim() == "-" || value.trim().is_empty() {
+                                        None
+                                    } else {
+                                        match value.trim().parse::<u8>() {
+                                            Ok(parsed) if parsed <= 100 => Some(parsed),
+                                            _ => {
+                                                self.activities.push(
+                                                    "Usage: confidence must be 0-100 or `-` to clear"
+                                                        .to_string(),
+                                                );
+                                                return Ok(());
+                                            }
+                                        }
+                                    };
+                                }
+                                "artifact" => source_artifact = normalize_field_text(&value),
+                                _ => {
+                                    self.activities.push(
+                                        "Usage: /findings update <finding-id> <kind|value|note|tags|confidence|artifact> <value>"
+                                            .to_string(),
+                                    );
+                                    return Ok(());
+                                }
+                            }
+
+                            let updated = self.orchestrator.store().update_finding(
+                                finding_id,
+                                &kind,
+                                &current_value,
+                                note.as_deref(),
+                                &tags,
+                                confidence,
+                                source_artifact.as_deref(),
+                            )?;
+                            if let Some(finding) = updated {
+                                self.activities.push(format!(
+                                    "Finding updated: {} [{}] {}",
+                                    finding.finding_id, finding.kind, finding.value
+                                ));
+                            } else {
+                                self.activities
+                                    .push(format!("Finding not found: {finding_id}"));
+                            }
+                        } else {
+                            self.activities.push(
+                                "Usage: /findings update <finding-id> <kind|value|note|tags|confidence|artifact> <value>"
+                                    .to_string(),
+                            );
                         }
                     }
                     "remove" | "delete" => {
@@ -1054,7 +1220,7 @@ impl App {
                     }
                     _ => {
                         self.activities.push(
-                            "Usage: /findings [list] | /findings add <kind> <value> [note] | /findings remove <finding-id>"
+                            "Usage: /findings [list] | /findings add <kind> <value> [note] | /findings update <finding-id> <field> <value> | /findings remove <finding-id>"
                                 .to_string(),
                         );
                     }
@@ -1731,6 +1897,24 @@ fn canonicalize_mcp_filter(
     }
 }
 
+fn normalize_field_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "-" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_tag_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty() && *tag != "-")
+        .map(str::to_string)
+        .collect()
+}
+
 fn max_message_scroll(total_lines: u16, viewport_lines: u16) -> u16 {
     total_lines.saturating_sub(viewport_lines)
 }
@@ -1752,15 +1936,19 @@ fn build_help_markdown() -> String {
     [
         "### Conversations",
         "- `/new`: Create a conversation",
-        "- `/list`: List recent conversations",
+        "- `/list [all|archived]`: List active, all, or archived conversations",
         "- `/use <id>`: Switch conversation",
         "- `/show [id]`: Load and display a conversation",
+        "- `/title [text]`: Set or clear the current conversation title",
         "- `/history`: Show recent transcript history for the current conversation",
+        "- `/archive [id]`: Archive the current or specified conversation",
+        "- `/unarchive <id>`: Restore an archived conversation",
+        "- `/export [id]`: Export a local JSON session summary",
         "- `/delete <id>`: Delete a conversation",
         "- `/compact`: Compact the current conversation",
         "- `/jobs`: Show remembered jobs for the current conversation",
         "- `/scratch [show|set|append|clear]`: Manage the local scratchpad for this conversation",
-        "- `/findings [list|add|remove]`: Manage structured findings for this conversation",
+        "- `/findings [list|add|update|remove]`: Manage structured findings for this conversation",
         "- `/search <query>`: Search conversations, scratchpads, and findings locally",
         "",
         "### Recipes",
@@ -2803,6 +2991,18 @@ mod tests {
         app.handle_command("/findings add ip 1.2.3.4 confirmed beacon")
             .await
             .unwrap();
+        let finding_id = app
+            .orchestrator
+            .store()
+            .load_findings()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .finding_id;
+        app.handle_command(&format!("/findings update {finding_id} confidence 88"))
+            .await
+            .unwrap();
         app.handle_command("/findings").await.unwrap();
         assert!(
             app.command_output
@@ -2810,6 +3010,13 @@ mod tests {
                 .unwrap()
                 .content
                 .contains("1.2.3.4")
+        );
+        assert!(
+            app.command_output
+                .last()
+                .unwrap()
+                .content
+                .contains("confidence: 88")
         );
 
         app.handle_command("/search 1.2.3.4").await.unwrap();
@@ -2819,6 +3026,82 @@ mod tests {
                 .unwrap()
                 .content
                 .contains("finding")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn archive_commands_hide_and_restore_conversations() {
+        let (_dir, mut app) = test_app(&[]).await;
+        let archived_id = app.current_conversation_id.clone();
+
+        app.handle_command("/archive").await.unwrap();
+        assert_eq!(
+            app.activities.last().unwrap(),
+            &format!("Archived {archived_id}")
+        );
+        assert_ne!(app.current_conversation_id, archived_id);
+
+        app.handle_command("/list").await.unwrap();
+        assert!(
+            !app.command_output
+                .last()
+                .unwrap()
+                .content
+                .contains(&archived_id)
+        );
+
+        app.handle_command("/list archived").await.unwrap();
+        assert!(
+            app.command_output
+                .last()
+                .unwrap()
+                .content
+                .contains(&format!("{archived_id}`: 0 messages [archived]"))
+        );
+
+        app.handle_command(&format!("/unarchive {archived_id}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            app.activities.last().unwrap(),
+            &format!("Unarchived {archived_id}")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn title_command_updates_current_conversation_label() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        app.handle_command("/title Email Triage").await.unwrap();
+
+        let conversation = app
+            .orchestrator
+            .store()
+            .load(&app.current_conversation_id)
+            .unwrap();
+        assert_eq!(conversation.title.as_deref(), Some("Email Triage"));
+        assert_eq!(
+            app.activities.last().unwrap(),
+            "Conversation title set: Email Triage"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn export_command_writes_summary_file() {
+        let (_dir, mut app) = test_app(&[]).await;
+
+        app.handle_command("/scratch set triage notes")
+            .await
+            .unwrap();
+        app.handle_command("/export").await.unwrap();
+
+        let body = &app.command_output.last().unwrap().content;
+        assert!(body.contains("Session summary exported to `"));
+        assert!(
+            app.activities
+                .last()
+                .unwrap()
+                .contains("Session summary exported for")
         );
     }
 

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{Duration as ChronoDuration, Local, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
@@ -13,6 +13,7 @@ use tokio::time::Duration;
 
 use crate::{
     azure::AzureTool,
+    config::LocalToolsConfig,
     conversation_store::ConversationStore,
     skills::{SkillRegistry, SkillTool},
     types::{AgentPermissions, FilesystemAccess, RememberedJob},
@@ -121,6 +122,7 @@ pub struct LocalToolExecutor {
     permissions: AgentPermissions,
     enabled_local_tools: Option<Vec<String>>,
     execution_timeout: Duration,
+    allowed_cli_tools: Vec<String>,
 }
 
 impl LocalToolExecutor {
@@ -131,6 +133,7 @@ impl LocalToolExecutor {
         permissions: AgentPermissions,
         enabled_local_tools: Option<Vec<String>>,
         execution_timeout: Duration,
+        allowed_cli_tools: Vec<String>,
     ) -> Self {
         Self {
             store,
@@ -139,6 +142,7 @@ impl LocalToolExecutor {
             permissions,
             enabled_local_tools,
             execution_timeout,
+            allowed_cli_tools,
         }
     }
 
@@ -151,7 +155,9 @@ impl LocalToolExecutor {
                 | "local__get_job"
                 | "local__list_jobs"
                 | "local__forget_job"
+                | "local__time"
                 | "local__configure_mcp_servers"
+                | "local__exec_cli"
                 | "local__run_skill"
         );
         advertised && self.is_tool_enabled(name)
@@ -165,7 +171,9 @@ impl LocalToolExecutor {
             "local__get_job" => self.exec_get_job(arguments),
             "local__list_jobs" => self.exec_list_jobs(),
             "local__forget_job" => self.exec_forget_job(arguments),
+            "local__time" => self.exec_time(arguments),
             "local__configure_mcp_servers" => self.exec_configure_mcp_servers(arguments),
+            "local__exec_cli" => self.exec_cli(arguments).await,
             "local__run_skill" => self.exec_run_skill(arguments).await,
             _ => Err(anyhow!("unknown local tool: {name}")),
         }
@@ -383,6 +391,58 @@ impl LocalToolExecutor {
         Ok(format!("Job '{alias}' removed."))
     }
 
+    fn exec_time(&self, arguments: Value) -> Result<String> {
+        let now_utc = Utc::now();
+        let now_local = Local::now();
+        let hours_ago = arguments.get("hours_ago").and_then(Value::as_i64);
+        let days_ago = arguments.get("days_ago").and_then(Value::as_i64);
+        let trailing_hours = arguments
+            .get("trailing_hours")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0);
+        let trailing_days = arguments
+            .get("trailing_days")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0);
+
+        let reference_utc = now_utc
+            - ChronoDuration::hours(hours_ago.unwrap_or(0))
+            - ChronoDuration::days(days_ago.unwrap_or(0));
+        let reference_local = reference_utc.with_timezone(&Local);
+
+        let mut payload = json!({
+            "now_utc": now_utc.to_rfc3339(),
+            "now_local": now_local.to_rfc3339(),
+            "local_timezone_offset": now_local.format("%:z").to_string(),
+            "reference_utc": reference_utc.to_rfc3339(),
+            "reference_local": reference_local.to_rfc3339(),
+            "input": {
+                "hours_ago": hours_ago,
+                "days_ago": days_ago,
+                "trailing_hours": trailing_hours,
+                "trailing_days": trailing_days,
+            }
+        });
+
+        if let Some(hours) = trailing_hours {
+            let start = now_utc - ChronoDuration::hours(hours);
+            payload["window_start_utc"] = Value::String(start.to_rfc3339());
+            payload["window_end_utc"] = Value::String(now_utc.to_rfc3339());
+            payload["window_start_local"] = Value::String(start.with_timezone(&Local).to_rfc3339());
+            payload["window_end_local"] = Value::String(now_local.to_rfc3339());
+            payload["window_label"] = Value::String(format!("last {hours} hours"));
+        } else if let Some(days) = trailing_days {
+            let start = now_utc - ChronoDuration::days(days);
+            payload["window_start_utc"] = Value::String(start.to_rfc3339());
+            payload["window_end_utc"] = Value::String(now_utc.to_rfc3339());
+            payload["window_start_local"] = Value::String(start.with_timezone(&Local).to_rfc3339());
+            payload["window_end_local"] = Value::String(now_local.to_rfc3339());
+            payload["window_label"] = Value::String(format!("last {days} days"));
+        }
+
+        Ok(serde_json::to_string_pretty(&payload)?)
+    }
+
     fn exec_configure_mcp_servers(&self, arguments: Value) -> Result<String> {
         self.require_filesystem_write("local__configure_mcp_servers")?;
         let action = arguments
@@ -426,6 +486,90 @@ impl LocalToolExecutor {
             "Conversation MCP selection updated to {}.",
             serde_json::to_string(&next)?
         ))
+    }
+
+    async fn exec_cli(&self, arguments: Value) -> Result<String> {
+        self.require_network("local__exec_cli")?;
+        let command = arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("exec_cli: missing 'command'"))?
+            .trim();
+        if command.is_empty() {
+            bail!("exec_cli: command must not be empty");
+        }
+        if command.contains('/') || command.contains('\\') {
+            bail!("exec_cli: command must be a bare binary name, not a path");
+        }
+        if !self.allowed_cli_tools.iter().any(|tool| tool == command) {
+            bail!(
+                "exec_cli: command '{}' is not allowed. Allowed commands: {}",
+                command,
+                self.allowed_cli_tools.join(", ")
+            );
+        }
+
+        let timeout_seconds = arguments
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .unwrap_or(self.execution_timeout.as_secs())
+            .min(self.execution_timeout.as_secs());
+
+        let args = arguments
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| anyhow!("exec_cli: each arg must be a string"))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let mut cmd = tokio::process::Command::new(command);
+        cmd.args(&args);
+        let output = self
+            .run_child_command(cmd, timeout_seconds)
+            .await
+            .map_err(|err| {
+                anyhow!(
+                    "failed to execute allowed CLI command '{}' with direct argv: {err}",
+                    command
+                )
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            bail!(
+                "allowed CLI command '{}' exited with {}: {}",
+                command,
+                output.status,
+                if stderr.is_empty() {
+                    stdout.as_str()
+                } else {
+                    stderr.as_str()
+                }
+            );
+        }
+
+        let mut reply = format!("Command: `{command}`");
+        if !args.is_empty() {
+            reply.push_str(&format!("\nArgs: {}", serde_json::to_string(&args)?));
+        }
+        if !stdout.is_empty() {
+            reply.push_str(&format!("\n\n{stdout}"));
+        }
+        if !stderr.is_empty() {
+            reply.push_str(&format!("\n\n[stderr]\n{stderr}"));
+        }
+        Ok(reply)
     }
 
     async fn exec_run_skill(&self, arguments: Value) -> Result<String> {
@@ -502,7 +646,7 @@ impl LocalToolExecutor {
             SkillProgram::Direct(_) => {
                 let mut cmd = launch.command_with_interpreter(None);
                 apply_skill_arguments(&mut cmd, params);
-                self.run_skill_command(cmd, timeout_seconds)
+                self.run_child_command(cmd, timeout_seconds)
                     .await
                     .map_err(|err| {
                         anyhow!(
@@ -514,7 +658,7 @@ impl LocalToolExecutor {
             SkillProgram::Python(_) => {
                 let mut primary = launch.command_with_interpreter(Some("python3"));
                 apply_skill_arguments(&mut primary, params);
-                match self.run_skill_command(primary, timeout_seconds).await {
+                match self.run_child_command(primary, timeout_seconds).await {
                     Ok(output) => Ok(output),
                     Err(err)
                         if err.downcast_ref::<std::io::Error>().is_some_and(|io_err| {
@@ -523,7 +667,7 @@ impl LocalToolExecutor {
                     {
                         let mut fallback = launch.command_with_interpreter(Some("python"));
                         apply_skill_arguments(&mut fallback, params);
-                        self.run_skill_command(fallback, timeout_seconds)
+                        self.run_child_command(fallback, timeout_seconds)
                             .await
                             .map_err(|err| {
                                 anyhow!(
@@ -541,7 +685,7 @@ impl LocalToolExecutor {
         }
     }
 
-    async fn run_skill_command(
+    async fn run_child_command(
         &self,
         mut cmd: tokio::process::Command,
         timeout_seconds: u64,
@@ -794,7 +938,7 @@ where
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tempfile::tempdir;
     use tokio::time::Duration;
 
@@ -875,6 +1019,7 @@ mod tests {
             },
             None,
             Duration::from_secs(180),
+            Vec::new(),
         );
 
         let err = executor
@@ -926,6 +1071,7 @@ Tools:
             AgentPermissions::default(),
             None,
             Duration::from_secs(180),
+            Vec::new(),
         );
 
         let err = executor
@@ -992,6 +1138,7 @@ Tools:
             },
             None,
             Duration::from_secs(180),
+            Vec::new(),
         );
 
         let output = executor
@@ -1050,6 +1197,7 @@ Tools:
             AgentPermissions::default(),
             None,
             Duration::from_secs(1),
+            Vec::new(),
         );
 
         let err = executor
@@ -1064,10 +1212,126 @@ Tools:
         assert!(message.contains("timed out after"));
         assert!(message.contains("long-running remote job"));
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exec_cli_rejects_disallowed_commands() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            AgentPermissions {
+                allow_network: true,
+                filesystem: FilesystemAccess::ReadOnly,
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(5),
+            vec!["echo".to_string()],
+        );
+
+        let err = executor
+            .execute(
+                "local__exec_cli",
+                json!({"command": "whois", "args": ["example.com"]}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("is not allowed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exec_cli_runs_allowed_commands_with_direct_argv() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            AgentPermissions {
+                allow_network: true,
+                filesystem: FilesystemAccess::ReadOnly,
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(5),
+            vec!["echo".to_string()],
+        );
+
+        let output = executor
+            .execute(
+                "local__exec_cli",
+                json!({"command": "echo", "args": ["hello", "world"]}),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("Command: `echo`"));
+        assert!(output.contains("hello world"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn time_tool_returns_current_time_fields() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            AgentPermissions::default(),
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        );
+
+        let output = executor.execute("local__time", json!({})).await.unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert!(parsed.get("now_utc").is_some());
+        assert!(parsed.get("now_local").is_some());
+        assert!(parsed.get("reference_utc").is_some());
+        assert!(parsed.get("reference_local").is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn time_tool_returns_trailing_window_fields() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            AgentPermissions::default(),
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        );
+
+        let output = executor
+            .execute("local__time", json!({"trailing_hours": 12, "days_ago": 2}))
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["window_label"], "last 12 hours");
+        assert!(parsed.get("window_start_utc").is_some());
+        assert!(parsed.get("window_end_utc").is_some());
+        assert!(parsed.get("window_start_local").is_some());
+        assert!(parsed.get("window_end_local").is_some());
+    }
 }
 
-pub fn local_tool_definitions(enabled_local_tools: Option<&[String]>) -> Vec<AzureTool> {
-    let defs = vec![
+pub fn local_tool_definitions(
+    enabled_local_tools: Option<&[String]>,
+    local_tools_config: &LocalToolsConfig,
+) -> Vec<AzureTool> {
+    let mut defs = vec![
         AzureTool {
             name: "local__sleep".to_string(),
             description: "Sleep for a specified number of seconds (max 300). Use to wait between polling operations.".to_string(),
@@ -1159,6 +1423,19 @@ pub fn local_tool_definitions(enabled_local_tools: Option<&[String]>) -> Vec<Azu
             }),
         },
         AzureTool {
+            name: "local__time".to_string(),
+            description: "Return the current UTC and local time, plus optional relative-time calculations. Use this before reasoning about windows like last 12 hours, last 2 days, today, or yesterday.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "hours_ago": {"type": "integer", "description": "Optional reference offset in hours before now"},
+                    "days_ago": {"type": "integer", "description": "Optional reference offset in days before now"},
+                    "trailing_hours": {"type": "integer", "description": "Optional trailing window size in hours ending now"},
+                    "trailing_days": {"type": "integer", "description": "Optional trailing window size in days ending now"}
+                }
+            }),
+        },
+        AzureTool {
             name: "local__configure_mcp_servers".to_string(),
             description: "Update the conversation-scoped MCP server selection for subsequent turns. Requires filesystem write permission.".to_string(),
             parameters: json!({
@@ -1170,21 +1447,41 @@ pub fn local_tool_definitions(enabled_local_tools: Option<&[String]>) -> Vec<Azu
                 "required": ["action"]
             }),
         },
-        AzureTool {
-            name: "local__run_skill".to_string(),
-            description: "Execute one or more skill scripts with parameters. Omitting tool_slug runs every executable tool in the matched skill. Skill-specific network/filesystem permissions are enforced unless yolo mode is enabled. Local skill execution defaults to 180s and can be overridden with timeout_seconds. Scripts may return a JSON pending-job envelope so long-running remote work can be remembered and auto-polled.".to_string(),
+    ];
+
+    if !local_tools_config.allowed_cli_tools.is_empty() {
+        defs.push(AzureTool {
+            name: "local__exec_cli".to_string(),
+            description: format!(
+                "Execute an allowed local CLI binary with direct argv execution only; no shell parsing, pipes, redirects, or paths. Allowed commands: {}. Requires network permission when the command performs remote lookups.",
+                local_tools_config.allowed_cli_tools.join(", ")
+            ),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "skill_name": {"type": "string", "description": "Name of the skill directory"},
-                    "tool_slug": {"type": "string", "description": "Slug of the specific tool within the skill"},
-                    "parameters": {"type": "string", "description": "JSON string of parameters to pass to the script"},
-                    "timeout_seconds": {"type": "integer", "description": "Optional per-run timeout override for the local script execution"}
+                    "command": {"type": "string", "description": "Allowed binary name to execute"},
+                    "args": {"type": "array", "items": {"type": "string"}, "description": "Argument vector passed directly to the binary"},
+                    "timeout_seconds": {"type": "integer", "description": "Optional timeout override capped by local_tools.execution_timeout_seconds"}
                 },
-                "required": ["skill_name"]
+                "required": ["command"]
             }),
-        },
-    ];
+        });
+    }
+
+    defs.push(AzureTool {
+        name: "local__run_skill".to_string(),
+        description: "Execute one or more skill scripts with parameters. Omitting tool_slug runs every executable tool in the matched skill. Skill-specific network/filesystem permissions are enforced unless yolo mode is enabled. Local skill execution defaults to 180s and can be overridden with timeout_seconds. Scripts may return a JSON pending-job envelope so long-running remote work can be remembered and auto-polled.".to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "skill_name": {"type": "string", "description": "Name of the skill directory"},
+                "tool_slug": {"type": "string", "description": "Slug of the specific tool within the skill"},
+                "parameters": {"type": "string", "description": "JSON string of parameters to pass to the script"},
+                "timeout_seconds": {"type": "integer", "description": "Optional per-run timeout override for the local script execution"}
+            },
+            "required": ["skill_name"]
+        }),
+    });
 
     defs.into_iter()
         .filter(|tool| {

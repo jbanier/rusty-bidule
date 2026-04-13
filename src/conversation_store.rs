@@ -90,6 +90,14 @@ impl ConversationStore {
                 message_count: conversation.messages.len(),
                 title: conversation.title,
                 archived_at: conversation.archived_at,
+                preview: conversation
+                    .messages
+                    .last()
+                    .map(|message| message.content.replace('\n', " "))
+                    .map(|content| content.chars().take(160).collect()),
+                pending_recipe: conversation.pending_recipe,
+                active_compaction: conversation.active_compaction,
+                enabled_mcp_servers: conversation.enabled_mcp_servers,
             });
         }
         summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));

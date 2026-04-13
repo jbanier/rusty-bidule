@@ -14,6 +14,7 @@ an open-ended chat shell.
 - Calls Azure OpenAI chat completions for reasoning
 - Discovers and invokes MCP tools from configured servers
 - Executes selected local skill scripts through `local__run_skill`
+- Executes configured allowlisted local CLI tools through `local__exec_cli`
 - Persists conversations, compactions, logs, OAuth state, and tool evidence
 - Supports OAuth public-client login for MCP servers that require browser auth
 
@@ -186,13 +187,33 @@ agent_permissions:
 In the TUI, these can be changed per conversation with `/permissions ...` and
 `/yolo ...`.
 
+### Local Tools
+
+Local built-in tools are configured under:
+
+```yaml
+local_tools:
+  execution_timeout_seconds: 180
+  allowed_cli_tools:
+    - nmap
+    - vt
+    - dig
+    - whois
+    - nslookup
+```
+
+- `local__run_skill` executes script-backed skills
+- `local__exec_cli` executes only the listed binary names with direct argv execution
+- `local__time` returns current UTC/local time and computes relative windows like last 12 hours or last 2 days
+- `local__exec_cli` does not invoke a shell, and does not support pipes, redirects, or path-based commands
+
 ### MCP Runtime
 
 Current shared runtime settings:
 
 ```yaml
 mcp_runtime:
-  connect_timeout_seconds: 15
+  connect_timeout_seconds: 180
 ```
 
 ### MCP Servers
@@ -332,9 +353,9 @@ the TUI, the web UI/API message submission path, and `--once`.
 
 ## Skills And Recipes
 
-Skills are loaded from `skills/<skill-name>/SKILL.md`. Today they primarily
-provide metadata plus optional script-backed tools that can be executed through
-`local__run_skill`.
+Skills are loaded from `skills/<skill-name>/SKILL.md`. On the current
+chat-completions transport they are exposed as capability metadata plus
+optional script-backed tools executed through `local__run_skill`.
 
 Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`. They let you preload
 instructions, an initial prompt, and an MCP server filter for a conversation.

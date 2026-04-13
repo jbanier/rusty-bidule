@@ -13,6 +13,9 @@ use crate::{
     oauth::OAuthProvider,
 };
 
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26"];
+const PREFERRED_PROTOCOL_VERSION: &str = SUPPORTED_PROTOCOL_VERSIONS[0];
+
 #[derive(Debug, Clone)]
 pub struct McpTool {
     pub server_name: String,
@@ -43,10 +46,22 @@ struct ServerState {
     config: McpServerConfig,
     transport: Transport,
     session_id: Option<String>,
+    protocol_version: Option<String>,
     /// For SSE: the endpoint URL to POST requests to.
     sse_endpoint: Option<String>,
     initialized: bool,
 }
+
+#[derive(Debug)]
+struct SessionExpiredError;
+
+impl std::fmt::Display for SessionExpiredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MCP session expired")
+    }
+}
+
+impl std::error::Error for SessionExpiredError {}
 
 impl McpManager {
     pub fn new(
@@ -78,6 +93,7 @@ impl McpManager {
                         config,
                         transport,
                         session_id: None,
+                        protocol_version: None,
                         sse_endpoint: None,
                         initialized: false,
                     }
@@ -106,10 +122,8 @@ impl McpManager {
                 continue;
             }
 
-            let timeout_seconds = self.server_session_timeout(index);
-            let list_future = self.list_server_tools(index);
-            match tokio::time::timeout(Duration::from_secs(timeout_seconds), list_future).await {
-                Ok(Ok(tools)) => {
+            match self.list_server_tools(index).await {
+                Ok(tools) => {
                     for tool in tools {
                         self.tool_index.insert(
                             tool.external_name.clone(),
@@ -118,14 +132,7 @@ impl McpManager {
                         all_tools.push(tool);
                     }
                 }
-                Ok(Err(err)) => last_error = Some(err),
-                Err(_) => {
-                    warn!(server = %self.servers[index].config.name, "timed out while listing tools");
-                    last_error = Some(anyhow!(
-                        "timed out while listing tools from server '{}'",
-                        self.servers[index].config.name
-                    ));
-                }
+                Err(err) => last_error = Some(err),
             }
         }
 
@@ -167,29 +174,35 @@ impl McpManager {
             .ok_or_else(|| anyhow!("unknown MCP tool {external_name}"))?;
 
         self.ensure_initialized(server_index).await?;
+        let request_id = self.next_request_id();
         let request = json!({
             "jsonrpc": "2.0",
-            "id": self.next_request_id(),
+            "id": request_id,
             "method": "tools/call",
             "params": {
                 "name": original_name,
                 "arguments": arguments,
             }
         });
-        let result = self.post_jsonrpc(server_index, &request).await?;
+        let result = self
+            .post_jsonrpc_with_timeout(server_index, &request, request_id, "tools/call")
+            .await?;
         Ok(normalize_tool_result(&result))
     }
 
     async fn list_server_tools(&mut self, server_index: usize) -> Result<Vec<McpTool>> {
         self.ensure_initialized(server_index).await?;
         debug!(server = %self.servers[server_index].config.name, "requesting tools/list");
+        let request_id = self.next_request_id();
         let request = json!({
             "jsonrpc": "2.0",
-            "id": self.next_request_id(),
+            "id": request_id,
             "method": "tools/list",
             "params": {}
         });
-        let result = self.post_jsonrpc(server_index, &request).await?;
+        let result = self
+            .post_jsonrpc_with_timeout(server_index, &request, request_id, "tools/list")
+            .await?;
         let tools = result
             .get("tools")
             .and_then(Value::as_array)
@@ -244,7 +257,7 @@ impl McpManager {
             "id": self.next_request_id(),
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": PREFERRED_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "rusty-bidule",
@@ -252,7 +265,20 @@ impl McpManager {
                 }
             }
         });
-        self.post_jsonrpc(server_index, &request).await?;
+        let result = self.post_jsonrpc(server_index, &request).await?;
+        let negotiated = result
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("initialize result missing protocolVersion"))?;
+        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&negotiated) {
+            self.reset_server_session(server_index);
+            bail!(
+                "server '{}' negotiated unsupported MCP protocol version '{}'",
+                self.servers[server_index].config.name,
+                negotiated
+            );
+        }
+        self.servers[server_index].protocol_version = Some(negotiated.to_string());
 
         let notify = json!({
             "jsonrpc": "2.0",
@@ -313,6 +339,63 @@ impl McpManager {
         Ok(())
     }
 
+    async fn post_jsonrpc_with_reinit(
+        &mut self,
+        server_index: usize,
+        body: &Value,
+    ) -> Result<Value> {
+        match self.post_jsonrpc(server_index, body).await {
+            Ok(result) => Ok(result),
+            Err(err)
+                if err.downcast_ref::<SessionExpiredError>().is_some()
+                    && self.servers[server_index].transport == Transport::StreamableHttp =>
+            {
+                warn!(
+                    server = %self.servers[server_index].config.name,
+                    "MCP session expired; reinitializing and retrying request"
+                );
+                self.reset_server_session(server_index);
+                self.ensure_initialized(server_index).await?;
+                self.post_jsonrpc(server_index, body).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn post_jsonrpc_with_timeout(
+        &mut self,
+        server_index: usize,
+        body: &Value,
+        request_id: u64,
+        method: &str,
+    ) -> Result<Value> {
+        let timeout_seconds = self.server_session_timeout(server_index);
+        match tokio::time::timeout(
+            Duration::from_secs(timeout_seconds),
+            self.post_jsonrpc_with_reinit(server_index, body),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(
+                    server = %self.servers[server_index].config.name,
+                    request_id,
+                    method,
+                    timeout_seconds,
+                    "timed out waiting for MCP request"
+                );
+                self.post_cancelled_notification(server_index, request_id, "client timeout")
+                    .await;
+                Err(anyhow!(
+                    "timed out while waiting for {} from server '{}'",
+                    method,
+                    self.servers[server_index].config.name
+                ))
+            }
+        }
+    }
+
     async fn post_jsonrpc(&mut self, server_index: usize, body: &Value) -> Result<Value> {
         let (headers, response_body) = self.post(server_index, body).await?;
         self.capture_session_id(server_index, &headers);
@@ -332,6 +415,30 @@ impl McpManager {
         let (headers, _) = self.post(server_index, body).await?;
         self.capture_session_id(server_index, &headers);
         Ok(())
+    }
+
+    async fn post_cancelled_notification(
+        &mut self,
+        server_index: usize,
+        request_id: u64,
+        reason: &str,
+    ) {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {
+                "requestId": request_id,
+                "reason": reason,
+            }
+        });
+        if let Err(err) = self.post_notification(server_index, &body).await {
+            warn!(
+                server = %self.servers[server_index].config.name,
+                request_id,
+                error = %err,
+                "failed to send MCP cancelled notification after timeout"
+            );
+        }
     }
 
     async fn post(&self, server_index: usize, body: &Value) -> Result<(HeaderMap, Value)> {
@@ -356,19 +463,16 @@ impl McpManager {
             transport = ?server.transport,
             "issuing MCP POST request"
         );
-        let mut request = self
+        let request = self
             .client
             .post(&url)
             .headers(build_headers(
                 &server.config,
                 server.session_id.as_deref(),
+                server.protocol_version.as_deref(),
                 auth.as_ref().map(|token| token.access_token.as_str()),
             )?)
             .json(body);
-
-        request = request.timeout(Duration::from_secs(
-            self.server_session_timeout(server_index),
-        ));
 
         let response = request.send().await.with_context(|| {
             format!(
@@ -381,6 +485,16 @@ impl McpManager {
         let headers = response.headers().clone();
         let text = response.text().await?;
         if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND
+                && server.transport == Transport::StreamableHttp
+                && server.session_id.is_some()
+            {
+                warn!(
+                    server = %server.config.name,
+                    "streamable HTTP session appears expired"
+                );
+                return Err(SessionExpiredError.into());
+            }
             warn!(server = %server.config.name, %status, "MCP server returned non-success status");
             bail!(
                 "MCP server '{}' returned HTTP {}: {}",
@@ -420,6 +534,15 @@ impl McpManager {
         }
     }
 
+    fn reset_server_session(&mut self, server_index: usize) {
+        self.servers[server_index].session_id = None;
+        self.servers[server_index].protocol_version = None;
+        self.servers[server_index].initialized = false;
+        if self.servers[server_index].transport == Transport::Sse {
+            self.servers[server_index].sse_endpoint = None;
+        }
+    }
+
     fn next_request_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -448,6 +571,7 @@ fn parse_sse_endpoint_event(body: &str) -> Option<String> {
 fn build_headers(
     config: &McpServerConfig,
     session_id: Option<&str>,
+    protocol_version: Option<&str>,
     bearer_token: Option<&str>,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
@@ -481,6 +605,12 @@ fn build_headers(
         headers.insert(
             HeaderName::from_static("mcp-session-id"),
             HeaderValue::from_str(session_id)?,
+        );
+    }
+    if let Some(protocol_version) = protocol_version {
+        headers.insert(
+            HeaderName::from_static("mcp-protocol-version"),
+            HeaderValue::from_str(protocol_version)?,
         );
     }
     Ok(headers)
@@ -587,13 +717,32 @@ fn sanitize_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap as AxumHeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+    };
     use reqwest::header::ACCEPT;
     use serde_json::json;
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
 
-    use crate::config::McpServerConfig;
+    use crate::config::{McpRuntimeConfig, McpServerConfig};
 
     use super::{
-        ServerState, Transport, build_headers, normalize_tool_result, parse_mcp_response_body,
+        McpManager, PREFERRED_PROTOCOL_VERSION, ServerState, Transport, build_headers,
+        normalize_tool_result, parse_mcp_response_body,
     };
 
     #[test]
@@ -622,15 +771,45 @@ mod tests {
             },
             transport: Transport::StreamableHttp,
             session_id: None,
+            protocol_version: None,
             sse_endpoint: None,
             initialized: false,
         };
 
-        let headers = build_headers(&server.config, None, None).unwrap();
+        let headers = build_headers(&server.config, None, None, None).unwrap();
         let accept = headers.get(ACCEPT).unwrap().to_str().unwrap();
 
         assert!(accept.contains("application/json"));
         assert!(accept.contains("text/event-stream"));
+    }
+
+    #[test]
+    fn includes_negotiated_protocol_version_header_when_present() {
+        let headers = build_headers(
+            &McpServerConfig {
+                name: "fastmcp".to_string(),
+                transport: "streamable_http".to_string(),
+                url: "http://127.0.0.1:8000/mcp".to_string(),
+                headers: Default::default(),
+                timeout: Some(30),
+                sse_read_timeout: Some(300),
+                client_session_timeout_seconds: Some(30),
+                auth: None,
+            },
+            Some("session-123"),
+            Some("2025-06-18"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            headers
+                .get("mcp-protocol-version")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2025-06-18"
+        );
     }
 
     #[test]
@@ -645,5 +824,202 @@ mod tests {
 
         let parsed = parse_mcp_response_body(body).unwrap();
         assert_eq!(parsed["result"]["tools"][0]["name"], "hello");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_unsupported_negotiated_protocol_version() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(MockServerState {
+            initialize_count: AtomicUsize::new(0),
+            saw_protocol_header: AtomicUsize::new(0),
+            expire_first_tool_list: false,
+            negotiated_version: "2099-01-01".to_string(),
+            delayed_tool_list_ms: 0,
+            cancelled_request_count: AtomicUsize::new(0),
+        });
+        let addr = spawn_mock_mcp_server(state.clone()).await;
+        let mut manager = build_test_manager(dir.path(), &format!("http://{addr}/mcp"));
+
+        let err = manager.list_tools().await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("unsupported MCP protocol version"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retries_after_streamable_http_session_expiry() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(MockServerState {
+            initialize_count: AtomicUsize::new(0),
+            saw_protocol_header: AtomicUsize::new(0),
+            expire_first_tool_list: true,
+            negotiated_version: PREFERRED_PROTOCOL_VERSION.to_string(),
+            delayed_tool_list_ms: 0,
+            cancelled_request_count: AtomicUsize::new(0),
+        });
+        let addr = spawn_mock_mcp_server(state.clone()).await;
+        let mut manager = build_test_manager(dir.path(), &format!("http://{addr}/mcp"));
+
+        let tools = manager.list_tools().await.unwrap();
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(state.initialize_count.load(Ordering::SeqCst), 2);
+        assert!(state.saw_protocol_header.load(Ordering::SeqCst) >= 1);
+        assert_eq!(
+            manager.servers[0].protocol_version.as_deref(),
+            Some(PREFERRED_PROTOCOL_VERSION)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cancelled_notification_when_request_times_out() {
+        let dir = tempdir().unwrap();
+        let state = Arc::new(MockServerState {
+            initialize_count: AtomicUsize::new(0),
+            saw_protocol_header: AtomicUsize::new(0),
+            expire_first_tool_list: false,
+            negotiated_version: PREFERRED_PROTOCOL_VERSION.to_string(),
+            delayed_tool_list_ms: 1_500,
+            cancelled_request_count: AtomicUsize::new(0),
+        });
+        let addr = spawn_mock_mcp_server(state.clone()).await;
+        let mut manager = McpManager::new(
+            dir.path(),
+            McpRuntimeConfig {
+                connect_timeout_seconds: 1,
+                cleanup_timeout_seconds: 10,
+                connect_in_parallel: false,
+            },
+            vec![McpServerConfig {
+                name: "demo".to_string(),
+                transport: "streamable_http".to_string(),
+                url: format!("http://{addr}/mcp"),
+                headers: HashMap::new(),
+                timeout: Some(1),
+                sse_read_timeout: None,
+                client_session_timeout_seconds: Some(1),
+                auth: None,
+            }],
+        )
+        .unwrap();
+
+        let err = manager.list_tools().await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("timed out while waiting for tools/list"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(state.cancelled_request_count.load(Ordering::SeqCst), 1);
+    }
+
+    struct MockServerState {
+        initialize_count: AtomicUsize,
+        saw_protocol_header: AtomicUsize,
+        expire_first_tool_list: bool,
+        negotiated_version: String,
+        delayed_tool_list_ms: u64,
+        cancelled_request_count: AtomicUsize,
+    }
+
+    fn build_test_manager(data_dir: &std::path::Path, url: &str) -> McpManager {
+        McpManager::new(
+            data_dir,
+            McpRuntimeConfig::default(),
+            vec![McpServerConfig {
+                name: "demo".to_string(),
+                transport: "streamable_http".to_string(),
+                url: url.to_string(),
+                headers: HashMap::new(),
+                timeout: Some(30),
+                sse_read_timeout: None,
+                client_session_timeout_seconds: Some(30),
+                auth: None,
+            }],
+        )
+        .unwrap()
+    }
+
+    async fn mock_mcp_handler(
+        State(state): State<Arc<MockServerState>>,
+        headers: AxumHeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let method = body
+            .get("method")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let session_header = headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        if headers.contains_key("mcp-protocol-version") {
+            state.saw_protocol_header.fetch_add(1, Ordering::SeqCst);
+        }
+
+        if method == "notifications/cancelled" {
+            state.cancelled_request_count.fetch_add(1, Ordering::SeqCst);
+            return StatusCode::ACCEPTED.into_response();
+        }
+
+        if method == "tools/list"
+            && state.expire_first_tool_list
+            && state.initialize_count.load(Ordering::SeqCst) == 1
+            && session_header.as_deref() == Some("session-1")
+        {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "expired"}))).into_response();
+        }
+        if method == "tools/list" && state.delayed_tool_list_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(state.delayed_tool_list_ms)).await;
+        }
+
+        let mut response_headers = AxumHeaderMap::new();
+        let result = match method {
+            "initialize" => {
+                let count = state.initialize_count.fetch_add(1, Ordering::SeqCst) + 1;
+                response_headers.insert(
+                    "Mcp-Session-Id",
+                    format!("session-{count}").parse().unwrap(),
+                );
+                json!({
+                    "protocolVersion": state.negotiated_version,
+                    "capabilities": {
+                        "tools": {}
+                    },
+                    "serverInfo": {
+                        "name": "demo",
+                        "version": "1.0.0"
+                    }
+                })
+            }
+            "tools/list" => json!({
+                "tools": [{
+                    "name": "hello",
+                    "description": "demo tool",
+                    "inputSchema": {"type": "object", "properties": {}}
+                }]
+            }),
+            _ => json!({}),
+        };
+
+        let mut response = Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        }))
+        .into_response();
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().extend(response_headers);
+        response
+    }
+
+    async fn spawn_mock_mcp_server(state: Arc<MockServerState>) -> std::net::SocketAddr {
+        let app = Router::new()
+            .route("/mcp", post(mock_mcp_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        addr
     }
 }

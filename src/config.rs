@@ -71,12 +71,15 @@ pub struct McpRuntimeConfig {
 pub struct LocalToolsConfig {
     #[serde(default = "default_local_tool_execution_timeout_seconds")]
     pub execution_timeout_seconds: u64,
+    #[serde(default = "default_allowed_cli_tools")]
+    pub allowed_cli_tools: Vec<String>,
 }
 
 impl Default for LocalToolsConfig {
     fn default() -> Self {
         Self {
             execution_timeout_seconds: default_local_tool_execution_timeout_seconds(),
+            allowed_cli_tools: default_allowed_cli_tools(),
         }
     }
 }
@@ -269,6 +272,13 @@ fn resolve_value(value: &str) -> Result<String> {
     }
 }
 
+fn default_allowed_cli_tools() -> Vec<String> {
+    ["nmap", "vt", "dig", "whois", "nslookup"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 const fn default_temperature() -> f32 {
     0.2
 }
@@ -282,7 +292,7 @@ const fn default_max_output_tokens() -> u32 {
 }
 
 const fn default_connect_timeout() -> u64 {
-    15
+    180
 }
 
 const fn default_cleanup_timeout() -> u64 {
@@ -410,6 +420,35 @@ local_tools:
 
         let config = AppConfig::load(&path).unwrap();
         assert_eq!(config.local_tools.execution_timeout_seconds, 240);
+        assert_eq!(
+            config.local_tools.allowed_cli_tools,
+            vec!["nmap", "vt", "dig", "whois", "nslookup"]
+        );
+    }
+
+    #[test]
+    fn parses_allowed_cli_tool_override() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+local_tools:
+  allowed_cli_tools:
+    - whois
+    - dig
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(config.local_tools.execution_timeout_seconds, 180);
+        assert_eq!(config.local_tools.allowed_cli_tools, vec!["whois", "dig"]);
     }
 
     #[test]

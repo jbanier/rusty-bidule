@@ -21,9 +21,15 @@ agent_permissions:
 
 local_tools:
   execution_timeout_seconds: 180
+  allowed_cli_tools:
+    - nmap
+    - vt
+    - dig
+    - whois
+    - nslookup
 
 mcp_runtime:
-  connect_timeout_seconds: 15
+  connect_timeout_seconds: 180
 
 # Optional. Leave empty or remove the whole block to run without MCP servers.
 mcp_servers:

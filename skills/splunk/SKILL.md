@@ -1,10 +1,10 @@
 ---
 name: splunk
-description: Uses the `csirt-mcp` server for Splunk search, job submission, and result retrieval. Use when the user wants to search Splunk, enumerate indexes or sourcetypes, inspect events, run SPL, or follow up on long-running Splunk jobs.
-keywords: splunk, spl, search, index, sourcetype, events, sid, job, csirt-mcp, logs, siem
+description: Uses advertised MCP tools for Splunk search, job submission, and result retrieval. Use when the user wants to search Splunk, enumerate indexes or sourcetypes, inspect events, run SPL, or follow up on long-running Splunk jobs.
+keywords: splunk, spl, search, index, sourcetype, events, sid, job, logs, siem
 ---
 
-# Splunk Investigation Via `csirt-mcp`
+# Splunk Investigation Via MCP
 
 ## Overview
 
@@ -18,11 +18,11 @@ Prefer this skill for:
 - handling Splunk search jobs that may outlive a single turn
 - resuming a search by Splunk search ID / SID
 
-This skill is MCP-backed. Use the `csirt-mcp` tools advertised in the current session. Do not claim the skill is locally executable.
+This skill is MCP-backed. Use the Splunk-related MCP tools advertised in the current session. Do not claim the skill is locally executable.
 
 ## Tool selection
 
-Start by identifying the Splunk-related tools exposed by `csirt-mcp` in the current tool list. Prefer tools that map to these actions:
+Start by identifying the Splunk-related tools exposed in the current tool list. Prefer tools that map to these actions:
 
 - submit or run a search
 - poll or inspect a search job by SID
@@ -115,7 +115,7 @@ For Splunk-backed answers, prefer this shape:
 
 - `Results`: the returned events, counts, or most relevant rows
 - `Conclusion`: concise interpretation
-- `Sources`: `csirt-mcp / <tool-name> -> what it returned`
+- `Sources`: `<mcp-server> / <tool-name> -> what it returned`
 
 For async jobs, include:
 
@@ -129,13 +129,13 @@ For async jobs, include:
 Tools:
   - name: Submit Splunk Search
     slug: submit-search
-    server: csirt-mcp
-    description: Submit or run a Splunk SPL query through the CSIRT MCP server.
+    mcp: true
+    description: Submit or run a Splunk SPL query through an advertised MCP server.
   - name: Poll Splunk Job
     slug: poll-job
-    server: csirt-mcp
+    mcp: true
     description: Check the status of a previously submitted Splunk search job by SID.
   - name: Fetch Splunk Results
     slug: fetch-results
-    server: csirt-mcp
+    mcp: true
     description: Retrieve results for a completed or partially completed Splunk search job.

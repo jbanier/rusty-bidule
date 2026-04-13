@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -17,12 +20,18 @@ use crate::{
     tool_evidence::ToolEvidenceWriter,
     types::{
         AgentPermissions, MessageMetadata, MessageTiming, ProgressEvent, RememberedJob,
-        RunTurnResult, UiEvent,
+        RunTurnResult, UiEvent, permission_denied_user_prompt,
     },
 };
 
 const MAX_AGENT_ITERATIONS: usize = 10;
 const MAX_AZURE_TOOL_COUNT: usize = 128;
+const PINNED_LOCAL_TOOL_NAMES: &[&str] = &[
+    "local__configure_mcp_servers",
+    "local__run_skill",
+    "local__get_job",
+    "local__list_jobs",
+];
 
 #[derive(Clone)]
 pub struct Orchestrator {
@@ -58,6 +67,7 @@ struct MessageBuildContext<'a> {
     mcp_error: Option<&'a str>,
     recipe_instructions: Option<&'a str>,
     capability_summary: Option<&'a str>,
+    mcp_capability_summary: Option<&'a str>,
     agent_permissions: &'a AgentPermissions,
     store: &'a ConversationStore,
     conversation_id: &'a str,
@@ -329,28 +339,32 @@ impl Orchestrator {
                 .append_log(conversation_id, &format!("MCP discovery degraded: {error}"))?;
         }
 
-        // Build local tool definitions
-        let local_defs = local_tool_definitions(local_tool_filter.as_deref());
-        let local_count = local_defs.len().min(MAX_AZURE_TOOL_COUNT);
-
+        // Build local tool definitions and rank the advertised subset for the current turn.
+        let local_defs =
+            local_tool_definitions(local_tool_filter.as_deref(), &self.inner.config.local_tools);
+        let tool_selection_query =
+            build_tool_selection_query(user_message.as_deref(), &history, recipe.as_ref());
         let (azure_tools, omitted_tool_count) =
-            build_azure_tools_with_local(&local_defs[..local_count], &mcp_tools);
+            build_ranked_azure_tools_with_local(&local_defs, &mcp_tools, &tool_selection_query);
+        let advertised_mcp_tools = advertised_mcp_tools(&azure_tools, &mcp_tools);
+        let mcp_capability_summary =
+            summarize_advertised_mcp_tools(&advertised_mcp_tools, mcp_tools.len());
 
         if omitted_tool_count > 0 {
             warn!(
                 %conversation_id,
-                total_tools = mcp_tools.len(),
+                total_tools = mcp_tools.len() + local_defs.len(),
                 advertised_tools = azure_tools.len(),
                 omitted_tool_count,
-                "truncated MCP tools to satisfy Azure limit"
+                "truncated tools to satisfy Azure limit"
             );
             self.emit(
                 &ui_tx,
                 "tool_limit",
                 &format!(
-                    "Azure tool limit reached: advertising {} of {} tools. Disable one or more MCP servers with /mcp disable <name> or /mcp only <name...>.",
+                    "Azure tool limit reached: advertising {} of {} tools. Reduce enabled MCP servers with /mcp disable <name> or /mcp only <name...>, or narrow local tools in the active recipe/config.",
                     azure_tools.len(),
-                    mcp_tools.len() + local_count,
+                    mcp_tools.len() + local_defs.len(),
                 ),
                 None,
                 None,
@@ -370,6 +384,11 @@ impl Orchestrator {
             } else {
                 Some(capability_summary.as_str())
             },
+            mcp_capability_summary: if mcp_capability_summary.is_empty() {
+                None
+            } else {
+                Some(mcp_capability_summary.as_str())
+            },
             agent_permissions: &agent_permissions,
             store: &self.inner.store,
             conversation_id,
@@ -388,6 +407,7 @@ impl Orchestrator {
             agent_permissions.clone(),
             local_tool_filter.clone(),
             std::time::Duration::from_secs(self.inner.config.local_tools.execution_timeout_seconds),
+            self.inner.config.local_tools.allowed_cli_tools.clone(),
         );
 
         let mut tool_call_count = 0usize;
@@ -505,7 +525,32 @@ impl Orchestrator {
 
                     let tool_output = match tool_result {
                         Ok(output) => output,
-                        Err(err) => format!("Tool call failed: {err}"),
+                        Err(err) => {
+                            let err_text = format!("{err:#}");
+                            if let Some(prompt) = permission_denied_user_prompt(&err_text) {
+                                self.emit(
+                                    &ui_tx,
+                                    "tool_end",
+                                    &format!("Finished {}", tool_call.name),
+                                    Some(tool_call.name.clone()),
+                                    Some(tool_call_count),
+                                );
+                                return self
+                                    .finish_turn(FinishTurnContext {
+                                        conversation_id,
+                                        final_reply: &prompt,
+                                        turn_start,
+                                        tool_seconds,
+                                        llm_seconds,
+                                        tool_call_count,
+                                        automation,
+                                        recipe: recipe.as_ref(),
+                                        ui_tx: &ui_tx,
+                                    })
+                                    .await;
+                            }
+                            format!("Tool call failed: {err_text}")
+                        }
                     };
 
                     self.emit(
@@ -761,6 +806,8 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<Value> {
         "\n\nTool execution rules:\n\
         - Prefer local skill execution when an appropriate listed skill exists.\n\
         - A listed skill with a local script must be executed via `local__run_skill`.\n\
+        - Use `local__time` before making claims about relative windows like last 12 hours, last 2 days, today, or yesterday.\n\
+        - Use `local__exec_cli` only for explicitly allowed local CLI binaries such as `whois`, `dig`, `nslookup`, `vt`, or `nmap` when that tool is advertised.\n\
         - Never say a listed local skill is unavailable because of MCP; use the local runner first.\n\
         - Only describe MCP as unavailable when an advertised MCP tool is actually required or a skill explicitly says it is MCP-backed.\n\
         - Recipes provide prompt guidance and configuration; they are not executable scripts by themselves.",
@@ -774,6 +821,10 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<Value> {
         system_prompt.push_str(prompt);
     }
     if let Some(summary) = ctx.capability_summary {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(summary);
+    }
+    if let Some(summary) = ctx.mcp_capability_summary {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(summary);
     }
@@ -878,23 +929,64 @@ fn fallback_compaction_summary(conversation: &crate::types::Conversation) -> Str
     summary
 }
 
-fn build_azure_tools_with_local(
+fn build_ranked_azure_tools_with_local(
     local_tools: &[AzureTool],
     mcp_tools: &[McpTool],
+    tool_selection_query: &str,
 ) -> (Vec<AzureTool>, usize) {
-    let mut azure_tools: Vec<AzureTool> = local_tools.to_vec();
+    let total_tool_count = local_tools.len() + mcp_tools.len();
+    if total_tool_count <= MAX_AZURE_TOOL_COUNT {
+        let mut azure_tools = local_tools.to_vec();
+        azure_tools.extend(mcp_tools.iter().map(mcp_tool_to_azure_tool));
+        return (azure_tools, 0);
+    }
+
+    let context_tokens = tokenize_tool_selection_text(tool_selection_query);
+    let mut azure_tools = Vec::with_capacity(MAX_AZURE_TOOL_COUNT);
+    let mut selected_names = HashSet::new();
+
+    for pinned_name in PINNED_LOCAL_TOOL_NAMES {
+        if azure_tools.len() >= MAX_AZURE_TOOL_COUNT {
+            break;
+        }
+        if let Some(tool) = local_tools.iter().find(|tool| tool.name == *pinned_name)
+            && selected_names.insert(tool.name.clone())
+        {
+            azure_tools.push(tool.clone());
+        }
+    }
+
     let remaining_capacity = MAX_AZURE_TOOL_COUNT.saturating_sub(azure_tools.len());
+    let mut ranked_candidates = local_tools
+        .iter()
+        .filter(|tool| !selected_names.contains(&tool.name))
+        .map(|tool| RankedAzureTool {
+            score: score_local_tool(tool, &context_tokens),
+            local_preferred: true,
+            tool: tool.clone(),
+        })
+        .chain(mcp_tools.iter().map(|tool| RankedAzureTool {
+            score: score_mcp_tool(tool, &context_tokens),
+            local_preferred: false,
+            tool: mcp_tool_to_azure_tool(tool),
+        }))
+        .collect::<Vec<_>>();
+
+    ranked_candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| right.local_preferred.cmp(&left.local_preferred))
+            .then_with(|| left.tool.name.cmp(&right.tool.name))
+    });
+
     azure_tools.extend(
-        mcp_tools
-            .iter()
+        ranked_candidates
+            .into_iter()
             .take(remaining_capacity)
-            .map(|tool| AzureTool {
-                name: tool.external_name.clone(),
-                description: format!("{} (server: {})", tool.description, tool.server_name),
-                parameters: sanitize_azure_tool_schema(tool.input_schema.clone()),
-            }),
+            .map(|candidate| candidate.tool),
     );
-    let omitted_tool_count = mcp_tools.len().saturating_sub(remaining_capacity);
+    let omitted_tool_count = total_tool_count.saturating_sub(azure_tools.len());
     (azure_tools, omitted_tool_count)
 }
 
@@ -911,6 +1003,153 @@ fn build_azure_tools(mcp_tools: &[McpTool]) -> (Vec<AzureTool>, usize) {
         .collect::<Vec<_>>();
     let omitted_tool_count = mcp_tools.len().saturating_sub(azure_tools.len());
     (azure_tools, omitted_tool_count)
+}
+
+#[derive(Debug, Clone)]
+struct RankedAzureTool {
+    score: i64,
+    local_preferred: bool,
+    tool: AzureTool,
+}
+
+fn build_tool_selection_query(
+    user_message: Option<&str>,
+    history: &[crate::types::Message],
+    recipe: Option<&crate::recipes::Recipe>,
+) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(message) = user_message {
+        parts.push(message.to_string());
+    }
+
+    for message in history.iter().rev().take(6) {
+        if message.role == "user" || message.role == "assistant" {
+            parts.push(message.content.clone());
+        }
+    }
+
+    if let Some(recipe) = recipe {
+        parts.push(recipe.name.clone());
+        parts.push(recipe.instructions.clone());
+    }
+
+    parts.join("\n")
+}
+
+fn advertised_mcp_tools<'a>(
+    azure_tools: &[AzureTool],
+    mcp_tools: &'a [McpTool],
+) -> Vec<&'a McpTool> {
+    let advertised_names = azure_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<HashSet<_>>();
+    mcp_tools
+        .iter()
+        .filter(|tool| advertised_names.contains(tool.external_name.as_str()))
+        .collect()
+}
+
+fn summarize_advertised_mcp_tools(
+    advertised_mcp_tools: &[&McpTool],
+    discovered_count: usize,
+) -> String {
+    if discovered_count == 0 {
+        return String::new();
+    }
+
+    let mut grouped = HashMap::<&str, Vec<&McpTool>>::new();
+    for tool in advertised_mcp_tools {
+        grouped
+            .entry(tool.server_name.as_str())
+            .or_default()
+            .push(*tool);
+    }
+
+    let mut servers = grouped.into_iter().collect::<Vec<_>>();
+    servers.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut out = String::from("## Advertised MCP Tools\n\n");
+    out.push_str(
+        "These are the MCP tools currently advertised for this turn. Use these names when choosing MCP actions.\n",
+    );
+    for (server_name, mut tools) in servers {
+        tools.sort_by(|left, right| left.external_name.cmp(&right.external_name));
+        let shown = tools
+            .iter()
+            .take(12)
+            .map(|tool| format!("`{}`", tool.external_name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let remaining = tools.len().saturating_sub(12);
+        if remaining > 0 {
+            out.push_str(&format!(
+                "- `{server_name}` ({} advertised): {} + {} more\n",
+                tools.len(),
+                shown,
+                remaining
+            ));
+        } else {
+            out.push_str(&format!(
+                "- `{server_name}` ({} advertised): {}\n",
+                tools.len(),
+                shown
+            ));
+        }
+    }
+
+    let omitted = discovered_count.saturating_sub(advertised_mcp_tools.len());
+    if omitted > 0 {
+        out.push_str(&format!(
+            "\n{} additional discovered MCP tools were omitted from this turn because of the tool budget.\n",
+            omitted
+        ));
+    }
+
+    out
+}
+
+fn tokenize_tool_selection_text(text: &str) -> HashSet<String> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|token| {
+            let token = token.trim().to_ascii_lowercase();
+            if token.len() >= 3 { Some(token) } else { None }
+        })
+        .collect()
+}
+
+fn score_local_tool(tool: &AzureTool, context_tokens: &HashSet<String>) -> i64 {
+    let mut score = 0;
+    if PINNED_LOCAL_TOOL_NAMES.contains(&tool.name.as_str()) {
+        score += 10_000;
+    }
+    score
+        + score_text_match(&tool.name, context_tokens, 40)
+        + score_text_match(&tool.description, context_tokens, 10)
+}
+
+fn score_mcp_tool(tool: &McpTool, context_tokens: &HashSet<String>) -> i64 {
+    score_text_match(&tool.external_name, context_tokens, 60)
+        + score_text_match(&tool.original_name, context_tokens, 50)
+        + score_text_match(&tool.server_name, context_tokens, 30)
+        + score_text_match(&tool.description, context_tokens, 12)
+}
+
+fn score_text_match(text: &str, context_tokens: &HashSet<String>, weight: i64) -> i64 {
+    tokenize_tool_selection_text(text)
+        .into_iter()
+        .filter(|token| context_tokens.contains(token))
+        .count() as i64
+        * weight
+}
+
+fn mcp_tool_to_azure_tool(tool: &McpTool) -> AzureTool {
+    AzureTool {
+        name: tool.external_name.clone(),
+        description: format!("{} (server: {})", tool.description, tool.server_name),
+        parameters: sanitize_azure_tool_schema(tool.input_schema.clone()),
+    }
 }
 
 fn sanitize_azure_tool_schema(value: Value) -> Value {
@@ -962,12 +1201,14 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use crate::{
-        conversation_store::ConversationStore, mcp_runtime::McpTool, types::AgentPermissions,
+        azure::AzureTool, conversation_store::ConversationStore, mcp_runtime::McpTool,
+        types::AgentPermissions,
     };
 
     use super::{
-        ConversationTurnLocks, MAX_AZURE_TOOL_COUNT, MessageBuildContext, build_azure_tools,
-        build_messages, estimate_context_chars, sanitize_azure_tool_schema,
+        ConversationTurnLocks, MAX_AZURE_TOOL_COUNT, MessageBuildContext, PINNED_LOCAL_TOOL_NAMES,
+        build_azure_tools, build_messages, build_ranked_azure_tools_with_local,
+        estimate_context_chars, sanitize_azure_tool_schema, summarize_advertised_mcp_tools,
     };
 
     #[test]
@@ -1011,6 +1252,110 @@ mod tests {
     }
 
     #[test]
+    fn caps_combined_local_and_mcp_tools_to_azure_limit() {
+        let local_tools = (0..MAX_AZURE_TOOL_COUNT)
+            .map(|index| AzureTool {
+                name: format!("local_{index}"),
+                description: format!("local tool {index}"),
+                parameters: json!({"type": "object"}),
+            })
+            .collect::<Vec<_>>();
+        let mcp_tools = (0..5)
+            .map(|index| McpTool {
+                server_name: "demo".to_string(),
+                original_name: format!("tool_{index}"),
+                external_name: format!("demo__tool_{index}"),
+                description: format!("tool {index}"),
+                input_schema: json!({"type": "object"}),
+            })
+            .collect::<Vec<_>>();
+
+        let (azure_tools, omitted_tool_count) =
+            build_ranked_azure_tools_with_local(&local_tools, &mcp_tools, "");
+
+        assert_eq!(azure_tools.len(), MAX_AZURE_TOOL_COUNT);
+        assert_eq!(omitted_tool_count, 5);
+        assert!(
+            azure_tools
+                .iter()
+                .all(|tool| tool.name.starts_with("local_"))
+        );
+    }
+
+    #[test]
+    fn ranks_relevant_mcp_tools_ahead_of_irrelevant_filler() {
+        let local_tools = vec![AzureTool {
+            name: "local__run_skill".to_string(),
+            description: "Execute a skill script".to_string(),
+            parameters: json!({"type": "object"}),
+        }];
+        let mcp_tools = (0..200)
+            .map(|index| {
+                let (server_name, original_name, description) = if index == 199 {
+                    (
+                        "telemetry".to_string(),
+                        "query_alerts".to_string(),
+                        "Query telemetry alerts and detections".to_string(),
+                    )
+                } else {
+                    (
+                        "demo".to_string(),
+                        format!("tool_{index}"),
+                        format!("generic tool {index}"),
+                    )
+                };
+                McpTool {
+                    server_name: server_name.clone(),
+                    original_name: original_name.clone(),
+                    external_name: format!("{server_name}__{original_name}"),
+                    description,
+                    input_schema: json!({"type": "object"}),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let (azure_tools, omitted_tool_count) = build_ranked_azure_tools_with_local(
+            &local_tools,
+            &mcp_tools,
+            "query telemetry alerts for failed authentication",
+        );
+
+        assert_eq!(azure_tools.len(), MAX_AZURE_TOOL_COUNT);
+        assert_eq!(omitted_tool_count, 73);
+        assert!(
+            azure_tools
+                .iter()
+                .any(|tool| tool.name == "telemetry__query_alerts")
+        );
+    }
+
+    #[test]
+    fn preserves_pinned_local_tools_when_tool_budget_is_tight() {
+        let local_tools = PINNED_LOCAL_TOOL_NAMES
+            .iter()
+            .map(|name| AzureTool {
+                name: (*name).to_string(),
+                description: format!("{name} description"),
+                parameters: json!({"type": "object"}),
+            })
+            .chain((0..200).map(|index| AzureTool {
+                name: format!("local__extra_{index}"),
+                description: format!("extra local tool {index}"),
+                parameters: json!({"type": "object"}),
+            }))
+            .collect::<Vec<_>>();
+
+        let (azure_tools, omitted_tool_count) =
+            build_ranked_azure_tools_with_local(&local_tools, &[], "unrelated prompt");
+
+        assert_eq!(azure_tools.len(), MAX_AZURE_TOOL_COUNT);
+        assert_eq!(omitted_tool_count, local_tools.len() - MAX_AZURE_TOOL_COUNT);
+        for name in PINNED_LOCAL_TOOL_NAMES {
+            assert!(azure_tools.iter().any(|tool| tool.name == *name));
+        }
+    }
+
+    #[test]
     fn fills_missing_object_properties_for_azure_tools() {
         let schema = json!({
             "type": "object",
@@ -1038,6 +1383,9 @@ mod tests {
             mcp_error: None,
             recipe_instructions: None,
             capability_summary: Some("## Available Skills\n"),
+            mcp_capability_summary: Some(
+                "## Advertised MCP Tools\n\n- `csirt-mcp` (2 advertised): `csirt_mcp__foo`, `csirt_mcp__bar`\n",
+            ),
             agent_permissions: &permissions,
             store: &store,
             conversation_id: "convo_test",
@@ -1050,8 +1398,46 @@ mod tests {
         assert!(
             system_prompt.contains("Never say a listed local skill is unavailable because of MCP")
         );
+        assert!(system_prompt.contains("## Advertised MCP Tools"));
+        assert!(system_prompt.contains("`csirt-mcp` (2 advertised)"));
         assert!(system_prompt.contains("Active agent permissions"));
         assert!(system_prompt.contains("Recipes provide prompt guidance and configuration"));
+    }
+
+    #[test]
+    fn summarizes_advertised_mcp_tools_by_server() {
+        let tools = vec![
+            McpTool {
+                server_name: "csirt-mcp".to_string(),
+                original_name: "search_events".to_string(),
+                external_name: "csirt_mcp__search_events".to_string(),
+                description: "Search events".to_string(),
+                input_schema: json!({"type": "object"}),
+            },
+            McpTool {
+                server_name: "csirt-mcp".to_string(),
+                original_name: "list_cases".to_string(),
+                external_name: "csirt_mcp__list_cases".to_string(),
+                description: "List cases".to_string(),
+                input_schema: json!({"type": "object"}),
+            },
+            McpTool {
+                server_name: "wiz".to_string(),
+                original_name: "issues_query".to_string(),
+                external_name: "wiz__issues_query".to_string(),
+                description: "Query issues".to_string(),
+                input_schema: json!({"type": "object"}),
+            },
+        ];
+
+        let summary =
+            summarize_advertised_mcp_tools(&[&tools[0], &tools[1], &tools[2]], tools.len());
+
+        assert!(summary.contains("## Advertised MCP Tools"));
+        assert!(summary.contains(
+            "`csirt-mcp` (2 advertised): `csirt_mcp__list_cases`, `csirt_mcp__search_events`"
+        ));
+        assert!(summary.contains("`wiz` (1 advertised): `wiz__issues_query`"));
     }
 
     #[tokio::test]

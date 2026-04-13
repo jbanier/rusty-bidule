@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::types::AgentPermissions;
+use crate::types::{AgentPermissions, permission_denied_user_prompt};
 
 pub fn expand_prompt_file_references(
     input: &str,
@@ -18,9 +18,9 @@ pub fn expand_prompt_file_references(
     }
 
     if !permissions.allows_filesystem_read() {
-        bail!(
-            "inline file references require filesystem read access. Enable it with /permissions fs read or /permissions fs write, or use /yolo on."
-        );
+        let denied = "permission denied: inline file references require filesystem read access. Enable it with /permissions fs read or /permissions fs write, or use /yolo on.";
+        let prompt = permission_denied_user_prompt(denied).unwrap_or_else(|| denied.to_string());
+        bail!(prompt);
     }
 
     let mut expanded = String::with_capacity(input.len());
@@ -307,6 +307,8 @@ mod tests {
             expand_prompt_file_references("Use @note.md", &perms, Some(dir.path())).unwrap_err();
 
         assert!(err.to_string().contains("filesystem read access"));
+        assert!(err.to_string().contains("Enable it and retry?"));
+        assert!(err.to_string().contains("`/permissions fs read`"));
     }
 
     #[test]

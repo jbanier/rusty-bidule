@@ -1768,21 +1768,13 @@ impl App {
     }
 
     async fn show_mcp_server_status(&mut self) {
-        let tool_counts = if self.agent_permissions.allows_network() {
-            match self.orchestrator.mcp_tool_counts_by_server(None).await {
-                Ok(counts) => Some(counts),
-                Err(err) => {
-                    self.activities
-                        .push(format!("MCP tool counts unavailable: {err}"));
-                    None
-                }
+        let tool_counts = match self.orchestrator.mcp_tool_counts_by_server(None).await {
+            Ok(counts) => Some(counts),
+            Err(err) => {
+                self.activities
+                    .push(format!("MCP tool counts unavailable: {err}"));
+                None
             }
-        } else {
-            self.activities.push(
-                "MCP tool counts unavailable: network access is disabled by the current permissions."
-                    .to_string(),
-            );
-            None
         };
 
         let statuses = build_mcp_server_statuses(
@@ -2547,11 +2539,14 @@ impl LineExt for Line<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
+    use axum::{Json, Router, routing::post};
     use chrono::{TimeZone, Utc};
     use ratatui::style::Modifier;
+    use serde_json::json;
     use tempfile::{TempDir, tempdir};
+    use tokio::net::TcpListener;
 
     use crate::{
         config::{
@@ -2607,6 +2602,67 @@ mod tests {
             Orchestrator::new(test_config(dir.path().to_path_buf(), mcp_servers)).unwrap();
         let app = App::new(orchestrator).await.unwrap();
         (dir, app)
+    }
+
+    async fn spawn_mock_mcp_server(tool_names: &[&str]) -> SocketAddr {
+        let tools = tool_names
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "description": format!("{name} description"),
+                    "inputSchema": {"type": "object", "properties": {}}
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let app = Router::new().route(
+            "/mcp",
+            post({
+                let tools = tools.clone();
+                move |Json(body): Json<serde_json::Value>| {
+                    let tools = tools.clone();
+                    async move {
+                        let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let method = body
+                            .get("method")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("");
+                        let result = match method {
+                            "initialize" => json!({
+                                "protocolVersion": "2025-03-26",
+                                "capabilities": {}
+                            }),
+                            "tools/list" => json!({ "tools": tools }),
+                            _ => json!({}),
+                        };
+                        Json(json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result
+                        }))
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    }
+
+    fn load_live_config_for_test(data_dir: PathBuf) -> AppConfig {
+        let root = crate::paths::discover_project_root().unwrap();
+        let path = root.join("config").join("config.local.yaml");
+        unsafe {
+            std::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
+        }
+        let mut config = AppConfig::load(path).unwrap();
+        config.data_dir = Some(data_dir);
+        config
     }
 
     #[test]
@@ -2821,6 +2877,33 @@ mod tests {
         let status = &app.command_output.last().unwrap().content;
         assert!(status.contains("- `alpha`: enabled"));
         assert!(status.contains("- `beta`: enabled"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bare_mcp_command_uses_live_config_server_names_and_shows_counts() {
+        let dir = tempdir().unwrap();
+        let mut config = load_live_config_for_test(dir.path().to_path_buf());
+        let addr = spawn_mock_mcp_server(&["search_events", "list_cases", "lookup_artifact"]).await;
+        for server in &mut config.mcp_servers {
+            server.url = format!("http://{addr}/mcp");
+            server.auth = None;
+            server.headers = HashMap::new();
+        }
+
+        let names = config
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect::<Vec<_>>();
+        let orchestrator = Orchestrator::new(config).unwrap();
+        let mut app = App::new(orchestrator).await.unwrap();
+
+        app.handle_command("/mcp").await.unwrap();
+
+        let status = &app.command_output.last().unwrap().content;
+        for name in names {
+            assert!(status.contains(&format!("- `{name}`: enabled (3 tools)")));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

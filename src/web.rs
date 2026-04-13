@@ -71,6 +71,10 @@ struct ConvoSummaryResponse {
     message_count: usize,
     title: Option<String>,
     archived_at: Option<String>,
+    preview: Option<String>,
+    pending_recipe: Option<String>,
+    active_compaction: Option<String>,
+    enabled_mcp_servers: Option<Vec<String>>,
 }
 
 impl From<ConversationSummary> for ConvoSummaryResponse {
@@ -81,6 +85,10 @@ impl From<ConversationSummary> for ConvoSummaryResponse {
             message_count: s.message_count,
             title: s.title,
             archived_at: s.archived_at.map(|value| value.to_rfc3339()),
+            preview: s.preview,
+            pending_recipe: s.pending_recipe,
+            active_compaction: s.active_compaction,
+            enabled_mcp_servers: s.enabled_mcp_servers,
         }
     }
 }
@@ -109,6 +117,13 @@ struct McpServersBody {
 struct McpServerStatusResponse {
     name: String,
     enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_count: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+struct McpStatusesQuery {
+    include_counts: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -511,10 +526,20 @@ async fn delete_mcp_servers(
 async fn get_mcp_statuses(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
+    Query(query): Query<McpStatusesQuery>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
     validate_resource_id(&id, "conversation")?;
     let convo = state.orchestrator.store().load(&id)?;
     let enabled = convo.enabled_mcp_servers.as_deref();
+    let tool_counts = if query.include_counts.unwrap_or(false) {
+        state
+            .orchestrator
+            .mcp_tool_counts_by_server(None)
+            .await
+            .ok()
+    } else {
+        None
+    };
     let statuses = state
         .orchestrator
         .configured_mcp_server_names()
@@ -523,6 +548,9 @@ async fn get_mcp_statuses(
             enabled: enabled
                 .map(|servers| servers.iter().any(|server| server == &name))
                 .unwrap_or(true),
+            tool_count: tool_counts
+                .as_ref()
+                .and_then(|counts| counts.get(&name).copied()),
             name,
         })
         .collect::<Vec<_>>();
@@ -695,8 +723,50 @@ async fn start_oauth_server(
 
 async fn oauth_callback(Path(server_name): Path<String>) -> Html<String> {
     Html(format!(
-        "<html><body><h1>OAuth callback received for {}</h1><p>The Rust runtime currently completes OAuth through the MCP login flow.</p></body></html>",
-        server_name
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OAuth Complete</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(180deg, #090a10 0%, #05070c 54%, #030409 100%);
+      color: #d7fff7;
+      font-family: "IBM Plex Mono", monospace;
+    }}
+    .card {{
+      max-width: 560px;
+      padding: 24px;
+      border-radius: 20px;
+      border: 1px solid rgba(0, 255, 213, 0.18);
+      background: rgba(12, 16, 24, 0.94);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.42);
+    }}
+    p {{ color: #8bb4ac; line-height: 1.6; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>OAuth callback received</h1>
+    <p>Server: {}</p>
+    <p>You can close this window. The main console will be notified automatically when possible.</p>
+  </div>
+  <script>
+    try {{
+      if (window.opener && !window.opener.closed) {{
+        window.opener.postMessage({{ type: 'rusty-bidule-oauth-complete', server: '{}' }}, window.location.origin);
+      }}
+    }} catch (_) {{}}
+    setTimeout(() => window.close(), 400);
+  </script>
+</body>
+</html>"#,
+        server_name, server_name
     ))
 }
 
@@ -891,7 +961,7 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use axum::{
-        extract::{Path, State},
+        extract::{Path, Query, State},
         response::IntoResponse,
     };
     use chrono::Duration as ChronoDuration;
@@ -907,10 +977,11 @@ mod tests {
 
     use super::{
         COMPLETED_JOB_TTL, ConversationListQuery, ConversationTitleBody, FindingBody, JobState,
-        PostMessageBody, ScratchpadBody, SearchQuery, WebAppState, archive_conversation,
-        create_finding, evict_expired_jobs, export_summary, get_export_summary, get_mcp_statuses,
-        get_scratchpad, list_conversations, list_findings, post_message, put_conversation_title,
-        put_scratchpad, search_local, unarchive_conversation, update_finding,
+        McpStatusesQuery, PostMessageBody, ScratchpadBody, SearchQuery, WebAppState,
+        archive_conversation, create_finding, evict_expired_jobs, export_summary,
+        get_export_summary, get_mcp_statuses, get_scratchpad, list_conversations, list_findings,
+        post_message, put_conversation_title, put_scratchpad, search_local, unarchive_conversation,
+        update_finding,
     };
 
     fn test_config(data_dir: std::path::PathBuf) -> AppConfig {
@@ -1105,10 +1176,14 @@ mod tests {
             recipes: Arc::new(RecipeRegistry::default()),
         };
 
-        let statuses = get_mcp_statuses(State(state), Path(conversation.conversation_id))
-            .await
-            .unwrap()
-            .0;
+        let statuses = get_mcp_statuses(
+            State(state),
+            Path(conversation.conversation_id),
+            Query(McpStatusesQuery::default()),
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(statuses.as_array().unwrap().len(), 2);
         assert_eq!(statuses[0]["enabled"], false);
         assert_eq!(statuses[1]["enabled"], true);

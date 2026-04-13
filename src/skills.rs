@@ -15,6 +15,7 @@ pub struct SkillTool {
     pub description: Option<String>,
     pub script: Option<String>,
     pub server: Option<String>,
+    pub mcp_backed: bool,
     pub requires_network: bool,
     pub filesystem: FilesystemAccess,
 }
@@ -81,7 +82,7 @@ impl SkillRegistry {
         out.push_str(
             "- Do not claim a listed script-backed skill is unavailable because of MCP.\n",
         );
-        out.push_str("- A tool with `server` but no `script` is MCP-backed metadata only.\n\n");
+        out.push_str("- A tool with `mcp: true` but no `script` is MCP-backed metadata only.\n\n");
         for skill in &self.skills {
             let skill_name = skill_lookup_name(skill);
             if skill_name == skill.name {
@@ -123,7 +124,15 @@ impl SkillRegistry {
                         }
                         (None, Some(server)) => {
                             out.push_str(&format!(
-                                "- `{}`: {} MCP-backed via server `{server}`; not locally executable.\n",
+                                "- `{}`: {} MCP-backed{}; not locally executable.\n",
+                                display_name,
+                                desc,
+                                format!(" via server `{server}`")
+                            ));
+                        }
+                        (None, None) if tool.mcp_backed => {
+                            out.push_str(&format!(
+                                "- `{}`: {} MCP-backed; not locally executable.\n",
                                 display_name, desc
                             ));
                         }
@@ -164,7 +173,7 @@ impl SkillRegistry {
             .find_skill(skill_name)
             .or_else(|| self.find_skill_fuzzy(skill_name))?;
         let tools = if let Some(slug) = tool_slug {
-            vec![skill.tools.iter().find(|t| t.slug == slug)?]
+            vec![find_tool_fuzzy(skill, slug)?]
         } else {
             skill.tools.iter().collect::<Vec<_>>()
         };
@@ -186,6 +195,54 @@ fn normalize_lookup(value: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn looks_like_script_reference(value: &str) -> bool {
+    let value = value.trim();
+    value.contains('/')
+        || value.ends_with(".py")
+        || value.ends_with(".sh")
+        || value.ends_with(".js")
+        || value.ends_with(".rb")
+}
+
+fn find_tool_fuzzy<'a>(skill: &'a Skill, tool_slug: &str) -> Option<&'a SkillTool> {
+    if let Some(tool) = skill.tools.iter().find(|tool| tool.slug == tool_slug) {
+        return Some(tool);
+    }
+
+    let needle = normalize_lookup(tool_slug);
+    if needle.is_empty() {
+        return None;
+    }
+
+    if let Some(tool) = skill.tools.iter().find(|tool| {
+        normalize_lookup(&tool.slug) == needle
+            || tool
+                .name
+                .as_deref()
+                .is_some_and(|name| normalize_lookup(name) == needle)
+    }) {
+        return Some(tool);
+    }
+
+    let partial_matches = skill
+        .tools
+        .iter()
+        .filter(|tool| {
+            normalize_lookup(&tool.slug).contains(&needle)
+                || needle.contains(&normalize_lookup(&tool.slug))
+                || tool.name.as_deref().is_some_and(|name| {
+                    let normalized = normalize_lookup(name);
+                    normalized.contains(&needle) || needle.contains(&normalized)
+                })
+        })
+        .collect::<Vec<_>>();
+
+    match partial_matches.as_slice() {
+        [tool] => Some(*tool),
+        _ => None,
+    }
 }
 
 fn parse_skill_md(path: &Path, skill_dir: PathBuf) -> Result<Skill> {
@@ -308,6 +365,10 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
                             .get("server")
                             .and_then(|v| v.as_str())
                             .map(str::to_string),
+                        mcp_backed: map
+                            .get("mcp")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or_else(|| map.get("server").is_some()),
                         requires_network: map
                             .get("network")
                             .and_then(|v| v.as_bool())
@@ -333,6 +394,7 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
                         description: None,
                         script: Some(s.clone()),
                         server: None,
+                        mcp_backed: false,
                         requires_network: false,
                         filesystem: FilesystemAccess::None,
                     });
@@ -356,13 +418,18 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
         if let Some((slug, script)) = trimmed.split_once(':') {
             let slug = slug.trim().to_string();
             let script = script.trim().to_string();
-            if !slug.is_empty() && !script.is_empty() {
+            if !slug.is_empty()
+                && !script.is_empty()
+                && !slug.starts_with('-')
+                && looks_like_script_reference(&script)
+            {
                 tools.push(SkillTool {
                     name: None,
                     slug,
                     description: None,
                     script: Some(script),
                     server: None,
+                    mcp_backed: false,
                     requires_network: false,
                     filesystem: FilesystemAccess::None,
                 });
@@ -381,6 +448,7 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
                 description: None,
                 script: Some(script.to_string()),
                 server: None,
+                mcp_backed: false,
                 requires_network: false,
                 filesystem: FilesystemAccess::None,
             });
@@ -404,7 +472,10 @@ mod tests {
 
     use crate::types::FilesystemAccess;
 
-    use super::{Skill, SkillRegistry, SkillTool, parse_tools_block};
+    use super::{
+        Skill, SkillRegistry, SkillTool, find_tool_fuzzy, looks_like_script_reference,
+        parse_tools_block,
+    };
 
     #[test]
     fn parses_yaml_tool_list_before_markdown_heading() {
@@ -471,6 +542,51 @@ Tools:
     }
 
     #[test]
+    fn parses_generic_mcp_backed_tool_metadata() {
+        let body = "\
+Tools:
+  - name: Submit Splunk Search
+    slug: submit-search
+    mcp: true
+    description: Submit a Splunk query through an advertised MCP tool.
+";
+
+        let tools = parse_tools_block(body);
+
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].mcp_backed);
+        assert_eq!(tools[0].server, None);
+    }
+
+    #[test]
+    fn fallback_parser_does_not_treat_yaml_fields_as_scripts() {
+        let body = "\
+Tools:
+  - name: Fetch Webex Room Messages
+    slug: webex_room_message_fetch
+    description: Fetch all messages from a named Webex room.
+    script: scripts/webex_room_message_fetch.py
+";
+
+        let tools = parse_tools_block(body);
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].slug, "webex_room_message_fetch");
+        assert_eq!(
+            tools[0].script.as_deref(),
+            Some("scripts/webex_room_message_fetch.py")
+        );
+    }
+
+    #[test]
+    fn identifies_script_like_shorthand_targets() {
+        assert!(looks_like_script_reference("scripts/tool.py"));
+        assert!(looks_like_script_reference("tool.sh"));
+        assert!(!looks_like_script_reference("Fetch Webex Room Messages"));
+        assert!(!looks_like_script_reference("webex_room_message_fetch"));
+    }
+
+    #[test]
     fn capability_summary_includes_local_skill_invocation_details() {
         let registry = SkillRegistry {
             skills: vec![Skill {
@@ -482,6 +598,7 @@ Tools:
                     description: Some("Fetch all room messages for a date interval.".to_string()),
                     script: Some("scripts/webex_room_message_fetch.py".to_string()),
                     server: None,
+                    mcp_backed: false,
                     requires_network: true,
                     filesystem: FilesystemAccess::ReadOnly,
                 }],
@@ -496,5 +613,53 @@ Tools:
         assert!(summary.contains("tool_slug=\"webex_room_message_fetch\""));
         assert!(summary.contains("Requires network + filesystem:read"));
         assert!(summary.contains("Do not claim a listed script-backed skill"));
+    }
+
+    #[test]
+    fn capability_summary_describes_generic_mcp_backed_tools_without_server_binding() {
+        let registry = SkillRegistry {
+            skills: vec![Skill {
+                name: "splunk".to_string(),
+                description: "Investigate Splunk through MCP.".to_string(),
+                tools: vec![SkillTool {
+                    name: Some("Submit Splunk Search".to_string()),
+                    slug: "submit-search".to_string(),
+                    description: Some("Submit a Splunk query.".to_string()),
+                    script: None,
+                    server: None,
+                    mcp_backed: true,
+                    requires_network: false,
+                    filesystem: FilesystemAccess::None,
+                }],
+                skill_dir: PathBuf::from("skills/splunk"),
+            }],
+        };
+
+        let summary = registry.capability_summary();
+
+        assert!(summary.contains("MCP-backed; not locally executable."));
+        assert!(!summary.contains("via server"));
+    }
+
+    #[test]
+    fn fuzzy_tool_lookup_matches_webex_fetch_shorthand() {
+        let skill = Skill {
+            name: "webex-room-conversation".to_string(),
+            description: "Fetch Webex room messages.".to_string(),
+            tools: vec![SkillTool {
+                name: Some("Fetch Webex Room Messages".to_string()),
+                slug: "webex_room_message_fetch".to_string(),
+                description: Some("Fetch all room messages for a date interval.".to_string()),
+                script: Some("scripts/webex_room_message_fetch.py".to_string()),
+                server: None,
+                mcp_backed: false,
+                requires_network: true,
+                filesystem: FilesystemAccess::ReadOnly,
+            }],
+            skill_dir: PathBuf::from("skills/webex-room-conversation"),
+        };
+
+        let tool = find_tool_fuzzy(&skill, "fetch").unwrap();
+        assert_eq!(tool.slug, "webex_room_message_fetch");
     }
 }

@@ -3,28 +3,28 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rusty Bidule - CSIRT AI Assistant</title>
+<title>Rusty Bidule - Operator Console</title>
 <style>
   :root {
-    --bg: #08111a;
-    --bg-soft: rgba(9, 18, 29, 0.94);
-    --panel: rgba(16, 28, 44, 0.9);
-    --panel-soft: rgba(12, 22, 35, 0.82);
-    --panel-strong: rgba(19, 33, 52, 0.96);
-    --border: rgba(110, 186, 255, 0.16);
-    --border-strong: rgba(98, 230, 255, 0.28);
-    --text: #ecf4ff;
-    --muted: #91a7c4;
-    --muted-soft: #6f829d;
-    --accent: #67e8f9;
-    --accent-soft: rgba(103, 232, 249, 0.14);
-    --ok: #7dffb8;
-    --ok-soft: rgba(125, 255, 184, 0.14);
-    --warn: #ffcf74;
-    --warn-soft: rgba(255, 207, 116, 0.14);
-    --danger: #ff8d8d;
-    --danger-soft: rgba(255, 141, 141, 0.14);
-    --shadow: 0 22px 60px rgba(0, 0, 0, 0.32);
+    --bg: #06070d;
+    --panel: rgba(12, 16, 24, 0.9);
+    --panel-strong: rgba(14, 19, 29, 0.96);
+    --panel-soft: rgba(10, 14, 22, 0.88);
+    --panel-alt: rgba(18, 24, 35, 0.84);
+    --border: rgba(0, 255, 200, 0.15);
+    --border-strong: rgba(255, 0, 153, 0.22);
+    --text: #d7fff7;
+    --muted: #8bb4ac;
+    --muted-soft: #54756f;
+    --accent: #00ffd5;
+    --accent-soft: rgba(0, 255, 213, 0.12);
+    --ok: #68ff7d;
+    --ok-soft: rgba(104, 255, 125, 0.14);
+    --warn: #ffd447;
+    --warn-soft: rgba(255, 212, 71, 0.14);
+    --danger: #ff6b8b;
+    --danger-soft: rgba(255, 107, 139, 0.16);
+    --shadow: 0 20px 60px rgba(0, 0, 0, 0.42);
     --radius-xl: 24px;
     --radius-lg: 20px;
     --radius-md: 16px;
@@ -42,12 +42,12 @@
   }
 
   body {
-    font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
     color: var(--text);
     background:
-      radial-gradient(circle at top left, rgba(103, 232, 249, 0.14), transparent 24%),
-      radial-gradient(circle at top right, rgba(124, 156, 255, 0.12), transparent 28%),
-      linear-gradient(180deg, #0a121c 0%, #081019 48%, #060d14 100%);
+      radial-gradient(circle at top left, rgba(0, 255, 213, 0.12), transparent 22%),
+      radial-gradient(circle at top right, rgba(255, 59, 157, 0.1), transparent 24%),
+      linear-gradient(180deg, #090a10 0%, #05070c 54%, #030409 100%);
     overflow: hidden;
   }
 
@@ -60,12 +60,13 @@
       linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
       linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
     background-size: 28px 28px;
-    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.34), transparent 88%);
+    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.36), transparent 88%);
   }
 
   button,
   input,
-  textarea {
+  textarea,
+  select {
     font: inherit;
   }
 
@@ -80,13 +81,14 @@
   }
 
   button:disabled {
-    opacity: 0.45;
+    opacity: 0.48;
     cursor: not-allowed;
     transform: none;
   }
 
   input,
-  textarea {
+  textarea,
+  select {
     width: 100%;
     background: rgba(6, 12, 20, 0.78);
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -95,120 +97,111 @@
     padding: 11px 12px;
   }
 
+  textarea {
+    resize: vertical;
+  }
+
   input:focus,
-  textarea:focus {
-    outline: 1px solid rgba(103, 232, 249, 0.28);
-    border-color: rgba(103, 232, 249, 0.22);
+  textarea:focus,
+  select:focus {
+    outline: 1px solid rgba(0, 255, 213, 0.24);
+    border-color: rgba(0, 255, 213, 0.2);
   }
 
   .page {
     height: 100vh;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
     padding: 16px;
   }
 
-  .topbar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    background: rgba(14, 24, 37, 0.92);
-    box-shadow: var(--shadow);
-    backdrop-filter: blur(20px);
-  }
-
-  .hamburger {
-    width: 42px;
-    height: 42px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 14px;
-    background: rgba(103, 232, 249, 0.12);
-    border: 1px solid rgba(103, 232, 249, 0.2);
-    color: var(--text);
-    font-size: 1.1rem;
-    font-weight: 700;
-  }
-
-  .topbar-title {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .topbar-title h1 {
-    font-size: 1.02rem;
-    font-weight: 700;
-  }
-
-  .topbar-title p {
-    margin-top: 4px;
-    color: var(--muted);
-    font-size: 0.82rem;
-  }
-
-  .topbar-status {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .status-chip {
-    padding: 8px 10px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.04);
-    color: var(--muted);
-    font-size: 0.8rem;
-  }
-
-  .layout {
-    min-height: 0;
-    flex: 1;
+  .shell {
+    height: 100%;
     display: grid;
-    grid-template-columns: minmax(320px, 1fr) minmax(0, 1.7fr) minmax(260px, 320px);
+    grid-template-columns: minmax(310px, 360px) minmax(0, 1fr);
     gap: 14px;
   }
 
-  .panel {
+  .card {
     min-height: 0;
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
-    background: var(--panel);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent),
+      var(--panel);
     box-shadow: var(--shadow);
     backdrop-filter: blur(20px);
     overflow: hidden;
   }
 
-  .panel-header {
-    padding: 18px 20px 14px;
+  .sidebar {
+    position: sticky;
+    top: 16px;
+    height: calc(100vh - 32px);
+  }
+
+  .sidebar-top {
+    padding: 18px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(103, 232, 249, 0.08), rgba(103, 232, 249, 0.02));
+    background: linear-gradient(180deg, rgba(0, 255, 213, 0.08), rgba(255, 59, 157, 0.03));
   }
 
-  .panel-header h2 {
-    font-size: 0.92rem;
+  .brand-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .brand-mark {
+    width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(0, 255, 213, 0.16), rgba(255, 59, 157, 0.2));
+    border: 1px solid rgba(0, 255, 213, 0.2);
+    color: var(--text);
+    font-weight: 700;
     letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--muted);
   }
 
-  .panel-header p {
+  .brand-copy h1 {
+    font-size: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .brand-copy p {
     margin-top: 8px;
     color: var(--muted);
-    font-size: 0.84rem;
-    line-height: 1.55;
+    font-size: 0.8rem;
+    line-height: 1.6;
   }
 
-  .left-top {
+  .sidebar-actions {
     display: flex;
     gap: 8px;
-    margin-top: 14px;
+    margin-top: 16px;
+  }
+
+  .icon-btn,
+  .primary-btn,
+  .secondary-btn,
+  .ghost-btn,
+  .danger-btn,
+  .tiny-btn {
+    border-radius: 12px;
+    color: var(--text);
+  }
+
+  .icon-btn {
+    width: 42px;
+    height: 42px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 1rem;
   }
 
   .primary-btn,
@@ -216,33 +209,83 @@
   .ghost-btn,
   .danger-btn {
     padding: 10px 12px;
-    border-radius: 12px;
-    color: var(--text);
     font-size: 0.84rem;
     font-weight: 600;
   }
 
   .primary-btn {
-    background: linear-gradient(135deg, rgba(103, 232, 249, 0.22), rgba(124, 156, 255, 0.24));
-    border: 1px solid rgba(103, 232, 249, 0.22);
+    background: linear-gradient(135deg, rgba(0, 255, 213, 0.18), rgba(255, 59, 157, 0.2));
+    border: 1px solid rgba(0, 255, 213, 0.2);
   }
 
   .secondary-btn {
-    background: rgba(103, 232, 249, 0.12);
-    border: 1px solid rgba(103, 232, 249, 0.18);
+    background: rgba(0, 255, 213, 0.1);
+    border: 1px solid rgba(0, 255, 213, 0.16);
   }
 
-  .ghost-btn {
+  .ghost-btn,
+  .tiny-btn {
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.08);
   }
 
   .danger-btn {
-    background: rgba(255, 141, 141, 0.12);
-    border: 1px solid rgba(255, 141, 141, 0.18);
+    background: rgba(255, 107, 139, 0.12);
+    border: 1px solid rgba(255, 107, 139, 0.18);
   }
 
-  .conversation-groups {
+  .tiny-btn {
+    padding: 7px 8px;
+    font-size: 0.74rem;
+    color: var(--muted);
+  }
+
+  .sidebar-meta {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+
+  .status-chip,
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 10px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    line-height: 1;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--muted);
+  }
+
+  .badge.recipe {
+    color: var(--accent);
+    background: rgba(0, 255, 213, 0.1);
+    border-color: rgba(0, 255, 213, 0.16);
+  }
+
+  .badge.ctx {
+    color: #ffc7eb;
+    background: rgba(255, 59, 157, 0.1);
+    border-color: rgba(255, 59, 157, 0.18);
+  }
+
+  .badge.mcp {
+    color: var(--warn);
+    background: rgba(255, 212, 71, 0.1);
+    border-color: rgba(255, 212, 71, 0.16);
+  }
+
+  .badge.run {
+    color: var(--ok);
+    background: rgba(104, 255, 125, 0.1);
+    border-color: rgba(104, 255, 125, 0.16);
+  }
+
+  .sidebar-list {
     min-height: 0;
     flex: 1;
     overflow-y: auto;
@@ -250,7 +293,7 @@
   }
 
   .conversation-group + .conversation-group {
-    margin-top: 16px;
+    margin-top: 18px;
   }
 
   .group-label {
@@ -265,7 +308,7 @@
     padding: 14px;
     border-radius: var(--radius-md);
     border: 1px solid transparent;
-    background: transparent;
+    background: rgba(255, 255, 255, 0.02);
     cursor: pointer;
   }
 
@@ -274,16 +317,18 @@
   }
 
   .conversation-card:hover {
-    background: rgba(255, 255, 255, 0.03);
+    background: rgba(255, 255, 255, 0.04);
     border-color: rgba(255, 255, 255, 0.08);
   }
 
   .conversation-card.active {
-    background: linear-gradient(135deg, rgba(103, 232, 249, 0.11), rgba(124, 156, 255, 0.14));
+    background: linear-gradient(135deg, rgba(0, 255, 213, 0.12), rgba(255, 59, 157, 0.12));
     border-color: var(--border-strong);
   }
 
-  .conversation-top {
+  .conversation-head,
+  .workspace-head,
+  .row-between {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -291,64 +336,115 @@
   }
 
   .conversation-title {
-    font-size: 0.95rem;
+    font-size: 0.92rem;
     font-weight: 700;
     line-height: 1.35;
   }
 
   .conversation-id {
-    margin-top: 7px;
+    margin-top: 6px;
     color: var(--muted-soft);
-    font-size: 0.76rem;
-    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+    font-size: 0.74rem;
+    word-break: break-all;
   }
 
-  .conversation-meta {
+  .conversation-time,
+  .conversation-preview {
     margin-top: 8px;
     color: var(--muted);
     font-size: 0.78rem;
+    line-height: 1.5;
   }
 
-  .conversation-actions {
-    margin-top: 12px;
+  .conversation-preview {
+    color: #b7dad3;
+  }
+
+  .conversation-badges,
+  .header-chips,
+  .inline-actions,
+  .stack-actions {
     display: flex;
     gap: 8px;
+    flex-wrap: wrap;
   }
 
-  .tiny-btn {
-    padding: 7px 8px;
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: var(--muted);
-    font-size: 0.75rem;
+  .conversation-badges {
+    margin-top: 12px;
   }
 
-  .chat-header {
+  .conversation-card-actions {
     display: flex;
-    flex-direction: column;
-    gap: 12px;
+    gap: 8px;
+    margin-top: 12px;
   }
 
-  .conversation-context {
-    padding: 16px 20px 14px;
+  .workspace {
+    height: calc(100vh - 32px);
+    min-height: 0;
+    display: grid;
+  }
+
+  .workspace-shell {
+    height: 100%;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto minmax(280px, 1fr) minmax(240px, auto);
+  }
+
+  .workspace-top {
+    padding: 18px 20px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(124, 156, 255, 0.08), rgba(124, 156, 255, 0.02));
+    background: linear-gradient(180deg, rgba(255, 59, 157, 0.08), rgba(0, 255, 213, 0.03));
   }
 
-  .context-title {
-    font-size: 1.18rem;
+  .workspace-title {
+    font-size: 1.12rem;
     font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
 
-  .context-subtitle {
+  .workspace-subtitle {
     margin-top: 8px;
     color: var(--muted);
-    font-size: 0.86rem;
+    font-size: 0.84rem;
+    line-height: 1.55;
   }
 
-  #messages {
-    flex: 1;
+  .header-chips {
+    margin-top: 14px;
+  }
+
+  .menu-wrap {
+    position: relative;
+  }
+
+  .menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 8px);
+    min-width: 220px;
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(10, 14, 22, 0.96);
+    box-shadow: var(--shadow);
+    z-index: 12;
+  }
+
+  .menu.open {
+    display: flex;
+  }
+
+  .menu button {
+    text-align: left;
+  }
+
+  .transcript {
     min-height: 0;
     overflow-y: auto;
     padding: 20px;
@@ -359,22 +455,22 @@
   }
 
   .message {
-    max-width: min(760px, 92%);
+    max-width: min(860px, 94%);
     padding: 16px 18px;
     border-radius: 18px;
     border: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(10, 18, 30, 0.78);
+    background: rgba(8, 12, 18, 0.86);
   }
 
   .message.assistant {
     align-self: flex-start;
-    border-color: rgba(103, 232, 249, 0.14);
+    border-color: rgba(0, 255, 213, 0.16);
   }
 
   .message.user {
     align-self: flex-end;
-    background: linear-gradient(135deg, rgba(124, 156, 255, 0.18), rgba(103, 232, 249, 0.11));
-    border-color: rgba(124, 156, 255, 0.2);
+    background: linear-gradient(135deg, rgba(255, 59, 157, 0.18), rgba(0, 255, 213, 0.12));
+    border-color: rgba(255, 59, 157, 0.24);
   }
 
   .message-top {
@@ -386,48 +482,256 @@
   }
 
   .role-tag {
-    color: var(--accent);
     font-size: 0.74rem;
-    letter-spacing: 0.08em;
     text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
   }
 
   .message.user .role-tag {
-    color: #c9d7ff;
+    color: #f4d2ea;
   }
 
   .meta {
     color: var(--muted-soft);
-    font-size: 0.78rem;
+    font-size: 0.76rem;
   }
 
-  .content {
+  .content,
+  .markdown-body {
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.65;
+    font-size: 0.87rem;
   }
 
-  .composer-wrap {
-    padding: 0 20px 18px;
+  .markdown-body {
+    white-space: normal;
   }
 
-  .composer {
-    border: 1px solid var(--border);
+  .markdown-body > * + * {
+    margin-top: 12px;
+  }
+
+  .markdown-body h1,
+  .markdown-body h2,
+  .markdown-body h3,
+  .markdown-body h4 {
+    line-height: 1.3;
+  }
+
+  .markdown-body h1 { font-size: 1.2rem; }
+  .markdown-body h2 { font-size: 1.08rem; }
+  .markdown-body h3 { font-size: 0.98rem; }
+  .markdown-body h4 { font-size: 0.92rem; }
+
+  .markdown-body ul,
+  .markdown-body ol {
+    padding-left: 1.4rem;
+  }
+
+  .markdown-body li + li {
+    margin-top: 6px;
+  }
+
+  .markdown-body code {
+    padding: 0.1rem 0.35rem;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #ecf6ff;
+  }
+
+  .markdown-body pre {
+    overflow-x: auto;
+    padding: 12px;
+    border-radius: 14px;
+    background: rgba(3, 6, 10, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+
+  .markdown-body pre code {
+    padding: 0;
+    background: transparent;
+  }
+
+  .markdown-body blockquote {
+    padding-left: 14px;
+    border-left: 3px solid rgba(0, 255, 213, 0.24);
+    color: #b9ddd6;
+  }
+
+  .markdown-body a {
+    color: var(--accent);
+  }
+
+  .table-scroll {
+    position: relative;
+    overflow-x: auto;
+    padding-top: 10px;
+  }
+
+  .table-scroll::before {
+    content: "scroll →";
+    position: absolute;
+    top: 0;
+    right: 0;
+    font-size: 0.68rem;
+    color: var(--muted-soft);
+  }
+
+  .markdown-body table {
+    min-width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+
+  .markdown-body th,
+  .markdown-body td {
+    padding: 8px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .markdown-body th {
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .operations {
+    min-height: 0;
+    max-height: min(42vh, 520px);
+    overflow-y: auto;
+    padding: 0 20px 20px;
+    display: grid;
+    gap: 12px;
+  }
+
+  .panel-block {
+    border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: var(--radius-lg);
     background: var(--panel-strong);
-    padding: 14px;
+    overflow: hidden;
   }
 
-  #msg-input {
+  .panel-block-head {
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .panel-block-head h3 {
+    font-size: 0.82rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .panel-block-body {
+    padding: 14px 16px;
+  }
+
+  .metric-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .metric {
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .metric-label {
+    color: var(--muted-soft);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .metric-value {
+    margin-top: 8px;
+    font-size: 0.84rem;
+    color: var(--text);
+  }
+
+  .event-list,
+  .job-list,
+  .recipe-list,
+  .oauth-list,
+  .mcp-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .event-list {
+    margin-top: 12px;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  .event-item,
+  .job-item,
+  .recipe-item,
+  .oauth-item,
+  .mcp-item {
+    padding: 12px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .event-kind,
+  .job-status,
+  .recipe-title,
+  .oauth-name,
+  .mcp-name {
+    font-size: 0.76rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .event-message,
+  .job-meta,
+  .recipe-copy,
+  .oauth-url,
+  .mcp-state {
+    margin-top: 8px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+
+  .job-head,
+  .recipe-head,
+  .oauth-head,
+  .mcp-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .recipe-item.active {
+    border-color: rgba(0, 255, 213, 0.18);
+    background: rgba(0, 255, 213, 0.07);
+  }
+
+  .composer textarea {
     min-height: 120px;
-    resize: vertical;
     border: none;
     background: transparent;
     padding: 0;
     line-height: 1.6;
   }
 
-  #msg-input:focus {
+  .composer textarea:focus {
     outline: none;
     border: none;
   }
@@ -442,74 +746,12 @@
 
   .composer-hint {
     color: var(--muted);
-    font-size: 0.82rem;
-  }
-
-  .mcp-body {
-    min-height: 0;
-    flex: 1;
-    overflow-y: auto;
-    padding: 14px;
-  }
-
-  .mcp-actions {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 12px;
-  }
-
-  .mcp-card {
-    padding: 14px;
-    border-radius: var(--radius-md);
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .mcp-card + .mcp-card {
-    margin-top: 8px;
-  }
-
-  .mcp-top {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .mcp-name {
-    font-size: 0.92rem;
-    font-weight: 700;
-  }
-
-  .mcp-status {
-    margin-top: 6px;
-    font-size: 0.79rem;
-    color: var(--muted);
-  }
-
-  .status-enabled {
-    color: var(--ok);
-  }
-
-  .status-disabled {
-    color: var(--danger);
-  }
-
-  .status-unknown {
-    color: var(--warn);
-  }
-
-  #status-bar {
-    padding: 12px 14px;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
-    color: var(--muted);
-    font-size: 0.82rem;
-    background: rgba(5, 10, 17, 0.54);
+    font-size: 0.8rem;
   }
 
   .empty-state {
     margin: auto;
-    max-width: 520px;
+    max-width: 620px;
     padding: 32px 28px;
     border-radius: 24px;
     text-align: center;
@@ -518,7 +760,7 @@
   }
 
   .empty-state h3 {
-    font-size: 1.28rem;
+    font-size: 1.18rem;
   }
 
   .empty-state p {
@@ -527,144 +769,144 @@
     line-height: 1.6;
   }
 
-  .drawer-backdrop {
+  .status-line {
+    margin-top: 12px;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+
+  .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.36);
+    background: rgba(0, 0, 0, 0.46);
     backdrop-filter: blur(4px);
     opacity: 0;
     pointer-events: none;
     transition: opacity 160ms ease;
+    z-index: 30;
   }
 
-  .drawer-backdrop.open {
+  .modal-backdrop.open {
     opacity: 1;
     pointer-events: auto;
   }
 
-  .drawer {
+  .settings-sheet,
+  .history-modal {
     position: fixed;
-    top: 16px;
-    left: 16px;
-    bottom: 16px;
-    width: min(420px, calc(100vw - 32px));
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    padding: 14px;
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
-    background: rgba(10, 18, 30, 0.96);
+    background: rgba(10, 18, 30, 0.97);
     box-shadow: var(--shadow);
-    transform: translateX(calc(-100% - 24px));
-    transition: transform 180ms ease;
-    z-index: 20;
-    overflow-y: auto;
+    z-index: 31;
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 180ms ease, opacity 180ms ease;
   }
 
-  .drawer.open {
-    transform: translateX(0);
-  }
-
-  .drawer-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .drawer-header h2 {
-    font-size: 0.96rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--muted);
-  }
-
-  .drawer-section {
-    padding: 14px;
-    border-radius: var(--radius-lg);
-    background: var(--panel-soft);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .drawer-section h3 {
-    font-size: 0.92rem;
-  }
-
-  .drawer-section p {
-    margin-top: 6px;
-    color: var(--muted);
-    font-size: 0.82rem;
-    line-height: 1.55;
-  }
-
-  .stack {
-    display: grid;
-    gap: 8px;
-    margin-top: 12px;
-  }
-
-  .inline {
-    display: flex;
-    gap: 8px;
-  }
-
-  .inline > * {
-    flex: 1;
-  }
-
-  .collection {
-    max-height: 260px;
-    overflow-y: auto;
+  .settings-sheet {
+    top: 16px;
+    right: 16px;
+    bottom: 16px;
+    width: min(480px, calc(100vw - 32px));
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    margin-top: 12px;
+    transform: translateX(calc(100% + 24px));
   }
 
-  .collection-empty {
-    padding: 12px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.03);
-    color: var(--muted);
-    font-size: 0.82rem;
+  .settings-sheet.open {
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
   }
 
-  .finding-item,
-  .search-item {
-    padding: 12px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.05);
+  .history-modal {
+    inset: 50% auto auto 50%;
+    width: min(960px, calc(100vw - 32px));
+    height: min(82vh, 860px);
+    transform: translate(-50%, -46%);
+    display: flex;
+    flex-direction: column;
   }
 
-  .finding-head,
-  .search-head {
+  .history-modal.open {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, -50%);
+  }
+
+  .sheet-head,
+  .history-head {
+    padding: 18px 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 10px;
+    gap: 12px;
   }
 
-  .finding-kind,
-  .search-scope {
-    color: var(--accent);
-    font-size: 0.75rem;
+  .sheet-head h2,
+  .history-head h2 {
+    font-size: 0.94rem;
+    color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }
 
-  .finding-value,
-  .search-title {
-    margin-top: 6px;
-    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-    font-size: 0.82rem;
+  .sheet-body,
+  .history-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
 
-  .finding-fields {
-    margin-top: 10px;
+  details.section {
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: var(--radius-lg);
+    background: var(--panel-soft);
+    overflow: hidden;
+  }
+
+  details.section summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  details.section summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .section-copy {
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+
+  .section-body {
+    padding: 0 16px 16px;
     display: grid;
-    gap: 8px;
+    gap: 12px;
+  }
+
+  .history-message {
+    padding: 14px;
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .history-message.user {
+    border-color: rgba(255, 59, 157, 0.18);
   }
 
   .spinner {
@@ -673,9 +915,13 @@
     color: var(--accent);
   }
 
+  .hidden {
+    display: none !important;
+  }
+
   @media (max-width: 1180px) {
-    .layout {
-      grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.4fr) 260px;
+    .metric-row {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
 
@@ -689,164 +935,267 @@
       min-height: 100vh;
     }
 
-    .layout {
+    .shell {
+      height: auto;
       grid-template-columns: 1fr;
     }
 
-    .panel {
-      min-height: 360px;
+    .sidebar {
+      position: static;
+      height: auto;
+    }
+
+    .workspace {
+      height: auto;
+      min-height: unset;
+    }
+
+    .workspace-shell {
+      height: auto;
+      min-height: 72vh;
+      grid-template-rows: auto minmax(320px, 1fr) auto;
+    }
+
+    .settings-sheet {
+      inset: 50% auto auto 50%;
+      width: min(720px, calc(100vw - 24px));
+      height: min(84vh, 880px);
+      transform: translate(-50%, -46%);
+    }
+
+    .settings-sheet.open {
+      transform: translate(-50%, -50%);
+    }
+
+    .workspace-head,
+    .conversation-head,
+    .composer-footer,
+    .job-head,
+    .recipe-head,
+    .oauth-head,
+    .mcp-head,
+    .row-between {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .metric-row {
+      grid-template-columns: 1fr;
     }
   }
 </style>
 </head>
 <body>
-  <div class="drawer-backdrop" id="drawer-backdrop" onclick="closeDrawer()"></div>
-  <aside class="drawer" id="utility-drawer">
-    <div class="drawer-header">
-      <h2>Utilities</h2>
-      <button class="ghost-btn" onclick="closeDrawer()">Close</button>
+  <div class="modal-backdrop" id="modal-backdrop" onclick="closeAllOverlays()"></div>
+
+  <aside class="settings-sheet" id="settings-sheet">
+    <div class="sheet-head">
+      <div>
+        <h2>Settings</h2>
+        <div class="section-copy">Config editing, MCP OAuth, and conversation-level MCP controls.</div>
+      </div>
+      <button class="ghost-btn" onclick="closeSettings()">Close</button>
     </div>
+    <div class="sheet-body">
+      <details class="section" open>
+        <summary>
+          <div>
+            <strong>Config</strong>
+            <div class="section-copy">Review or edit the runtime config loaded by the web console.</div>
+          </div>
+          <span class="status-chip" id="config-status-chip">idle</span>
+        </summary>
+        <div class="section-body">
+          <textarea id="config-editor" rows="16" placeholder="Config will load here."></textarea>
+          <div class="inline-actions">
+            <button class="secondary-btn" onclick="loadConfig()">Reload Config</button>
+            <button class="primary-btn" onclick="saveConfig()">Save Config</button>
+          </div>
+        </div>
+      </details>
 
-    <section class="drawer-section">
-      <h3>Scratchpad</h3>
-      <p>Conversation-local notes kept outside the live model context.</p>
-      <div class="stack">
-        <textarea id="scratchpad-input" placeholder="Capture hypotheses, pivots, or analyst notes here." rows="6"></textarea>
-        <div class="inline">
-          <button id="scratchpad-save-btn" class="secondary-btn" onclick="saveScratchpad()">Save Notes</button>
-          <button id="scratchpad-clear-btn" class="ghost-btn" onclick="clearScratchpad()">Clear</button>
+      <details class="section">
+        <summary>
+          <div>
+            <strong>MCP OAuth</strong>
+            <div class="section-copy">Launch OAuth sign-in for MCP servers that use public OAuth.</div>
+          </div>
+          <span class="status-chip" id="oauth-status-chip">idle</span>
+        </summary>
+        <div class="section-body">
+          <div id="oauth-list" class="oauth-list"></div>
         </div>
-      </div>
-    </section>
+      </details>
 
-    <section class="drawer-section">
-      <h3>Findings</h3>
-      <p>Structured local findings for the active conversation.</p>
-      <div class="stack">
-        <input id="finding-filter-text" placeholder="filter by text" oninput="applyFindingFilters()" />
-        <div class="inline">
-          <input id="finding-filter-tag" placeholder="tag filter" oninput="applyFindingFilters()" />
-          <input id="finding-filter-confidence" placeholder="min confidence" oninput="applyFindingFilters()" />
+      <details class="section">
+        <summary>
+          <div>
+            <strong>Conversation MCP</strong>
+            <div class="section-copy">Toggle which MCP servers are active for the selected conversation.</div>
+          </div>
+          <span class="status-chip" id="mcp-settings-chip">select thread</span>
+        </summary>
+        <div class="section-body">
+          <div class="inline-actions">
+            <button class="secondary-btn" id="mcp-reset-btn" onclick="resetMcpServers()" disabled>Enable All</button>
+          </div>
+          <div id="mcp-list" class="mcp-list"></div>
         </div>
-        <div class="inline">
-          <input id="finding-kind" placeholder="kind" />
-          <input id="finding-value" placeholder="value" />
-        </div>
-        <input id="finding-note" placeholder="note (optional)" />
-        <input id="finding-tags" placeholder="tags (comma-separated)" />
-        <div class="inline">
-          <input id="finding-confidence" placeholder="confidence 0-100" />
-          <input id="finding-artifact" placeholder="source artifact (optional)" />
-        </div>
-        <button id="finding-add-btn" class="secondary-btn" onclick="addFinding()">Add Finding</button>
-        <div id="findings-list" class="collection"></div>
-      </div>
-    </section>
-
-    <section class="drawer-section">
-      <h3>Search</h3>
-      <p>Search local conversations, scratchpads, and findings.</p>
-      <div class="stack">
-        <div class="inline">
-          <input id="search-input" placeholder="Search local history" onkeydown="handleSearchKey(event)" />
-          <button id="search-btn" class="secondary-btn" onclick="runSearch()">Search</button>
-        </div>
-        <div id="search-results" class="collection"></div>
-      </div>
-    </section>
-
-    <section class="drawer-section">
-      <h3>Conversation Actions</h3>
-      <p>Archive, export, and other per-conversation functions.</p>
-      <div class="stack">
-        <button id="archive-btn" class="ghost-btn" onclick="toggleArchiveConversation()" disabled>Archive Conversation</button>
-        <button id="export-btn" class="ghost-btn" onclick="exportConversationSummary()" disabled>Export Summary</button>
-      </div>
-    </section>
+      </details>
+    </div>
   </aside>
 
+  <section class="history-modal" id="history-modal">
+    <div class="history-head">
+      <div>
+        <h2>Conversation History</h2>
+        <div class="section-copy" id="history-caption">Full transcript for the selected conversation.</div>
+      </div>
+      <button class="ghost-btn" onclick="closeHistory()">Close</button>
+    </div>
+    <div class="history-body" id="history-body"></div>
+  </section>
+
   <div class="page">
-    <header class="topbar">
-      <button class="hamburger" onclick="toggleDrawer()">☰</button>
-      <div class="topbar-title">
-        <h1>Rusty Bidule</h1>
-        <p>Conversation-centric browser workspace with MCP visibility and local utilities.</p>
-      </div>
-      <div class="topbar-status">
-        <div class="status-chip" id="conversation-caption">No conversation selected</div>
-        <div class="status-chip" id="sidebar-status">Ready</div>
-      </div>
-    </header>
-
-    <div class="layout">
-      <aside class="panel">
-        <div class="panel-header">
-          <h2>Conversations</h2>
-          <p>Active and archived threads. Rename or delete directly from the list.</p>
-          <div class="left-top">
-            <button id="new-btn" class="primary-btn" onclick="newConversation()">New Conversation</button>
+    <div class="shell">
+      <aside class="card sidebar">
+        <div class="sidebar-top">
+          <div class="brand-row">
+            <div class="brand-mark">RB</div>
+            <div class="stack-actions">
+              <button class="icon-btn" title="New conversation" onclick="newConversation()">+</button>
+              <button class="icon-btn" title="Settings" onclick="openSettings()">⚙</button>
+            </div>
+          </div>
+          <div class="brand-copy">
+            <h1>Rusty Bidule</h1>
+            <p>Incident-response workspace with conversation routing, live run telemetry, and MCP visibility.</p>
+          </div>
+          <div class="sidebar-actions">
+            <button class="primary-btn" id="new-btn" onclick="newConversation()">New Conversation</button>
+          </div>
+          <div class="sidebar-meta">
             <div class="status-chip"><span id="conversation-count">0</span> active</div>
+            <div class="status-chip" id="sidebar-status">Ready</div>
           </div>
         </div>
-        <div id="conversation-list" class="conversation-groups"></div>
+        <div class="sidebar-list" id="conversation-list"></div>
       </aside>
 
-      <main class="panel">
-        <div class="conversation-context">
-          <div class="chat-header">
-            <div>
-              <div class="context-title" id="conversation-title-heading">Focused, readable transcript</div>
-              <div class="context-subtitle" id="conversation-context">No conversation selected</div>
-            </div>
-            <div class="title-editor">
-              <input id="conversation-title-input" placeholder="Rename conversation" />
-              <button id="title-save-btn" class="secondary-btn" onclick="saveConversationTitle()" disabled>Save</button>
-            </div>
-          </div>
-        </div>
-
-        <div id="messages">
-          <div class="empty-state">
-            <h3>Start or select a conversation</h3>
-            <p>Choose a thread on the left, then continue the conversation in the center column.</p>
-          </div>
-        </div>
-
-        <div class="composer-wrap">
-          <div class="composer">
-            <textarea id="msg-input" placeholder="Type your message here. Use Ctrl+Enter to send." onkeydown="handleInputKey(event)" oninput="updateComposerState()"></textarea>
-            <div class="composer-footer">
-              <div class="composer-hint">Press <strong>Ctrl+Enter</strong> to send. The center panel follows the selected conversation.</div>
-              <button id="send-btn" class="primary-btn" onclick="sendMessage()" disabled>Send Message</button>
+      <main class="workspace">
+        <section class="card workspace-shell">
+          <div class="workspace-top">
+            <div class="workspace-head">
+              <div>
+                <div class="workspace-title" id="conversation-title-heading">Operator Workspace</div>
+                <div class="workspace-subtitle" id="conversation-context">Create or select a conversation to start a background run.</div>
+                <div class="header-chips" id="conversation-header-badges"></div>
+              </div>
+              <div class="menu-wrap">
+                <button class="ghost-btn" id="actions-menu-btn" onclick="toggleActionsMenu()">Actions</button>
+                <div class="menu" id="actions-menu">
+                  <button class="ghost-btn" onclick="compactConversation()" id="compact-btn" disabled>Compact Context</button>
+                  <button class="ghost-btn" onclick="openHistory()" id="history-btn" disabled>Show History</button>
+                  <button class="ghost-btn" onclick="toggleArchiveConversation()" id="archive-btn" disabled>Archive Conversation</button>
+                  <button class="ghost-btn" onclick="exportConversationSummary()" id="export-btn" disabled>Export Summary</button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div id="status-bar">Ready</div>
+          <div class="transcript" id="messages">
+            <div class="empty-state">
+              <h3>Start or select a conversation</h3>
+              <p>Choose a thread on the left, queue a recipe or MCP selection if needed, then send a prompt. Runs execute asynchronously and stream status below.</p>
+            </div>
+          </div>
+
+          <div class="operations">
+            <section class="panel-block">
+              <div class="panel-block-head">
+                <h3>Request Status</h3>
+                <div class="status-chip" id="request-status-chip">idle</div>
+              </div>
+              <div class="panel-block-body">
+                <div class="metric-row">
+                  <div class="metric">
+                    <div class="metric-label">Request</div>
+                    <div class="metric-value" id="request-metric-state">Idle</div>
+                  </div>
+                  <div class="metric">
+                    <div class="metric-label">Job Id</div>
+                    <div class="metric-value" id="request-metric-job">None</div>
+                  </div>
+                  <div class="metric">
+                    <div class="metric-label">Events</div>
+                    <div class="metric-value" id="request-metric-events">0</div>
+                  </div>
+                  <div class="metric">
+                    <div class="metric-label">Last Event</div>
+                    <div class="metric-value" id="request-metric-last">Waiting</div>
+                  </div>
+                </div>
+                <div class="event-list" id="request-events"></div>
+              </div>
+            </section>
+
+            <section class="panel-block">
+              <div class="panel-block-head">
+                <h3>Tracked Jobs</h3>
+                <div class="status-chip" id="jobs-status-chip">0 jobs</div>
+              </div>
+              <div class="panel-block-body">
+                <div class="job-list" id="jobs-list"></div>
+              </div>
+            </section>
+
+            <section class="panel-block">
+              <div class="panel-block-head">
+                <h3>Recipe Selection</h3>
+                <div class="status-chip" id="recipe-status-chip">none queued</div>
+              </div>
+              <div class="panel-block-body">
+                <div class="recipe-list" id="recipe-list"></div>
+              </div>
+            </section>
+
+            <section class="panel-block composer">
+              <div class="panel-block-head">
+                <h3>Message Composer</h3>
+                <div class="status-chip" id="composer-status-chip">ready</div>
+              </div>
+              <div class="panel-block-body">
+                <textarea id="msg-input" placeholder="Type your prompt here. Ctrl+Enter sends a background turn." onkeydown="handleInputKey(event)" oninput="updateComposerState()"></textarea>
+                <div class="composer-footer">
+                  <div class="composer-hint" id="composer-hint">Create or select a conversation first. Sending starts a background job and locks the composer until completion.</div>
+                  <button id="send-btn" class="primary-btn" onclick="sendMessage()" disabled>Send</button>
+                </div>
+                <div class="status-line" id="status-bar">Ready</div>
+              </div>
+            </section>
+          </div>
+        </section>
       </main>
-
-      <aside class="panel">
-        <div class="panel-header">
-          <h2>MCP Servers</h2>
-          <p>Conversation-scoped MCP availability with enabled or disabled status.</p>
-        </div>
-        <div class="mcp-body">
-          <div class="mcp-actions">
-            <button class="secondary-btn" onclick="resetMcpServers()" id="mcp-reset-btn" disabled>Enable All</button>
-          </div>
-          <div id="mcp-list"></div>
-        </div>
-      </aside>
     </div>
   </div>
 
 <script>
 let currentConvoId = null;
-let currentConvoArchived = false;
 let currentConvoTitle = '';
-let currentFindings = [];
-let pollTimer = null;
+let currentConvoArchived = false;
+let currentMessages = [];
+let currentRecipes = [];
+let currentRecipeName = null;
+let currentJobs = [];
+let currentMcpStatuses = [];
+let currentConfig = '';
+let currentOAuthServers = [];
+let conversationSummaries = [];
+let requestEvents = [];
 let activeJobId = null;
+let activeJobKind = null;
+let activeConversationJobs = {};
+let pollTimer = null;
 let persistentWarning = '';
 
 async function api(method, path, body) {
@@ -858,11 +1207,13 @@ async function api(method, path, body) {
   return res.json();
 }
 
-function escHtml(s) {
-  return String(s)
+function escHtml(value) {
+  return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function shortId(id) {
@@ -870,8 +1221,15 @@ function shortId(id) {
 }
 
 function formatTime(ts) {
+  if (!ts) return 'unknown';
   const date = new Date(ts);
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function truncate(value, limit) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 
 function createEmptyState(title, description) {
@@ -883,7 +1241,7 @@ function createEmptyState(title, description) {
 
 function createCollectionEmptyState(message) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'collection-empty';
+  wrapper.className = 'job-item';
   wrapper.textContent = message;
   return wrapper;
 }
@@ -892,90 +1250,170 @@ function setStatus(msg, spinning) {
   const bar = document.getElementById('status-bar');
   const sidebar = document.getElementById('sidebar-status');
   const showWarning = !spinning && persistentWarning && !msg.toLowerCase().startsWith('error');
-  const statusText = showWarning ? `Warning: ${persistentWarning}` : msg;
-  bar.innerHTML = spinning
-    ? `<span class="spinner">⣾</span><span>${escHtml(msg)}</span>`
-    : escHtml(statusText);
-  sidebar.textContent = spinning ? 'Working' : statusText.toLowerCase().startsWith('error') ? 'Error' : showWarning ? 'Warning' : 'Ready';
+  const text = showWarning ? `Warning: ${persistentWarning}` : msg;
+  bar.innerHTML = spinning ? `<span class="spinner">⣾</span><span>${escHtml(text)}</span>` : escHtml(text);
+  sidebar.textContent = spinning ? 'Working' : text.toLowerCase().startsWith('error') ? 'Error' : showWarning ? 'Warning' : 'Ready';
 }
 
-function toggleDrawer() {
-  document.getElementById('utility-drawer').classList.toggle('open');
-  document.getElementById('drawer-backdrop').classList.toggle('open');
+function closeAllOverlays() {
+  closeSettings();
+  closeHistory();
+  closeActionsMenu();
 }
 
-function closeDrawer() {
-  document.getElementById('utility-drawer').classList.remove('open');
-  document.getElementById('drawer-backdrop').classList.remove('open');
+function setBackdrop(open) {
+  document.getElementById('modal-backdrop').classList.toggle('open', open);
 }
+
+function openSettings() {
+  document.getElementById('settings-sheet').classList.add('open');
+  setBackdrop(true);
+  loadConfig();
+  loadOAuthServers();
+  renderMcpStatuses(currentMcpStatuses);
+}
+
+function closeSettings() {
+  document.getElementById('settings-sheet').classList.remove('open');
+  if (!document.getElementById('history-modal').classList.contains('open')) {
+    setBackdrop(false);
+  }
+}
+
+function openHistory() {
+  document.getElementById('history-modal').classList.add('open');
+  setBackdrop(true);
+  renderHistory();
+}
+
+function closeHistory() {
+  document.getElementById('history-modal').classList.remove('open');
+  if (!document.getElementById('settings-sheet').classList.contains('open')) {
+    setBackdrop(false);
+  }
+}
+
+function toggleActionsMenu() {
+  document.getElementById('actions-menu').classList.toggle('open');
+}
+
+function closeActionsMenu() {
+  document.getElementById('actions-menu').classList.remove('open');
+}
+
+window.addEventListener('click', event => {
+  const menu = document.getElementById('actions-menu');
+  const button = document.getElementById('actions-menu-btn');
+  if (!menu.contains(event.target) && event.target !== button) {
+    closeActionsMenu();
+  }
+});
+
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    closeAllOverlays();
+  }
+});
+
+window.addEventListener('message', event => {
+  if (event.data?.type === 'rusty-bidule-oauth-complete') {
+    setStatus(`OAuth callback received for ${event.data.server}`);
+    document.getElementById('oauth-status-chip').textContent = 'callback';
+  }
+});
 
 function updateConversationContext() {
-  document.getElementById('conversation-title-heading').textContent = currentConvoTitle || 'Focused, readable transcript';
+  const summary = conversationSummaries.find(item => item.conversation_id === currentConvoId);
+  currentRecipeName = summary?.pending_recipe || currentRecipeName || null;
+  document.getElementById('conversation-title-heading').textContent = currentConvoTitle || 'Operator Workspace';
   document.getElementById('conversation-context').textContent = currentConvoId
-    ? `${shortId(currentConvoId)}${currentConvoArchived ? ' · archived' : ''}`
-    : 'No conversation selected';
-  document.getElementById('conversation-caption').textContent = currentConvoTitle || (currentConvoId ? shortId(currentConvoId) : 'No conversation selected');
-  document.getElementById('conversation-title-input').value = currentConvoTitle;
-  document.getElementById('title-save-btn').disabled = !currentConvoId;
+    ? `${shortId(currentConvoId)}${currentConvoArchived ? ' · archived' : ''} · ${summary?.preview ? 'active workspace' : 'ready for first prompt'}`
+    : 'Create or select a conversation to start a background run.';
   document.getElementById('archive-btn').disabled = !currentConvoId;
   document.getElementById('archive-btn').textContent = currentConvoArchived ? 'Restore Conversation' : 'Archive Conversation';
   document.getElementById('export-btn').disabled = !currentConvoId;
+  document.getElementById('history-btn').disabled = !currentConvoId;
+  document.getElementById('compact-btn').disabled = !currentConvoId || Boolean(activeJobId);
+  document.getElementById('mcp-reset-btn').disabled = !currentConvoId;
+  document.getElementById('mcp-settings-chip').textContent = currentConvoId ? `${currentMcpStatuses.length} configured` : 'select thread';
+  renderHeaderBadges(summary);
+  updateComposerState();
+}
+
+function renderHeaderBadges(summary) {
+  const container = document.getElementById('conversation-header-badges');
+  container.innerHTML = '';
+  if (!currentConvoId) return;
+
+  const chips = [
+    ['ID', shortId(currentConvoId)],
+    ['Msgs', String(currentMessages.length)],
+  ];
+  if (summary?.pending_recipe) chips.push(['Recipe', summary.pending_recipe]);
+  if (summary?.active_compaction) chips.push(['Ctx', 'Compacted']);
+  if (summary?.enabled_mcp_servers !== null && summary?.enabled_mcp_servers !== undefined) {
+    chips.push(['MCP', `${summary.enabled_mcp_servers.length} enabled`]);
+  }
+  if (activeConversationJobs[currentConvoId]) chips.push(['Run', activeConversationJobs[currentConvoId].kind]);
+
+  for (const [label, value] of chips) {
+    const chip = document.createElement('div');
+    chip.className = 'status-chip';
+    chip.textContent = `${label}: ${value}`;
+    container.appendChild(chip);
+  }
 }
 
 function updateComposerState() {
   const input = document.getElementById('msg-input');
-  document.getElementById('send-btn').disabled = !currentConvoId || !input.value.trim() || Boolean(activeJobId);
-}
-
-function updateUtilityState() {
-  const hasConversation = Boolean(currentConvoId);
-  for (const id of [
-    'scratchpad-input', 'scratchpad-save-btn', 'scratchpad-clear-btn',
-    'finding-filter-text', 'finding-filter-tag', 'finding-filter-confidence',
-    'finding-kind', 'finding-value', 'finding-note', 'finding-tags',
-    'finding-confidence', 'finding-artifact', 'finding-add-btn',
-    'search-input', 'search-btn'
-  ]) {
-    document.getElementById(id).disabled = !hasConversation;
-  }
-  document.getElementById('mcp-reset-btn').disabled = !hasConversation;
+  const disabled = !currentConvoId || !input.value.trim() || Boolean(activeJobId);
+  document.getElementById('send-btn').disabled = disabled;
+  document.getElementById('msg-input').disabled = !currentConvoId || Boolean(activeJobId);
+  document.getElementById('composer-status-chip').textContent = activeJobId ? 'working' : currentConvoId ? 'ready' : 'select thread';
+  document.getElementById('composer-hint').textContent = !currentConvoId
+    ? 'Create or select a conversation first. Sending starts a background job and locks the composer until completion.'
+    : activeJobId
+      ? `Background ${activeJobKind || 'job'} ${shortId(activeJobId)} is running. Composer will unlock on completion.`
+      : 'Ctrl+Enter sends a background turn. The request-status panel below follows tool and run events live.';
 }
 
 async function loadConversations() {
   try {
-    const convos = await api('GET', '/conversations?include_archived=true');
-    const list = document.getElementById('conversation-list');
-    list.innerHTML = '';
-    const activeConvos = convos.filter(convo => !convo.archived_at);
-    const archivedConvos = convos.filter(convo => convo.archived_at);
-    document.getElementById('conversation-count').textContent = String(activeConvos.length);
-
-    if (!convos.length) {
+    conversationSummaries = await api('GET', '/conversations?include_archived=true');
+    renderConversationGroups(conversationSummaries);
+    const activeCount = conversationSummaries.filter(item => !item.archived_at).length;
+    document.getElementById('conversation-count').textContent = String(activeCount);
+    if (currentConvoId && !conversationSummaries.some(item => item.conversation_id === currentConvoId)) {
+      currentConvoId = null;
       currentConvoTitle = '';
       currentConvoArchived = false;
-      list.appendChild(createEmptyState('No conversations yet', 'Create a new thread to start working in the browser interface.'));
-      updateConversationContext();
-      updateComposerState();
-      updateUtilityState();
-      return;
+      currentMessages = [];
     }
-
-    renderConversationGroup(list, 'Active', activeConvos);
-    renderConversationGroup(list, 'Archived', archivedConvos);
     updateConversationContext();
-    updateComposerState();
-    updateUtilityState();
   } catch (e) {
     setStatus('Error loading conversations: ' + e.message);
   }
 }
 
+function renderConversationGroups(conversations) {
+  const list = document.getElementById('conversation-list');
+  list.innerHTML = '';
+
+  if (!conversations.length) {
+    list.appendChild(createEmptyState('No conversations yet', 'Start a thread to open the operator workspace.'));
+    return;
+  }
+
+  const active = conversations.filter(item => !item.archived_at);
+  const archived = conversations.filter(item => item.archived_at);
+  renderConversationGroup(list, 'Active', active);
+  renderConversationGroup(list, 'Archived', archived);
+}
+
 function renderConversationGroup(container, label, conversations) {
   if (!conversations.length) return;
-
   const group = document.createElement('section');
   group.className = 'conversation-group';
-
   const heading = document.createElement('div');
   heading.className = 'group-label';
   heading.textContent = label;
@@ -989,8 +1427,8 @@ function renderConversationGroup(container, label, conversations) {
       switchConversation(convo.conversation_id);
     };
 
-    const top = document.createElement('div');
-    top.className = 'conversation-top';
+    const head = document.createElement('div');
+    head.className = 'conversation-head';
 
     const left = document.createElement('div');
     const title = document.createElement('div');
@@ -999,21 +1437,36 @@ function renderConversationGroup(container, label, conversations) {
     const id = document.createElement('div');
     id.className = 'conversation-id';
     id.textContent = convo.conversation_id;
-    const meta = document.createElement('div');
-    meta.className = 'conversation-meta';
-    meta.textContent = convo.archived_at
+    const time = document.createElement('div');
+    time.className = 'conversation-time';
+    time.textContent = convo.archived_at
       ? `Archived ${formatTime(convo.archived_at)} · ${convo.message_count} msgs`
       : `Updated ${formatTime(convo.updated_at)} · ${convo.message_count} msgs`;
+    const preview = document.createElement('div');
+    preview.className = 'conversation-preview';
+    preview.textContent = convo.preview || 'No transcript yet.';
+
     left.appendChild(title);
     left.appendChild(id);
-    left.appendChild(meta);
+    left.appendChild(time);
+    left.appendChild(preview);
+    head.appendChild(left);
+    card.appendChild(head);
 
-    top.appendChild(left);
-    card.appendChild(top);
+    const badges = document.createElement('div');
+    badges.className = 'conversation-badges';
+    if (convo.pending_recipe) badges.appendChild(createBadge('Recipe', 'recipe'));
+    if (convo.active_compaction) badges.appendChild(createBadge('Ctx', 'ctx'));
+    if (convo.enabled_mcp_servers !== null && convo.enabled_mcp_servers !== undefined) {
+      badges.appendChild(createBadge(`MCP ${convo.enabled_mcp_servers.length}`, 'mcp'));
+    }
+    if (activeConversationJobs[convo.conversation_id]) {
+      badges.appendChild(createBadge(activeConversationJobs[convo.conversation_id].kind, 'run'));
+    }
+    if (badges.childNodes.length) card.appendChild(badges);
 
     const actions = document.createElement('div');
-    actions.className = 'conversation-actions';
-
+    actions.className = 'conversation-card-actions';
     const rename = document.createElement('button');
     rename.className = 'tiny-btn';
     rename.textContent = 'Rename';
@@ -1021,7 +1474,6 @@ function renderConversationGroup(container, label, conversations) {
       event.stopPropagation();
       await promptRenameConversation(convo);
     };
-
     const remove = document.createElement('button');
     remove.className = 'tiny-btn';
     remove.textContent = 'Delete';
@@ -1029,7 +1481,6 @@ function renderConversationGroup(container, label, conversations) {
       event.stopPropagation();
       await deleteConversation(convo.conversation_id);
     };
-
     actions.appendChild(rename);
     actions.appendChild(remove);
     card.appendChild(actions);
@@ -1039,6 +1490,13 @@ function renderConversationGroup(container, label, conversations) {
   container.appendChild(group);
 }
 
+function createBadge(text, type) {
+  const badge = document.createElement('span');
+  badge.className = `badge ${type}`;
+  badge.textContent = text;
+  return badge;
+}
+
 async function newConversation() {
   try {
     setStatus('Creating conversation...', true);
@@ -1046,8 +1504,12 @@ async function newConversation() {
     currentConvoId = convo.conversation_id;
     currentConvoTitle = '';
     currentConvoArchived = false;
+    currentMessages = [];
+    requestEvents = [];
+    activeJobId = null;
+    activeJobKind = null;
     persistentWarning = '';
-    await loadConversations();
+    await Promise.all([loadConversations(), loadRecipes()]);
     await loadConversationState();
     document.getElementById('msg-input').focus();
     setStatus('Conversation ready');
@@ -1059,8 +1521,10 @@ async function newConversation() {
 async function switchConversation(id) {
   currentConvoId = id;
   persistentWarning = '';
+  requestEvents = [];
+  renderRequestStatus();
   setStatus('Loading conversation...', true);
-  await loadConversations();
+  await Promise.all([loadConversations(), loadRecipes()]);
   await loadConversationState();
   setStatus('Conversation loaded');
 }
@@ -1074,7 +1538,6 @@ async function promptRenameConversation(convo) {
       currentConvoTitle = next.trim();
     }
     await loadConversations();
-    updateConversationContext();
     setStatus(next.trim() ? 'Conversation renamed' : 'Conversation title cleared');
   } catch (e) {
     setStatus('Error renaming conversation: ' + e.message);
@@ -1085,21 +1548,25 @@ async function deleteConversation(conversationId) {
   if (!window.confirm(`Delete ${conversationId}?`)) return;
   try {
     await api('DELETE', `/conversations/${conversationId}`);
+    delete activeConversationJobs[conversationId];
     if (conversationId === currentConvoId) {
       currentConvoId = null;
       currentConvoTitle = '';
       currentConvoArchived = false;
-      currentFindings = [];
+      currentMessages = [];
+      currentJobs = [];
+      currentMcpStatuses = [];
+      requestEvents = [];
+      activeJobId = null;
+      activeJobKind = null;
       renderMessages([]);
-      renderFindings([]);
+      renderJobs([]);
       renderMcpStatuses([]);
+      renderRequestStatus();
+      renderHistory();
     }
     await loadConversations();
-    if (!currentConvoId) {
-      updateConversationContext();
-      updateComposerState();
-      updateUtilityState();
-    }
+    updateComposerState();
     setStatus('Conversation deleted');
   } catch (e) {
     setStatus('Error deleting conversation: ' + e.message);
@@ -1108,35 +1575,35 @@ async function deleteConversation(conversationId) {
 
 async function loadConversationState() {
   if (!currentConvoId) {
-    currentFindings = [];
     renderMessages([]);
-    renderFindings([]);
+    renderJobs([]);
     renderMcpStatuses([]);
-    clearSearchResults('Search local conversations, scratchpads, and findings.');
+    renderHistory();
     updateConversationContext();
     updateComposerState();
-    updateUtilityState();
     return;
   }
 
   await Promise.all([
     loadMessages(),
-    loadScratchpad(),
-    loadFindings(),
+    loadJobs(),
     loadMcpStatuses(),
+    loadRecipes(),
   ]);
   updateConversationContext();
-  updateComposerState();
-  updateUtilityState();
+  renderHistory();
 }
 
 async function loadMessages() {
-  if (!currentConvoId) return;
   try {
     const convo = await api('GET', `/conversations/${currentConvoId}`);
     currentConvoTitle = convo.title || '';
     currentConvoArchived = Boolean(convo.archived_at);
-    renderMessages(convo.messages || []);
+    currentMessages = convo.messages || [];
+    currentRecipeName = convo.pending_recipe || null;
+    renderMessages(currentMessages);
+    renderHistory();
+    renderRecipes(currentRecipes);
   } catch (e) {
     setStatus('Error loading messages: ' + e.message);
   }
@@ -1147,32 +1614,38 @@ function renderMessages(messages) {
   container.innerHTML = '';
 
   if (!messages.length) {
-    container.appendChild(createEmptyState('No messages yet', 'Write the first prompt in the center composer to start the conversation.'));
+    container.appendChild(createEmptyState('No messages yet', 'Queue a recipe if useful, then send the first prompt from the composer.'));
     return;
   }
 
   for (const msg of messages) {
     const div = document.createElement('article');
-    div.className = 'message ' + msg.role;
+    div.className = `message ${msg.role}`;
 
     const top = document.createElement('div');
     top.className = 'message-top';
-
     const role = document.createElement('div');
     role.className = 'role-tag';
-    role.textContent = msg.role === 'user' ? 'You' : 'Assistant';
+    role.textContent = msg.role === 'user' ? 'Operator' : 'Assistant';
     top.appendChild(role);
 
+    const meta = document.createElement('div');
+    meta.className = 'meta';
     if (msg.metadata) {
-      const meta = document.createElement('div');
-      meta.className = 'meta';
       meta.textContent = `#${msg.metadata.assistant_index} · ${msg.metadata.timing.total_seconds.toFixed(1)}s · ${msg.metadata.tool_call_count} tools`;
-      top.appendChild(meta);
+    } else {
+      meta.textContent = formatTime(msg.timestamp);
     }
+    top.appendChild(meta);
 
     const content = document.createElement('div');
-    content.className = 'content';
-    content.textContent = msg.content;
+    if (msg.role === 'assistant') {
+      content.className = 'markdown-body';
+      content.innerHTML = renderMarkdown(msg.content);
+    } else {
+      content.className = 'content';
+      content.textContent = msg.content;
+    }
 
     div.appendChild(top);
     div.appendChild(content);
@@ -1180,6 +1653,42 @@ function renderMessages(messages) {
   }
 
   container.scrollTop = container.scrollHeight;
+}
+
+function renderHistory() {
+  const container = document.getElementById('history-body');
+  container.innerHTML = '';
+  document.getElementById('history-caption').textContent = currentConvoId
+    ? `${currentConvoTitle || shortId(currentConvoId)} · ${currentMessages.length} messages`
+    : 'Full transcript for the selected conversation.';
+
+  if (!currentConvoId) {
+    container.appendChild(createEmptyState('No conversation selected', 'Pick a conversation in the sidebar to inspect the full transcript.'));
+    return;
+  }
+
+  if (!currentMessages.length) {
+    container.appendChild(createEmptyState('No transcript yet', 'The first prompt will populate history here.'));
+    return;
+  }
+
+  for (const msg of currentMessages) {
+    const item = document.createElement('article');
+    item.className = `history-message ${msg.role}`;
+    const head = document.createElement('div');
+    head.className = 'message-top';
+    head.innerHTML = `<div class="role-tag">${escHtml(msg.role === 'user' ? 'Operator' : 'Assistant')}</div><div class="meta">${escHtml(formatTime(msg.timestamp))}</div>`;
+    const body = document.createElement('div');
+    body.className = msg.role === 'assistant' ? 'markdown-body' : 'content';
+    if (msg.role === 'assistant') {
+      body.innerHTML = renderMarkdown(msg.content);
+    } else {
+      body.textContent = msg.content;
+    }
+    item.appendChild(head);
+    item.appendChild(body);
+    container.appendChild(item);
+  }
 }
 
 function handleInputKey(event) {
@@ -1196,27 +1705,64 @@ async function sendMessage() {
   if (!content) return;
 
   input.value = '';
+  requestEvents = [];
+  activeJobKind = 'turn';
   updateComposerState();
+  renderRequestStatus();
   persistentWarning = '';
   setStatus('Sending message...', true);
 
   try {
     const result = await api('POST', `/conversations/${currentConvoId}/messages`, { content });
     activeJobId = result.job_id;
+    activeConversationJobs[currentConvoId] = { jobId: activeJobId, kind: 'run' };
     updateComposerState();
+    renderRequestStatus();
+    await loadConversations();
     pollJob(activeJobId);
   } catch (e) {
     activeJobId = null;
+    activeJobKind = null;
+    delete activeConversationJobs[currentConvoId];
     updateComposerState();
+    renderRequestStatus();
     setStatus('Error: ' + e.message);
+  }
+}
+
+async function compactConversation() {
+  closeActionsMenu();
+  if (!currentConvoId || activeJobId) return;
+  requestEvents = [];
+  activeJobKind = 'compact';
+  renderRequestStatus();
+  updateComposerState();
+  setStatus('Compacting conversation...', true);
+  try {
+    const result = await api('POST', `/conversations/${currentConvoId}/compact`);
+    activeJobId = result.job_id;
+    activeConversationJobs[currentConvoId] = { jobId: activeJobId, kind: 'compact' };
+    updateComposerState();
+    renderRequestStatus();
+    await loadConversations();
+    pollJob(activeJobId);
+  } catch (e) {
+    activeJobId = null;
+    activeJobKind = null;
+    delete activeConversationJobs[currentConvoId];
+    updateComposerState();
+    renderRequestStatus();
+    setStatus('Error compacting conversation: ' + e.message);
   }
 }
 
 async function pollJob(jobId) {
   try {
     const job = await api('GET', `/jobs/${jobId}`);
+    requestEvents = job.events || [];
+    renderRequestStatus(job);
     const toolLimitEvent = job.events.findLast?.(event => event.type === 'tool_limit')
-      || [...job.events].reverse().find(event => event.type === 'tool_limit');
+      || [...(job.events || [])].reverse().find(event => event.type === 'tool_limit');
     persistentWarning = toolLimitEvent ? toolLimitEvent.message : persistentWarning;
 
     if (job.status === 'running') {
@@ -1228,8 +1774,10 @@ async function pollJob(jobId) {
 
     clearTimeout(pollTimer);
     activeJobId = null;
-    await loadConversationState();
+    delete activeConversationJobs[currentConvoId];
+    await Promise.all([loadConversationState(), loadConversations()]);
     updateComposerState();
+    renderRequestStatus(job);
 
     if (job.status === 'done') {
       const toolInfo = job.result ? `${job.result.tool_calls} tool calls` : 'No tool calls';
@@ -1237,28 +1785,53 @@ async function pollJob(jobId) {
     } else {
       setStatus('Error: ' + (job.error || 'unknown error'));
     }
+    activeJobKind = null;
   } catch (e) {
     activeJobId = null;
+    delete activeConversationJobs[currentConvoId];
+    activeJobKind = null;
     updateComposerState();
+    renderRequestStatus();
     setStatus('Poll error: ' + e.message);
   }
 }
 
-async function saveConversationTitle() {
-  if (!currentConvoId) return;
-  const title = document.getElementById('conversation-title-input').value.trim();
-  try {
-    const updated = await api('PUT', `/conversations/${currentConvoId}`, { title: title || null });
-    currentConvoTitle = updated.title || '';
-    await loadConversations();
-    updateConversationContext();
-    setStatus(currentConvoTitle ? 'Conversation title updated' : 'Conversation title cleared');
-  } catch (e) {
-    setStatus('Error saving conversation title: ' + e.message);
+function renderRequestStatus(job) {
+  document.getElementById('request-status-chip').textContent = activeJobId
+    ? activeJobKind === 'compact' ? 'compacting' : 'running'
+    : job?.status || 'idle';
+  document.getElementById('request-metric-state').textContent = activeJobId
+    ? activeJobKind === 'compact' ? 'Compacting' : 'Running'
+    : job?.status ? job.status[0].toUpperCase() + job.status.slice(1) : 'Idle';
+  document.getElementById('request-metric-job').textContent = activeJobId ? shortId(activeJobId) : job ? shortId(job.job_id || '') : 'None';
+  document.getElementById('request-metric-events').textContent = String(requestEvents.length);
+  document.getElementById('request-metric-last').textContent = requestEvents.length
+    ? truncate(requestEvents[requestEvents.length - 1].message, 32)
+    : 'Waiting';
+
+  const list = document.getElementById('request-events');
+  list.innerHTML = '';
+  if (!requestEvents.length) {
+    list.appendChild(createCollectionEmptyState(currentConvoId ? 'No live events yet.' : 'Select a conversation to track requests.'));
+    return;
+  }
+
+  for (const event of [...requestEvents].reverse().slice(0, 20)) {
+    const item = document.createElement('article');
+    item.className = 'event-item';
+    item.innerHTML = `
+      <div class="row-between">
+        <div class="event-kind">${escHtml(event.type || event.kind || 'event')}</div>
+        <div class="meta">${escHtml(event.tool_name || '')}</div>
+      </div>
+      <div class="event-message">${escHtml(event.message || '')}</div>
+    `;
+    list.appendChild(item);
   }
 }
 
 async function toggleArchiveConversation() {
+  closeActionsMenu();
   if (!currentConvoId) return;
   try {
     if (currentConvoArchived) {
@@ -1278,321 +1851,178 @@ async function toggleArchiveConversation() {
 }
 
 async function exportConversationSummary() {
+  closeActionsMenu();
   if (!currentConvoId) return;
   try {
     const result = await api('POST', `/conversations/${currentConvoId}/export-summary`);
-    setStatus(`Session summary exported to ${result.saved_to}`);
+    setStatus(`Summary exported to ${result.saved_to}`);
   } catch (e) {
-    setStatus('Error exporting session summary: ' + e.message);
+    setStatus('Error exporting summary: ' + e.message);
   }
 }
 
-async function loadScratchpad() {
-  if (!currentConvoId) return;
+async function loadJobs() {
+  if (!currentConvoId) {
+    currentJobs = [];
+    renderJobs([]);
+    return;
+  }
   try {
-    const scratchpad = await api('GET', `/conversations/${currentConvoId}/scratchpad`);
-    document.getElementById('scratchpad-input').value = scratchpad.body || '';
+    currentJobs = await api('GET', `/conversations/${currentConvoId}/jobs`) || [];
+    renderJobs(currentJobs);
   } catch (e) {
-    setStatus('Error loading scratchpad: ' + e.message);
+    currentJobs = [];
+    renderJobs([]);
+    setStatus('Error loading jobs: ' + e.message);
   }
 }
 
-async function saveScratchpad() {
-  if (!currentConvoId) return;
-  try {
-    await api('PUT', `/conversations/${currentConvoId}/scratchpad`, {
-      body: document.getElementById('scratchpad-input').value,
-    });
-    setStatus('Scratchpad saved');
-  } catch (e) {
-    setStatus('Error saving scratchpad: ' + e.message);
-  }
-}
-
-async function clearScratchpad() {
-  if (!currentConvoId) return;
-  document.getElementById('scratchpad-input').value = '';
-  await saveScratchpad();
-}
-
-async function loadFindings() {
-  if (!currentConvoId) return;
-  try {
-    currentFindings = await api('GET', `/conversations/${currentConvoId}/findings`) || [];
-    applyFindingFilters();
-  } catch (e) {
-    setStatus('Error loading findings: ' + e.message);
-  }
-}
-
-function renderFindings(findings) {
-  const list = document.getElementById('findings-list');
+function renderJobs(jobs) {
+  const list = document.getElementById('jobs-list');
   list.innerHTML = '';
-  const total = currentFindings.length;
-  document.getElementById('findings-status').textContent = currentConvoId
-    ? findings.length === total ? `${total} stored` : `${findings.length}/${total} shown`
-    : 'select thread';
+  const total = jobs.length + (activeJobId ? 1 : 0);
+  document.getElementById('jobs-status-chip').textContent = `${total} job${total === 1 ? '' : 's'}`;
 
   if (!currentConvoId) {
-    list.appendChild(createCollectionEmptyState('Select a conversation to view findings.'));
+    list.appendChild(createCollectionEmptyState('Select a conversation to inspect remembered jobs and background work.'));
     return;
   }
 
-  if (!findings.length) {
-    list.appendChild(createCollectionEmptyState('No findings match the current filter.'));
-    return;
-  }
-
-  for (const finding of findings) {
+  if (activeJobId) {
     const item = document.createElement('article');
-    item.className = 'finding-item';
+    item.className = 'job-item';
+    item.innerHTML = `
+      <div class="job-head">
+        <div>
+          <div class="job-status">Live Web Job</div>
+          <div class="job-meta">${escHtml(shortId(activeJobId))} · ${escHtml(activeJobKind || 'run')}</div>
+        </div>
+        <span class="badge run">running</span>
+      </div>
+    `;
+    list.appendChild(item);
+  }
 
-    const head = document.createElement('div');
-    head.className = 'finding-head';
+  if (!jobs.length) {
+    if (!activeJobId) {
+      list.appendChild(createCollectionEmptyState('No remembered jobs for this conversation.'));
+    }
+    return;
+  }
 
-    const meta = document.createElement('div');
-    const kind = document.createElement('input');
-    kind.className = 'finding-kind';
-    kind.value = finding.kind || '';
-    kind.placeholder = 'kind';
-
-    const value = document.createElement('input');
-    value.className = 'finding-value';
-    value.value = finding.value || '';
-    value.placeholder = 'value';
-
-    meta.appendChild(kind);
-    meta.appendChild(value);
-
-    const remove = document.createElement('button');
-    remove.className = 'tiny-btn';
-    remove.textContent = 'Remove';
-    remove.onclick = () => removeFinding(finding.finding_id);
-
-    head.appendChild(meta);
-    head.appendChild(remove);
-    item.appendChild(head);
-
-    const fields = document.createElement('div');
-    fields.className = 'finding-fields';
-
-    const note = document.createElement('input');
-    note.value = finding.note || '';
-    note.placeholder = 'note';
-
-    const tags = document.createElement('input');
-    tags.value = (finding.tags || []).join(', ');
-    tags.placeholder = 'tags';
-
-    const confidence = document.createElement('input');
-    confidence.value = finding.confidence ?? '';
-    confidence.placeholder = 'confidence 0-100';
-
-    const artifact = document.createElement('input');
-    artifact.value = finding.source_artifact || '';
-    artifact.placeholder = 'source artifact';
-
-    const actions = document.createElement('div');
-    actions.className = 'inline';
-
-    const save = document.createElement('button');
-    save.className = 'secondary-btn';
-    save.textContent = 'Save';
-    save.onclick = async () => {
-      try {
-        await updateFinding(finding.finding_id, {
-          kind: kind.value.trim(),
-          value: value.value.trim(),
-          note: note.value.trim() || null,
-          tags: parseTags(tags.value),
-          confidence: parseConfidence(confidence.value),
-          source_artifact: artifact.value.trim() || null,
-        });
-      } catch (e) {
-        setStatus('Error updating finding: ' + e.message);
-      }
-    };
-
-    actions.appendChild(save);
-    fields.appendChild(note);
-    fields.appendChild(tags);
-    fields.appendChild(confidence);
-    fields.appendChild(artifact);
-    fields.appendChild(actions);
-    item.appendChild(fields);
+  for (const job of jobs) {
+    const item = document.createElement('article');
+    item.className = 'job-item';
+    item.innerHTML = `
+      <div class="job-head">
+        <div>
+          <div class="job-status">${escHtml(job.alias || 'Job')}</div>
+          <div class="job-meta">${escHtml(job.status || 'unknown')} · ${escHtml(job.source_tool || 'local')} · updated ${escHtml(formatTime(job.updated_at))}</div>
+        </div>
+        <span class="status-chip">${escHtml(job.mode || 'tracked')}</span>
+      </div>
+      <div class="job-meta">${escHtml(job.notes || job.last_error || job.transaction_id || 'No extra metadata')}</div>
+    `;
     list.appendChild(item);
   }
 }
 
-function parseTags(value) {
-  return String(value || '')
-    .split(',')
-    .map(part => part.trim())
-    .filter(Boolean);
-}
-
-function parseConfidence(value) {
-  const trimmed = String(value || '').trim();
-  if (!trimmed) return undefined;
-  const parsed = Number.parseInt(trimmed, 10);
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100) {
-    throw new Error('confidence must be an integer between 0 and 100');
+async function loadRecipes() {
+  try {
+    currentRecipes = await api('GET', '/recipes') || [];
+    renderRecipes(currentRecipes);
+  } catch (e) {
+    setStatus('Error loading recipes: ' + e.message);
   }
-  return parsed;
 }
 
-function applyFindingFilters() {
-  const text = document.getElementById('finding-filter-text').value.trim().toLowerCase();
-  const tag = document.getElementById('finding-filter-tag').value.trim().toLowerCase();
-  const minConfidenceRaw = document.getElementById('finding-filter-confidence').value.trim();
-  const minConfidence = minConfidenceRaw ? Number.parseInt(minConfidenceRaw, 10) : null;
+function renderRecipes(recipes) {
+  const list = document.getElementById('recipe-list');
+  list.innerHTML = '';
+  document.getElementById('recipe-status-chip').textContent = currentRecipeName || 'none queued';
 
-  const filtered = currentFindings.filter(finding => {
-    const haystack = [
-      finding.kind,
-      finding.value,
-      finding.note || '',
-      ...(finding.tags || []),
-      finding.source_artifact || '',
-      finding.confidence ?? '',
-    ].join(' ').toLowerCase();
-    if (text && !haystack.includes(text)) return false;
-    if (tag && !(finding.tags || []).some(item => item.toLowerCase().includes(tag))) return false;
-    if (Number.isInteger(minConfidence) && (finding.confidence ?? -1) < minConfidence) return false;
-    return true;
-  });
-
-  renderFindings(filtered);
-}
-
-async function addFinding() {
-  if (!currentConvoId) return;
-  const kind = document.getElementById('finding-kind').value.trim();
-  const value = document.getElementById('finding-value').value.trim();
-  const note = document.getElementById('finding-note').value.trim();
-  if (!kind || !value) {
-    setStatus('Error: finding kind and value are required');
+  if (!currentConvoId) {
+    list.appendChild(createCollectionEmptyState('Select a conversation to queue a recipe.'));
     return;
   }
 
-  try {
-    await api('POST', `/conversations/${currentConvoId}/findings`, {
-      kind,
-      value,
-      note: note || undefined,
-      tags: parseTags(document.getElementById('finding-tags').value),
-      confidence: parseConfidence(document.getElementById('finding-confidence').value),
-      source_artifact: document.getElementById('finding-artifact').value.trim() || undefined,
-    });
-    for (const id of ['finding-kind', 'finding-value', 'finding-note', 'finding-tags', 'finding-confidence', 'finding-artifact']) {
-      document.getElementById(id).value = '';
-    }
-    await loadFindings();
-    setStatus('Finding stored');
-  } catch (e) {
-    setStatus('Error storing finding: ' + e.message);
-  }
-}
-
-async function updateFinding(findingId, payload) {
-  try {
-    await api('PUT', `/findings/${findingId}`, payload);
-    await loadFindings();
-    setStatus('Finding updated');
-  } catch (e) {
-    setStatus('Error updating finding: ' + e.message);
-  }
-}
-
-async function removeFinding(findingId) {
-  try {
-    await api('DELETE', `/findings/${findingId}`);
-    await loadFindings();
-    setStatus('Finding removed');
-  } catch (e) {
-    setStatus('Error removing finding: ' + e.message);
-  }
-}
-
-function handleSearchKey(event) {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    runSearch();
-  }
-}
-
-function clearSearchResults(message) {
-  const results = document.getElementById('search-results');
-  results.innerHTML = '';
-  results.appendChild(createCollectionEmptyState(message));
-}
-
-async function runSearch() {
-  const query = document.getElementById('search-input').value.trim();
-  if (!query) {
-    clearSearchResults('Enter a query to search local history.');
+  if (!recipes.length) {
+    list.appendChild(createCollectionEmptyState('No recipes installed.'));
     return;
   }
 
-  try {
-    const results = await api('GET', `/search?q=${encodeURIComponent(query)}`);
-    renderSearchResults(results || [], query);
-  } catch (e) {
-    setStatus('Error running search: ' + e.message);
-  }
-}
-
-function renderSearchResults(results, query) {
-  const container = document.getElementById('search-results');
-  container.innerHTML = '';
-
-  if (!results.length) {
-    container.appendChild(createCollectionEmptyState(`No local matches for "${query}".`));
-    return;
-  }
-
-  for (const result of results.slice(0, 20)) {
+  for (const recipe of recipes) {
     const item = document.createElement('article');
-    item.className = 'search-item';
+    item.className = 'recipe-item' + (recipe.name === currentRecipeName ? ' active' : '');
+    item.innerHTML = `
+      <div class="recipe-head">
+        <div>
+          <div class="recipe-title">${escHtml(recipe.title || recipe.name)}</div>
+          <div class="recipe-copy">${escHtml(recipe.description || 'No description available.')}</div>
+        </div>
+        <button class="${recipe.name === currentRecipeName ? 'ghost-btn' : 'secondary-btn'}">${recipe.name === currentRecipeName ? 'Queued' : 'Queue'}</button>
+      </div>
+    `;
+    const button = item.querySelector('button');
+    button.onclick = async () => {
+      if (recipe.name === currentRecipeName) return;
+      await useRecipe(recipe.name);
+    };
 
-    const head = document.createElement('div');
-    head.className = 'search-head';
+    if (recipe.name === currentRecipeName) {
+      const clear = document.createElement('button');
+      clear.className = 'tiny-btn';
+      clear.textContent = 'Clear';
+      clear.onclick = async () => clearRecipe();
+      item.appendChild(clear);
+    }
+    list.appendChild(item);
+  }
+}
 
-    const scope = document.createElement('div');
-    scope.className = 'search-scope';
-    scope.textContent = result.scope;
+async function useRecipe(name) {
+  if (!currentConvoId) return;
+  try {
+    await api('POST', `/conversations/${currentConvoId}/recipe`, { name });
+    currentRecipeName = name;
+    await loadConversations();
+    renderRecipes(currentRecipes);
+    updateConversationContext();
+    setStatus(`Queued recipe ${name}`);
+  } catch (e) {
+    setStatus('Error queuing recipe: ' + e.message);
+  }
+}
 
-    const title = document.createElement('div');
-    title.className = 'search-title';
-    title.textContent = result.title;
-
-    const snippet = document.createElement('div');
-    snippet.className = 'content';
-    snippet.style.marginTop = '8px';
-    snippet.textContent = result.snippet;
-
-    head.appendChild(scope);
-    head.appendChild(title);
-    item.appendChild(head);
-    item.appendChild(snippet);
-    container.appendChild(item);
+async function clearRecipe() {
+  if (!currentConvoId) return;
+  try {
+    await api('DELETE', `/conversations/${currentConvoId}/recipe`);
+    currentRecipeName = null;
+    await loadConversations();
+    renderRecipes(currentRecipes);
+    updateConversationContext();
+    setStatus('Recipe cleared');
+  } catch (e) {
+    setStatus('Error clearing recipe: ' + e.message);
   }
 }
 
 async function loadMcpStatuses() {
   const list = document.getElementById('mcp-list');
   list.innerHTML = '';
-
   if (!currentConvoId) {
+    currentMcpStatuses = [];
     renderMcpStatuses([]);
     return;
   }
 
   try {
-    const statuses = await api('GET', `/conversations/${currentConvoId}/mcp-statuses`);
-    renderMcpStatuses(statuses || []);
+    currentMcpStatuses = await api('GET', `/conversations/${currentConvoId}/mcp-statuses?include_counts=1`) || [];
+    renderMcpStatuses(currentMcpStatuses);
   } catch (e) {
-    list.appendChild(createCollectionEmptyState('Unable to load MCP server status.'));
+    currentMcpStatuses = [];
+    renderMcpStatuses([]);
     setStatus('Error loading MCP servers: ' + e.message);
   }
 }
@@ -1600,43 +2030,29 @@ async function loadMcpStatuses() {
 function renderMcpStatuses(statuses) {
   const list = document.getElementById('mcp-list');
   list.innerHTML = '';
-
   if (!currentConvoId) {
     list.appendChild(createCollectionEmptyState('Select a conversation to view MCP status.'));
     return;
   }
-
   if (!statuses.length) {
     list.appendChild(createCollectionEmptyState('No MCP servers configured.'));
     return;
   }
 
   for (const status of statuses) {
-    const card = document.createElement('article');
-    card.className = 'mcp-card';
-
-    const top = document.createElement('div');
-    top.className = 'mcp-top';
-
-    const meta = document.createElement('div');
-    const name = document.createElement('div');
-    name.className = 'mcp-name';
-    name.textContent = status.name;
-    const state = document.createElement('div');
-    state.className = 'mcp-status ' + (status.enabled ? 'status-enabled' : 'status-disabled');
-    state.textContent = status.enabled ? 'Enabled' : 'Disabled';
-    meta.appendChild(name);
-    meta.appendChild(state);
-
-    const toggle = document.createElement('button');
-    toggle.className = status.enabled ? 'ghost-btn' : 'secondary-btn';
-    toggle.textContent = status.enabled ? 'Disable' : 'Enable';
-    toggle.onclick = () => setMcpServerEnabled(status.name, !status.enabled, statuses);
-
-    top.appendChild(meta);
-    top.appendChild(toggle);
-    card.appendChild(top);
-    list.appendChild(card);
+    const item = document.createElement('article');
+    item.className = 'mcp-item';
+    item.innerHTML = `
+      <div class="mcp-head">
+        <div>
+          <div class="mcp-name">${escHtml(status.name)}</div>
+          <div class="mcp-state">${status.enabled ? 'Enabled for this conversation' : 'Filtered out for this conversation'}${status.tool_count === undefined ? '' : ` • ${status.tool_count} tools`}</div>
+        </div>
+        <button class="${status.enabled ? 'ghost-btn' : 'secondary-btn'}">${status.enabled ? 'Disable' : 'Enable'}</button>
+      </div>
+    `;
+    item.querySelector('button').onclick = () => setMcpServerEnabled(status.name, !status.enabled, statuses);
+    list.appendChild(item);
   }
 }
 
@@ -1648,14 +2064,13 @@ async function setMcpServerEnabled(serverName, enabled, statuses) {
         if (name === serverName) return enabled;
         return statuses.find(status => status.name === name)?.enabled;
       });
-
     const allEnabled = next.length === statuses.length;
     if (allEnabled) {
       await api('DELETE', `/conversations/${currentConvoId}/mcp-servers`);
     } else {
       await api('PUT', `/conversations/${currentConvoId}/mcp-servers`, { enabled: next });
     }
-    await loadMcpStatuses();
+    await Promise.all([loadMcpStatuses(), loadConversations()]);
     setStatus(`MCP server ${enabled ? 'enabled' : 'disabled'}: ${serverName}`);
   } catch (e) {
     setStatus('Error updating MCP server filter: ' + e.message);
@@ -1666,18 +2081,218 @@ async function resetMcpServers() {
   if (!currentConvoId) return;
   try {
     await api('DELETE', `/conversations/${currentConvoId}/mcp-servers`);
-    await loadMcpStatuses();
+    await Promise.all([loadMcpStatuses(), loadConversations()]);
     setStatus('All MCP servers enabled');
   } catch (e) {
     setStatus('Error resetting MCP servers: ' + e.message);
   }
 }
 
+async function loadConfig() {
+  try {
+    const config = await api('GET', '/config');
+    currentConfig = JSON.stringify(config, null, 2);
+    document.getElementById('config-editor').value = currentConfig;
+    document.getElementById('config-status-chip').textContent = 'loaded';
+  } catch (e) {
+    document.getElementById('config-status-chip').textContent = 'error';
+    setStatus('Error loading config: ' + e.message);
+  }
+}
+
+async function saveConfig() {
+  try {
+    const parsed = JSON.parse(document.getElementById('config-editor').value);
+    const result = await api('PUT', '/config', { config: parsed });
+    document.getElementById('config-status-chip').textContent = result.reload_required ? 'saved / reload' : 'saved';
+    setStatus(`Config saved to ${result.saved_to}`);
+  } catch (e) {
+    document.getElementById('config-status-chip').textContent = 'error';
+    setStatus('Error saving config: ' + e.message);
+  }
+}
+
+async function loadOAuthServers() {
+  try {
+    currentOAuthServers = await api('GET', '/mcp/oauth-servers');
+    renderOAuthServers(currentOAuthServers);
+    document.getElementById('oauth-status-chip').textContent = currentOAuthServers.length ? `${currentOAuthServers.length} servers` : 'none';
+  } catch (e) {
+    currentOAuthServers = [];
+    renderOAuthServers([]);
+    document.getElementById('oauth-status-chip').textContent = 'error';
+    setStatus('Error loading OAuth servers: ' + e.message);
+  }
+}
+
+function renderOAuthServers(servers) {
+  const list = document.getElementById('oauth-list');
+  list.innerHTML = '';
+  if (!servers.length) {
+    list.appendChild(createCollectionEmptyState('No OAuth-enabled MCP servers configured.'));
+    return;
+  }
+
+  for (const server of servers) {
+    const item = document.createElement('article');
+    item.className = 'oauth-item';
+    item.innerHTML = `
+      <div class="oauth-head">
+        <div>
+          <div class="oauth-name">${escHtml(server.name)}</div>
+          <div class="oauth-url">${escHtml(server.url)}</div>
+        </div>
+        <button class="secondary-btn">Sign In</button>
+      </div>
+    `;
+    item.querySelector('button').onclick = async () => startOAuth(server.name);
+    list.appendChild(item);
+  }
+}
+
+async function startOAuth(serverName) {
+  const popup = window.open('', `oauth-${serverName}`, 'width=760,height=820,resizable=yes,scrollbars=yes');
+  if (popup) {
+    popup.document.write(`<title>OAuth</title><body style="background:#05070c;color:#d7fff7;font-family:IBM Plex Mono,monospace;padding:24px">Authorizing ${escHtml(serverName)}...</body>`);
+  }
+  try {
+    document.getElementById('oauth-status-chip').textContent = 'authorizing';
+    const result = await api('POST', `/mcp/oauth-servers/${encodeURIComponent(serverName)}/start`);
+    document.getElementById('oauth-status-chip').textContent = 'authorized';
+    setStatus(`OAuth completed for ${result.server}`);
+    if (popup && !popup.closed) {
+      popup.location.href = `/oauth/callback/${encodeURIComponent(serverName)}`;
+    }
+  } catch (e) {
+    document.getElementById('oauth-status-chip').textContent = 'error';
+    if (popup && !popup.closed) {
+      popup.document.body.innerHTML = `<div style="padding:24px;color:#ff6b8b">OAuth failed: ${escHtml(e.message)}</div>`;
+    }
+    setStatus('Error starting OAuth: ' + e.message);
+  }
+}
+
+function parseInlineMarkdown(text) {
+  const codes = [];
+  let html = escHtml(text).replace(/`([^`]+)`/g, (_, code) => {
+    const token = `@@CODE${codes.length}@@`;
+    codes.push(`<code>${code}</code>`);
+    return token;
+  });
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  html = html.replace(/@@CODE(\d+)@@/g, (_, index) => codes[Number(index)] || '');
+  return html;
+}
+
+function renderTable(lines) {
+  const headers = lines[0].split('|').map(part => part.trim()).filter(Boolean);
+  const rows = lines.slice(2).map(line => line.split('|').map(part => part.trim()).filter((_, index, array) => index < headers.length && array.length >= headers.length));
+  const headHtml = headers.map(cell => `<th>${parseInlineMarkdown(cell)}</th>`).join('');
+  const bodyHtml = rows.map(row => `<tr>${row.map(cell => `<td>${parseInlineMarkdown(cell)}</td>`).join('')}</tr>`).join('');
+  return `<div class="table-scroll"><table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
+}
+
+function renderMarkdown(source) {
+  const normalized = String(source || '').replace(/\r\n/g, '\n');
+  const fenceParts = [];
+  const withFences = normalized.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const token = `@@FENCE${fenceParts.length}@@`;
+    fenceParts.push(`<pre><code class="language-${escHtml(lang || 'plain')}">${escHtml(code.trimEnd())}</code></pre>`);
+    return token;
+  });
+
+  const lines = withFences.split('\n');
+  const blocks = [];
+
+  function flushParagraph(buffer) {
+    if (!buffer.length) return;
+    blocks.push(`<p>${parseInlineMarkdown(buffer.join(' '))}</p>`);
+    buffer.length = 0;
+  }
+
+  let paragraph = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      flushParagraph(paragraph);
+      continue;
+    }
+
+    if (/^@@FENCE\d+@@$/.test(trimmed)) {
+      flushParagraph(paragraph);
+      blocks.push(trimmed);
+      continue;
+    }
+
+    if (/^\|.+\|$/.test(trimmed) && i + 1 < lines.length && /^\|?[\s:-]+\|[\s|:-]*$/.test(lines[i + 1].trim())) {
+      flushParagraph(paragraph);
+      const tableLines = [trimmed, lines[i + 1].trim()];
+      i += 2;
+      while (i < lines.length && /^\|.+\|$/.test(lines[i].trim())) {
+        tableLines.push(lines[i].trim());
+        i += 1;
+      }
+      i -= 1;
+      blocks.push(renderTable(tableLines));
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,4})\s+(.*)$/);
+    if (heading) {
+      flushParagraph(paragraph);
+      const level = heading[1].length;
+      blocks.push(`<h${level}>${parseInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    if (/^>\s+/.test(trimmed)) {
+      flushParagraph(paragraph);
+      blocks.push(`<blockquote>${parseInlineMarkdown(trimmed.replace(/^>\s+/, ''))}</blockquote>`);
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      flushParagraph(paragraph);
+      const items = [trimmed.replace(/^[-*]\s+/, '')];
+      while (i + 1 < lines.length && /^[-*]\s+/.test(lines[i + 1].trim())) {
+        items.push(lines[i + 1].trim().replace(/^[-*]\s+/, ''));
+        i += 1;
+      }
+      blocks.push(`<ul>${items.map(item => `<li>${parseInlineMarkdown(item)}</li>`).join('')}</ul>`);
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      flushParagraph(paragraph);
+      const items = [trimmed.replace(/^\d+\.\s+/, '')];
+      while (i + 1 < lines.length && /^\d+\.\s+/.test(lines[i + 1].trim())) {
+        items.push(lines[i + 1].trim().replace(/^\d+\.\s+/, ''));
+        i += 1;
+      }
+      blocks.push(`<ol>${items.map(item => `<li>${parseInlineMarkdown(item)}</li>`).join('')}</ol>`);
+      continue;
+    }
+
+    paragraph.push(trimmed);
+  }
+  flushParagraph(paragraph);
+
+  return blocks.join('')
+    .replace(/@@FENCE(\d+)@@/g, (_, index) => fenceParts[Number(index)] || '');
+}
+
 updateConversationContext();
 updateComposerState();
-updateUtilityState();
-clearSearchResults('Search local conversations, scratchpads, and findings.');
-loadConversations().then(() => setStatus('Ready'));
+renderRequestStatus();
+renderJobs([]);
+renderRecipes([]);
+renderMcpStatuses([]);
+renderHistory();
+Promise.all([loadConversations(), loadRecipes()]).then(() => setStatus('Ready'));
 </script>
 </body>
 </html>

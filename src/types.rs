@@ -68,6 +68,50 @@ impl AgentPermissions {
     }
 }
 
+pub fn permission_denied_user_prompt(error: &str) -> Option<String> {
+    let requirement =
+        if error.contains("requires network access") || error.contains("require network access") {
+            Some((
+                "network access",
+                vec!["`/permissions network on`", "`/yolo on`"],
+            ))
+        } else if error.contains("requires filesystem write access")
+            || error.contains("require filesystem write access")
+        {
+            Some((
+                "filesystem write access",
+                vec!["`/permissions fs write`", "`/yolo on`"],
+            ))
+        } else if error.contains("requires filesystem read access")
+            || error.contains("require filesystem read access")
+        {
+            Some((
+                "filesystem read access",
+                vec![
+                    "`/permissions fs read`",
+                    "`/permissions fs write`",
+                    "`/yolo on`",
+                ],
+            ))
+        } else {
+            None
+        }?;
+
+    let capability = error
+        .strip_prefix("permission denied: ")
+        .and_then(|rest| {
+            rest.split_once(" requires ")
+                .map(|(prefix, _)| prefix)
+                .or_else(|| rest.split_once(" require ").map(|(prefix, _)| prefix))
+        })
+        .unwrap_or("This action");
+    let commands = requirement.1.join(" or ");
+    Some(format!(
+        "{capability} was blocked because this conversation does not currently allow {}.\n\nEnable it and retry? Use {}.\nIf not, reply without changing permissions and I will continue without that action.",
+        requirement.0, commands
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub conversation_id: String,
@@ -131,6 +175,10 @@ pub struct ConversationSummary {
     pub message_count: usize,
     pub title: Option<String>,
     pub archived_at: Option<DateTime<Utc>>,
+    pub preview: Option<String>,
+    pub pending_recipe: Option<String>,
+    pub active_compaction: Option<String>,
+    pub enabled_mcp_servers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -269,5 +317,34 @@ impl RememberedJob {
                 .lease_expires_at
                 .map(|lease| lease <= now)
                 .unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::permission_denied_user_prompt;
+
+    #[test]
+    fn formats_network_permission_prompt_for_user() {
+        let prompt = permission_denied_user_prompt(
+            "permission denied: MCP tool 'wiz__issues_query' requires network access. Enable it with /permissions network on, or use /yolo on.",
+        )
+        .unwrap();
+
+        assert!(prompt.contains("MCP tool 'wiz__issues_query' was blocked"));
+        assert!(prompt.contains("Enable it and retry?"));
+        assert!(prompt.contains("`/permissions network on`"));
+    }
+
+    #[test]
+    fn formats_filesystem_read_permission_prompt_for_user() {
+        let prompt = permission_denied_user_prompt(
+            "permission denied: inline file references require filesystem read access. Enable it with /permissions fs read or /permissions fs write, or use /yolo on.",
+        )
+        .unwrap();
+
+        assert!(prompt.contains("filesystem read access"));
+        assert!(prompt.contains("`/permissions fs read`"));
+        assert!(prompt.contains("reply without changing permissions"));
     }
 }

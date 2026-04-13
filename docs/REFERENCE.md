@@ -373,11 +373,15 @@ Always-advertised local tools:
 - `local__get_job`
 - `local__list_jobs`
 - `local__forget_job`
+- `local__time`
+- `local__exec_cli`
 - `local__run_skill`
 
 Behavior notes:
 
 - `local__run_skill` executes a local script from a selected skill definition
+- `local__exec_cli` executes only config-allowlisted binary names with direct argv execution
+- `local__time` provides current UTC/local time and relative window calculations for prompt grounding
 - job memory tools depend on filesystem access
 - local tools are advertised even when MCP is disabled
 

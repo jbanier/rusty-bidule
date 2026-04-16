@@ -5,6 +5,8 @@ prompt: |
 
 data_dir: data
 
+llm_provider: azure_openai
+
 azure_openai:
   api_key: env:AZURE_OPENAI_API_KEY
   api_version: 2025-03-01-preview
@@ -13,6 +15,16 @@ azure_openai:
   temperature: 0.2
   top_p: 1.0
   max_output_tokens: 1200
+
+# Optional alternate backend. If both blocks are present, set llm_provider
+# explicitly to choose between them.
+# azure_anthropic:
+#   api_key: env:AZURE_ANTHROPIC_API_KEY
+#   anthropic_version: 2023-06-01
+#   endpoint: https://example.services.ai.azure.com/anthropic/
+#   deployment: claude-opus-4-6
+#   temperature: 0.2
+#   max_output_tokens: 1200
 
 agent_permissions:
   allow_network: false
@@ -41,6 +53,13 @@ mcp_servers:
     timeout: 30
     sse_read_timeout: 300
     client_session_timeout_seconds: 30
+
+  - name: chrome-devtools
+    transport: stdio
+    command: npx
+    args:
+      - -y
+      - chrome-devtools-mcp@latest
 
   - name: wiz
     transport: streamable_http

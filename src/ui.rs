@@ -2550,7 +2550,8 @@ mod tests {
 
     use crate::{
         config::{
-            AppConfig, AzureOpenAiConfig, LocalToolsConfig, McpRuntimeConfig, McpServerConfig,
+            AppConfig, AzureOpenAiConfig, LlmProvider, LocalToolsConfig, McpRuntimeConfig,
+            McpServerConfig,
         },
         orchestrator::Orchestrator,
         prompt_expansion::expand_prompt_file_references,
@@ -2567,6 +2568,7 @@ mod tests {
         AppConfig {
             prompt: None,
             data_dir: Some(data_dir),
+            llm_provider: Some(LlmProvider::AzureOpenAi),
             azure_openai: Some(AzureOpenAiConfig {
                 api_key: "test-key".to_string(),
                 api_version: "2024-10-21".to_string(),
@@ -2576,6 +2578,7 @@ mod tests {
                 top_p: 1.0,
                 max_output_tokens: 512,
             }),
+            azure_anthropic: None,
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
@@ -2585,6 +2588,8 @@ mod tests {
                     name: (*name).to_string(),
                     transport: "streamable_http".to_string(),
                     url: format!("http://127.0.0.1/{name}"),
+                    command: None,
+                    args: Vec::new(),
                     headers: HashMap::new(),
                     timeout: None,
                     sse_read_timeout: None,

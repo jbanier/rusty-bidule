@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::{
@@ -6,6 +6,10 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
 };
 use serde_json::{Value, json};
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin, ChildStdout, Command},
+};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -29,6 +33,7 @@ pub struct McpTool {
 pub(crate) enum Transport {
     StreamableHttp,
     Sse,
+    Stdio,
 }
 
 #[derive(Debug)]
@@ -49,7 +54,15 @@ struct ServerState {
     protocol_version: Option<String>,
     /// For SSE: the endpoint URL to POST requests to.
     sse_endpoint: Option<String>,
+    stdio: Option<StdioState>,
     initialized: bool,
+}
+
+#[derive(Debug)]
+struct StdioState {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
 }
 
 #[derive(Debug)]
@@ -84,10 +97,10 @@ impl McpManager {
             servers: servers
                 .into_iter()
                 .map(|config| {
-                    let transport = if config.transport == "sse" {
-                        Transport::Sse
-                    } else {
-                        Transport::StreamableHttp
+                    let transport = match config.transport.as_str() {
+                        "sse" => Transport::Sse,
+                        "stdio" => Transport::Stdio,
+                        _ => Transport::StreamableHttp,
                     };
                     ServerState {
                         config,
@@ -95,6 +108,7 @@ impl McpManager {
                         session_id: None,
                         protocol_version: None,
                         sse_endpoint: None,
+                        stdio: None,
                         initialized: false,
                     }
                 })
@@ -247,9 +261,14 @@ impl McpManager {
         }
         info!(server = %self.servers[server_index].config.name, "initializing MCP server session");
 
-        // For SSE transport, first connect the SSE stream to get the endpoint URL
-        if self.servers[server_index].transport == Transport::Sse {
-            self.sse_connect(server_index).await?;
+        match self.servers[server_index].transport {
+            Transport::Sse => {
+                self.sse_connect(server_index).await?;
+            }
+            Transport::Stdio => {
+                self.ensure_stdio_started(server_index).await?;
+            }
+            Transport::StreamableHttp => {}
         }
 
         let request = json!({
@@ -288,6 +307,46 @@ impl McpManager {
         self.post_notification(server_index, &notify).await?;
         self.servers[server_index].initialized = true;
         info!(server = %self.servers[server_index].config.name, "MCP server initialized");
+        Ok(())
+    }
+
+    async fn ensure_stdio_started(&mut self, server_index: usize) -> Result<()> {
+        if self.servers[server_index].stdio.is_some() {
+            return Ok(());
+        }
+
+        let server = &self.servers[server_index].config;
+        let command = server
+            .command
+            .as_deref()
+            .ok_or_else(|| anyhow!("server '{}' is missing a stdio command", server.name))?;
+        info!(server = %server.name, command, "starting MCP stdio server");
+
+        let mut child = Command::new(command)
+            .args(&server.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("failed to spawn MCP stdio server '{}'", server.name))?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            anyhow!(
+                "failed to capture stdin for MCP stdio server '{}'",
+                server.name
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            anyhow!(
+                "failed to capture stdout for MCP stdio server '{}'",
+                server.name
+            )
+        })?;
+
+        self.servers[server_index].stdio = Some(StdioState {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        });
         Ok(())
     }
 
@@ -397,7 +456,11 @@ impl McpManager {
     }
 
     async fn post_jsonrpc(&mut self, server_index: usize, body: &Value) -> Result<Value> {
-        let (headers, response_body) = self.post(server_index, body).await?;
+        let (headers, response_body) = if self.servers[server_index].transport == Transport::Stdio {
+            self.post_stdio(server_index, body).await?
+        } else {
+            self.post(server_index, body).await?
+        };
         self.capture_session_id(server_index, &headers);
         if response_body.is_null() {
             bail!("server returned an empty JSON-RPC response");
@@ -412,8 +475,12 @@ impl McpManager {
     }
 
     async fn post_notification(&mut self, server_index: usize, body: &Value) -> Result<()> {
-        let (headers, _) = self.post(server_index, body).await?;
-        self.capture_session_id(server_index, &headers);
+        if self.servers[server_index].transport == Transport::Stdio {
+            self.send_stdio_message(server_index, body).await?;
+        } else {
+            let (headers, _) = self.post(server_index, body).await?;
+            self.capture_session_id(server_index, &headers);
+        }
         Ok(())
     }
 
@@ -443,6 +510,12 @@ impl McpManager {
 
     async fn post(&self, server_index: usize, body: &Value) -> Result<(HeaderMap, Value)> {
         let server = &self.servers[server_index];
+        if server.transport == Transport::Stdio {
+            bail!(
+                "internal error: stdio transport requires mutable access for server '{}'",
+                server.config.name
+            );
+        }
         let auth = self.oauth.authorize_server(&server.config).await?;
 
         // For SSE transport use the discovered endpoint URL
@@ -513,6 +586,78 @@ impl McpManager {
         Ok((headers, value))
     }
 
+    async fn post_stdio(
+        &mut self,
+        server_index: usize,
+        body: &Value,
+    ) -> Result<(HeaderMap, Value)> {
+        self.send_stdio_message(server_index, body).await?;
+        let expected_id = body.get("id").cloned();
+        let response = match expected_id {
+            Some(expected_id) => self.read_stdio_response(server_index, &expected_id).await?,
+            None => Value::Null,
+        };
+        Ok((HeaderMap::new(), response))
+    }
+
+    async fn send_stdio_message(&mut self, server_index: usize, body: &Value) -> Result<()> {
+        self.ensure_stdio_started(server_index).await?;
+        let payload =
+            serde_json::to_vec(body).context("failed to serialize MCP stdio JSON-RPC payload")?;
+        let frame = format!("Content-Length: {}\r\n\r\n", payload.len());
+        let server_name = self.servers[server_index].config.name.clone();
+        let stdio = self.servers[server_index]
+            .stdio
+            .as_mut()
+            .ok_or_else(|| anyhow!("stdio transport for server '{server_name}' is not running"))?;
+        stdio
+            .stdin
+            .write_all(frame.as_bytes())
+            .await
+            .with_context(|| format!("failed to write stdio frame header to '{server_name}'"))?;
+        stdio
+            .stdin
+            .write_all(&payload)
+            .await
+            .with_context(|| format!("failed to write stdio frame body to '{server_name}'"))?;
+        stdio
+            .stdin
+            .flush()
+            .await
+            .with_context(|| format!("failed to flush stdio frame to '{server_name}'"))?;
+        Ok(())
+    }
+
+    async fn read_stdio_response(
+        &mut self,
+        server_index: usize,
+        expected_id: &Value,
+    ) -> Result<Value> {
+        loop {
+            let message = self.read_stdio_message(server_index).await?;
+            if message.get("id") == Some(expected_id) {
+                return Ok(message);
+            }
+            debug!(
+                server = %self.servers[server_index].config.name,
+                expected_id = %expected_id,
+                received = %message,
+                "ignoring non-matching stdio MCP message"
+            );
+        }
+    }
+
+    async fn read_stdio_message(&mut self, server_index: usize) -> Result<Value> {
+        let server_name = self.servers[server_index].config.name.clone();
+        let stdio = self.servers[server_index]
+            .stdio
+            .as_mut()
+            .ok_or_else(|| anyhow!("stdio transport for server '{server_name}' is not running"))?;
+        read_stdio_frame(&mut stdio.stdout)
+            .await
+            .with_context(|| format!("failed to read stdio message from '{server_name}'"))
+    }
+
     fn server_session_timeout(&self, server_index: usize) -> u64 {
         let server = &self.servers[server_index].config;
         server
@@ -541,6 +686,9 @@ impl McpManager {
         if self.servers[server_index].transport == Transport::Sse {
             self.servers[server_index].sse_endpoint = None;
         }
+        if let Some(mut stdio) = self.servers[server_index].stdio.take() {
+            let _ = stdio.child.start_kill();
+        }
     }
 
     fn next_request_id(&mut self) -> u64 {
@@ -548,6 +696,48 @@ impl McpManager {
         self.next_id += 1;
         id
     }
+}
+
+async fn read_stdio_frame<R>(stdout: &mut R) -> Result<Value>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut content_length = None;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let read = stdout
+            .read_line(&mut line)
+            .await
+            .context("failed reading stdio frame header")?;
+        if read == 0 {
+            bail!("MCP stdio server closed stdout");
+        }
+        let header = line.trim_end_matches(['\r', '\n']);
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .with_context(|| format!("invalid Content-Length header: {header}"))?,
+            );
+        }
+    }
+
+    let content_length =
+        content_length.ok_or_else(|| anyhow!("missing Content-Length header in stdio frame"))?;
+    let mut payload = vec![0u8; content_length];
+    stdout
+        .read_exact(&mut payload)
+        .await
+        .context("failed reading stdio frame payload")?;
+    serde_json::from_slice(&payload).context("failed to parse stdio frame JSON payload")
 }
 
 /// Parse the endpoint URL from an SSE `endpoint` event.
@@ -736,13 +926,13 @@ mod tests {
     use reqwest::header::ACCEPT;
     use serde_json::json;
     use tempfile::tempdir;
-    use tokio::net::TcpListener;
+    use tokio::{io::BufReader as TokioBufReader, net::TcpListener};
 
     use crate::config::{McpRuntimeConfig, McpServerConfig};
 
     use super::{
         McpManager, PREFERRED_PROTOCOL_VERSION, ServerState, Transport, build_headers,
-        normalize_tool_result, parse_mcp_response_body,
+        normalize_tool_result, parse_mcp_response_body, read_stdio_frame,
     };
 
     #[test]
@@ -763,6 +953,8 @@ mod tests {
                 name: "fastmcp".to_string(),
                 transport: "streamable_http".to_string(),
                 url: "http://127.0.0.1:8000/mcp".to_string(),
+                command: None,
+                args: Vec::new(),
                 headers: Default::default(),
                 timeout: Some(30),
                 sse_read_timeout: Some(300),
@@ -773,6 +965,7 @@ mod tests {
             session_id: None,
             protocol_version: None,
             sse_endpoint: None,
+            stdio: None,
             initialized: false,
         };
 
@@ -790,6 +983,8 @@ mod tests {
                 name: "fastmcp".to_string(),
                 transport: "streamable_http".to_string(),
                 url: "http://127.0.0.1:8000/mcp".to_string(),
+                command: None,
+                args: Vec::new(),
                 headers: Default::default(),
                 timeout: Some(30),
                 sse_read_timeout: Some(300),
@@ -823,6 +1018,18 @@ mod tests {
         );
 
         let parsed = parse_mcp_response_body(body).unwrap();
+        assert_eq!(parsed["result"]["tools"][0]["name"], "hello");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_stdio_framed_jsonrpc_result() {
+        let payload =
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"tools\":[{\"name\":\"hello\"}]}}";
+        let frame = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        let mut reader = TokioBufReader::new(frame.as_bytes());
+
+        let parsed = read_stdio_frame(&mut reader).await.unwrap();
+
         assert_eq!(parsed["result"]["tools"][0]["name"], "hello");
     }
 
@@ -893,6 +1100,8 @@ mod tests {
                 name: "demo".to_string(),
                 transport: "streamable_http".to_string(),
                 url: format!("http://{addr}/mcp"),
+                command: None,
+                args: Vec::new(),
                 headers: HashMap::new(),
                 timeout: Some(1),
                 sse_read_timeout: None,
@@ -926,6 +1135,8 @@ mod tests {
                 name: "demo".to_string(),
                 transport: "streamable_http".to_string(),
                 url: url.to_string(),
+                command: None,
+                args: Vec::new(),
                 headers: HashMap::new(),
                 timeout: Some(30),
                 sse_read_timeout: None,

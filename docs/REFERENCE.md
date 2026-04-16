@@ -127,7 +127,9 @@ Top-level keys:
 
 | Key | Required | Notes |
 |-----|----------|-------|
-| `azure_openai` | yes | Azure endpoint, deployment, API version, and key |
+| `llm_provider` | no | `azure_openai` or `azure_anthropic`; when omitted, `azure_openai` wins if both are configured |
+| `azure_openai` | no | Azure OpenAI endpoint, deployment, API version, and key |
+| `azure_anthropic` | no | Azure Anthropic endpoint, deployment, Anthropic API version, and key |
 | `prompt` | no | Extra system prompt text |
 | `data_dir` | no | Defaults to `data` |
 | `agent_permissions` | no | Default permissions applied to new conversations |
@@ -144,7 +146,11 @@ Current resolution targets:
 
 - `azure_openai.api_key`
 - `azure_openai.endpoint`
+- `azure_anthropic.api_key`
+- `azure_anthropic.endpoint`
 - `mcp_servers[].url`
+- `mcp_servers[].command`
+- `mcp_servers[].args[*]`
 - `mcp_servers[].headers[*]`
 - `mcp_servers[].auth.client_id`
 - `mcp_servers[].auth.client_secret`
@@ -163,6 +169,21 @@ Current resolution targets:
 | `deployment` | yes | Azure deployment/model name |
 | `temperature` | no | Default `0.2` |
 | `top_p` | no | Default `1.0` |
+| `max_output_tokens` | no | Default `1200` |
+
+### Azure Anthropic
+
+`azure_anthropic` fields:
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `api_key` | yes | Supports `env:` |
+| `anthropic_version` | no | Anthropic API version header. Defaults to `2023-06-01` |
+| `api_version` | no | Deprecated legacy field. Ignored unless it already matches an Anthropic version date |
+| `endpoint` | yes | Supports `env:` |
+| `deployment` | yes | Azure Anthropic deployment/model name |
+| `temperature` | no | Default `0.2` |
+| `top_p` | no | Advanced option. When set below `1.0`, it is sent instead of `temperature` |
 | `max_output_tokens` | no | Default `1200` |
 
 ### Agent Permissions
@@ -193,8 +214,10 @@ conversation can then diverge from config defaults.
 | Field | Required | Notes |
 |-------|----------|-------|
 | `name` | yes | Stable server identifier |
-| `transport` | yes | `streamable_http` or `sse` |
-| `url` | yes | Supports `env:` |
+| `transport` | yes | `streamable_http`, `sse`, or `stdio` |
+| `url` | conditional | Required for HTTP/SSE transports, supports `env:` |
+| `command` | conditional | Required for `stdio`, supports `env:` |
+| `args` | no | Process args for `stdio`, each entry supports `env:` |
 | `headers` | no | Extra request headers, values support `env:` |
 | `timeout` | no | Per-server request timeout |
 | `sse_read_timeout` | no | Per-server SSE read timeout |

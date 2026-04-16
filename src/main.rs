@@ -1,7 +1,7 @@
 mod auto_pull;
-mod azure;
 mod config;
 mod conversation_store;
+mod llm;
 mod local_tools;
 mod logging;
 mod mcp_runtime;

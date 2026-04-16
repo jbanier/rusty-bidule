@@ -9,9 +9,12 @@ use tokio::sync::{Mutex, OwnedMutexGuard, mpsc::UnboundedSender};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    azure::{AzureClient, AzureTool},
     config::AppConfig,
     conversation_store::ConversationStore,
+    llm::{
+        LlmAssistantBlock, LlmClient, LlmMessage, LlmStopReason, LlmTool, LlmToolResult,
+        llm_message_text_len,
+    },
     local_tools::{LocalToolExecutor, local_tool_definitions},
     mcp_runtime::{McpManager, McpTool},
     paths::discover_project_root,
@@ -42,7 +45,7 @@ struct OrchestratorInner {
     config: AppConfig,
     store: ConversationStore,
     evidence: ToolEvidenceWriter,
-    azure: AzureClient,
+    llm: LlmClient,
     mcp: Mutex<McpManager>,
     conversation_locks: ConversationTurnLocks,
     skills: SkillRegistry,
@@ -98,7 +101,7 @@ impl Orchestrator {
         let store = ConversationStore::new(&data_dir, config.agent_permissions.clone());
         store.init()?;
         let evidence = ToolEvidenceWriter::new(store.clone());
-        let azure = AzureClient::new(config.azure_openai.as_ref());
+        let llm = LlmClient::new(&config)?;
         let mcp = McpManager::new(
             &data_dir,
             config.mcp_runtime.clone(),
@@ -127,7 +130,7 @@ impl Orchestrator {
                 config,
                 store,
                 evidence,
-                azure,
+                llm,
                 mcp: Mutex::new(mcp),
                 conversation_locks: ConversationTurnLocks::default(),
                 skills,
@@ -198,20 +201,19 @@ impl Orchestrator {
         info!(%conversation_id, "compacting conversation");
         let conversation = self.inner.store.load(conversation_id)?;
 
-        let mut messages = vec![json!({
-            "role": "system",
-            "content": "Produce a compact but complete summary of the following conversation. Preserve key findings, tool results, and decisions. Be concise but thorough."
-        })];
+        let mut messages = vec![LlmMessage::System(
+            "Produce a compact but complete summary of the following conversation. Preserve key findings, tool results, and decisions. Be concise but thorough."
+                .to_string(),
+        )];
         messages.extend(
             conversation
                 .messages
                 .iter()
-                .map(|m| json!({"role": m.role, "content": m.content})),
+                .map(stored_message_to_llm_message),
         );
 
-        let summary = match self.inner.azure.chat_completion(&messages, &[]).await {
-            Ok(completion) => completion
-                .assistant_text
+        let summary = match self.inner.llm.chat_completion(&messages, &[]).await {
+            Ok(completion) => assistant_text_from_blocks(&completion.assistant_blocks)
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "Summary unavailable.".to_string()),
             Err(_) => fallback_compaction_summary(&conversation),
@@ -344,9 +346,9 @@ impl Orchestrator {
             local_tool_definitions(local_tool_filter.as_deref(), &self.inner.config.local_tools);
         let tool_selection_query =
             build_tool_selection_query(user_message.as_deref(), &history, recipe.as_ref());
-        let (azure_tools, omitted_tool_count) =
+        let (llm_tools, omitted_tool_count) =
             build_ranked_azure_tools_with_local(&local_defs, &mcp_tools, &tool_selection_query);
-        let advertised_mcp_tools = advertised_mcp_tools(&azure_tools, &mcp_tools);
+        let advertised_mcp_tools = advertised_mcp_tools(&llm_tools, &mcp_tools);
         let mcp_capability_summary =
             summarize_advertised_mcp_tools(&advertised_mcp_tools, mcp_tools.len());
 
@@ -354,16 +356,16 @@ impl Orchestrator {
             warn!(
                 %conversation_id,
                 total_tools = mcp_tools.len() + local_defs.len(),
-                advertised_tools = azure_tools.len(),
+                advertised_tools = llm_tools.len(),
                 omitted_tool_count,
-                "truncated tools to satisfy Azure limit"
+                "truncated tools to satisfy LLM tool limit"
             );
             self.emit(
                 &ui_tx,
                 "tool_limit",
                 &format!(
-                    "Azure tool limit reached: advertising {} of {} tools. Reduce enabled MCP servers with /mcp disable <name> or /mcp only <name...>, or narrow local tools in the active recipe/config.",
-                    azure_tools.len(),
+                    "LLM tool limit reached: advertising {} of {} tools. Reduce enabled MCP servers with /mcp disable <name> or /mcp only <name...>, or narrow local tools in the active recipe/config.",
+                    llm_tools.len(),
                     mcp_tools.len() + local_defs.len(),
                 ),
                 None,
@@ -432,32 +434,31 @@ impl Orchestrator {
                 None,
                 Some(tool_call_count),
             );
+            let llm_status = if iteration == 0 {
+                format!("Consulting {}", self.inner.llm.provider_label())
+            } else {
+                "Continuing tool-grounded reasoning".to_string()
+            };
             self.emit(
                 &ui_tx,
                 "llm_start",
-                if iteration == 0 {
-                    "Consulting Azure OpenAI"
-                } else {
-                    "Continuing tool-grounded reasoning"
-                },
+                &llm_status,
                 None,
                 Some(tool_call_count),
             );
 
             let llm_start = std::time::Instant::now();
-            let completion = match self
-                .inner
-                .azure
-                .chat_completion(&messages, &azure_tools)
-                .await
-            {
+            let completion = match self.inner.llm.chat_completion(&messages, &llm_tools).await {
                 Ok(completion) => completion,
                 Err(err) => {
                     if iteration == 0 {
                         let reply = if automation {
                             format!("Automation deferred: {err}")
                         } else {
-                            format!("Azure inference unavailable: {err}")
+                            format!(
+                                "{} inference unavailable: {err}",
+                                self.inner.llm.provider_label()
+                            )
                         };
                         return self
                             .finish_turn(FinishTurnContext {
@@ -473,41 +474,42 @@ impl Orchestrator {
                             })
                             .await;
                     }
-                    error!(%conversation_id, iteration, error = %err, "Azure completion failed");
-                    return Err(err).context("Azure completion failed");
+                    error!(%conversation_id, iteration, error = %err, "LLM completion failed");
+                    return Err(err).context("LLM completion failed");
                 }
             };
             llm_seconds += llm_start.elapsed().as_secs_f64();
 
-            if !completion.tool_calls.is_empty() {
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": Value::Null,
-                    "tool_calls": completion.tool_calls.iter().map(|call| {
-                        json!({
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": call.raw_arguments,
-                            }
-                        })
-                    }).collect::<Vec<_>>()
-                }));
+            let tool_uses = completion
+                .assistant_blocks
+                .iter()
+                .filter_map(|block| match block {
+                    LlmAssistantBlock::ToolUse { id, name, input } => {
+                        Some((id.clone(), name.clone(), input.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
 
-                for tool_call in completion.tool_calls {
+            if !tool_uses.is_empty() {
+                messages.push(LlmMessage::Assistant {
+                    blocks: completion.assistant_blocks.clone(),
+                });
+
+                let mut tool_results = Vec::with_capacity(tool_uses.len());
+                for (tool_use_id, tool_name, tool_input) in tool_uses {
                     tool_call_count += 1;
                     info!(
                         %conversation_id,
-                        tool = %tool_call.name,
+                        tool = %tool_name,
                         tool_call_count,
                         "executing tool call"
                     );
                     self.emit(
                         &ui_tx,
                         "tool_start",
-                        &format!("Calling {}", tool_call.name),
-                        Some(tool_call.name.clone()),
+                        &format!("Calling {}", tool_name),
+                        Some(tool_name.clone()),
                         Some(tool_call_count),
                     );
 
@@ -515,24 +517,24 @@ impl Orchestrator {
                     let tool_result = self
                         .execute_tool_call(
                             conversation_id,
-                            &tool_call.name,
-                            tool_call.arguments.clone(),
+                            &tool_name,
+                            tool_input,
                             &local_executor,
                             &agent_permissions,
                         )
                         .await;
                     tool_seconds += tool_start.elapsed().as_secs_f64();
 
-                    let tool_output = match tool_result {
-                        Ok(output) => output,
+                    let tool_output: Result<String, LlmToolResult> = match tool_result {
+                        Ok(output) => Ok(output),
                         Err(err) => {
                             let err_text = format!("{err:#}");
                             if let Some(prompt) = permission_denied_user_prompt(&err_text) {
                                 self.emit(
                                     &ui_tx,
                                     "tool_end",
-                                    &format!("Finished {}", tool_call.name),
-                                    Some(tool_call.name.clone()),
+                                    &format!("Finished {}", tool_name),
+                                    Some(tool_name.clone()),
                                     Some(tool_call_count),
                                 );
                                 return self
@@ -549,31 +551,80 @@ impl Orchestrator {
                                     })
                                     .await;
                             }
-                            format!("Tool call failed: {err_text}")
+                            Err(LlmToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                content: format!("Tool call failed: {err_text}"),
+                                is_error: true,
+                            })
                         }
                     };
 
                     self.emit(
                         &ui_tx,
                         "tool_end",
-                        &format!("Finished {}", tool_call.name),
-                        Some(tool_call.name.clone()),
+                        &format!("Finished {}", tool_name),
+                        Some(tool_name.clone()),
                         Some(tool_call_count),
                     );
 
-                    messages.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_output,
-                    }));
+                    match tool_output {
+                        Ok(output) => tool_results.push(LlmToolResult {
+                            tool_use_id,
+                            content: output,
+                            is_error: false,
+                        }),
+                        Err(tool_result) => tool_results.push(tool_result),
+                    }
                 }
+                messages.push(LlmMessage::UserToolResults {
+                    results: tool_results,
+                });
                 continue;
             }
 
-            let reply = completion
-                .assistant_text
+            let reply = assistant_text_from_blocks(&completion.assistant_blocks)
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "The model returned an empty response.".to_string());
+
+            match &completion.stop_reason {
+                LlmStopReason::EndTurn => {}
+                LlmStopReason::ToolUse => {
+                    return Err(anyhow!(
+                        "LLM returned tool_use stop reason without tool_use blocks"
+                    ));
+                }
+                LlmStopReason::MaxTokens => {
+                    let reply = format!(
+                        "{} stopped at the output token limit before completing the response.",
+                        self.inner.llm.provider_label()
+                    );
+                    return self
+                        .finish_turn(FinishTurnContext {
+                            conversation_id,
+                            final_reply: &reply,
+                            turn_start,
+                            tool_seconds,
+                            llm_seconds,
+                            tool_call_count,
+                            automation,
+                            recipe: recipe.as_ref(),
+                            ui_tx: &ui_tx,
+                        })
+                        .await;
+                }
+                LlmStopReason::PauseTurn => {
+                    messages.push(LlmMessage::Assistant {
+                        blocks: completion.assistant_blocks.clone(),
+                    });
+                    messages.push(LlmMessage::UserText(
+                        "Continue from the prior pause and finish the turn.".to_string(),
+                    ));
+                    continue;
+                }
+                LlmStopReason::Unknown(reason) => {
+                    return Err(anyhow!("unsupported provider stop reason: {reason}"));
+                }
+            }
 
             // Apply recipe response template if set
             let final_reply = if let Some(r) = &recipe {
@@ -798,7 +849,7 @@ impl Orchestrator {
     }
 }
 
-fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<Value> {
+fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
     let mut system_prompt = String::from(
         "You are a CSIRT investigation assistant operating inside an evidence-preserving tool runner with built-in local tools, local skill scripts, and optional MCP servers. Use tools when needed, stay grounded in tool output, and be explicit about uncertainty or failures.",
     );
@@ -838,7 +889,7 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<Value> {
         system_prompt.push_str("\nProceed carefully and explain when tool access is degraded.");
     }
 
-    let mut messages = vec![json!({"role": "system", "content": system_prompt})];
+    let mut messages = vec![LlmMessage::System(system_prompt)];
 
     // Check for active compaction
     let conversation = ctx.store.load(ctx.conversation_id).ok();
@@ -848,44 +899,53 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<Value> {
             .store
             .load_compaction(ctx.conversation_id, checkpoint_id)
     {
-        messages.push(json!({
-            "role": "system",
-            "content": format!("Previous conversation summary:\n{summary}")
-        }));
+        messages.push(LlmMessage::System(format!(
+            "Previous conversation summary:\n{summary}"
+        )));
         // Only include the last 10 messages after compaction
         let tail: Vec<_> = ctx.history.iter().rev().take(10).collect();
         for msg in tail.into_iter().rev() {
-            messages.push(json!({
-                "role": msg.role,
-                "content": msg.content,
-            }));
+            messages.push(stored_message_to_llm_message(msg));
         }
         if let Some(user_message) = ctx.user_message_override {
-            messages.push(json!({
-                "role": "user",
-                "content": user_message,
-            }));
+            messages.push(LlmMessage::UserText(user_message.to_string()));
         }
         return messages;
     }
 
-    messages.extend(ctx.history.iter().map(|message| {
-        json!({
-            "role": message.role,
-            "content": message.content,
-        })
-    }));
+    messages.extend(ctx.history.iter().map(stored_message_to_llm_message));
     if let Some(user_message) = ctx.user_message_override {
-        messages.push(json!({
-            "role": "user",
-            "content": user_message,
-        }));
+        messages.push(LlmMessage::UserText(user_message.to_string()));
     }
     messages
 }
 
-fn estimate_context_chars(messages: &[Value]) -> usize {
-    messages.iter().map(json_value_len).sum()
+fn stored_message_to_llm_message(message: &crate::types::Message) -> LlmMessage {
+    if message.role == "assistant" {
+        LlmMessage::Assistant {
+            blocks: vec![LlmAssistantBlock::Text {
+                text: message.content.clone(),
+            }],
+        }
+    } else {
+        LlmMessage::UserText(message.content.clone())
+    }
+}
+
+fn estimate_context_chars(messages: &[LlmMessage]) -> usize {
+    messages.iter().map(llm_message_text_len).sum()
+}
+
+fn assistant_text_from_blocks(blocks: &[LlmAssistantBlock]) -> Option<String> {
+    let text = blocks
+        .iter()
+        .filter_map(|block| match block {
+            LlmAssistantBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn build_automation_prompt(job: &RememberedJob) -> String {
@@ -905,7 +965,7 @@ fn build_automation_prompt(job: &RememberedJob) -> String {
 
 fn fallback_compaction_summary(conversation: &crate::types::Conversation) -> String {
     let mut summary = format!(
-        "Compaction fallback generated without Azure inference. Messages: {}.",
+        "Compaction fallback generated without LLM inference. Messages: {}.",
         conversation.messages.len()
     );
     if let Some(last_user) = conversation
@@ -930,33 +990,33 @@ fn fallback_compaction_summary(conversation: &crate::types::Conversation) -> Str
 }
 
 fn build_ranked_azure_tools_with_local(
-    local_tools: &[AzureTool],
+    local_tools: &[LlmTool],
     mcp_tools: &[McpTool],
     tool_selection_query: &str,
-) -> (Vec<AzureTool>, usize) {
+) -> (Vec<LlmTool>, usize) {
     let total_tool_count = local_tools.len() + mcp_tools.len();
     if total_tool_count <= MAX_AZURE_TOOL_COUNT {
-        let mut azure_tools = local_tools.to_vec();
-        azure_tools.extend(mcp_tools.iter().map(mcp_tool_to_azure_tool));
-        return (azure_tools, 0);
+        let mut llm_tools = local_tools.to_vec();
+        llm_tools.extend(mcp_tools.iter().map(mcp_tool_to_azure_tool));
+        return (llm_tools, 0);
     }
 
     let context_tokens = tokenize_tool_selection_text(tool_selection_query);
-    let mut azure_tools = Vec::with_capacity(MAX_AZURE_TOOL_COUNT);
+    let mut llm_tools = Vec::with_capacity(MAX_AZURE_TOOL_COUNT);
     let mut selected_names = HashSet::new();
 
     for pinned_name in PINNED_LOCAL_TOOL_NAMES {
-        if azure_tools.len() >= MAX_AZURE_TOOL_COUNT {
+        if llm_tools.len() >= MAX_AZURE_TOOL_COUNT {
             break;
         }
         if let Some(tool) = local_tools.iter().find(|tool| tool.name == *pinned_name)
             && selected_names.insert(tool.name.clone())
         {
-            azure_tools.push(tool.clone());
+            llm_tools.push(tool.clone());
         }
     }
 
-    let remaining_capacity = MAX_AZURE_TOOL_COUNT.saturating_sub(azure_tools.len());
+    let remaining_capacity = MAX_AZURE_TOOL_COUNT.saturating_sub(llm_tools.len());
     let mut ranked_candidates = local_tools
         .iter()
         .filter(|tool| !selected_names.contains(&tool.name))
@@ -980,22 +1040,22 @@ fn build_ranked_azure_tools_with_local(
             .then_with(|| left.tool.name.cmp(&right.tool.name))
     });
 
-    azure_tools.extend(
+    llm_tools.extend(
         ranked_candidates
             .into_iter()
             .take(remaining_capacity)
             .map(|candidate| candidate.tool),
     );
-    let omitted_tool_count = total_tool_count.saturating_sub(azure_tools.len());
-    (azure_tools, omitted_tool_count)
+    let omitted_tool_count = total_tool_count.saturating_sub(llm_tools.len());
+    (llm_tools, omitted_tool_count)
 }
 
 #[cfg(test)]
-fn build_azure_tools(mcp_tools: &[McpTool]) -> (Vec<AzureTool>, usize) {
+fn build_azure_tools(mcp_tools: &[McpTool]) -> (Vec<LlmTool>, usize) {
     let azure_tools = mcp_tools
         .iter()
         .take(MAX_AZURE_TOOL_COUNT)
-        .map(|tool| AzureTool {
+        .map(|tool| LlmTool {
             name: tool.external_name.clone(),
             description: format!("{} (server: {})", tool.description, tool.server_name),
             parameters: sanitize_azure_tool_schema(tool.input_schema.clone()),
@@ -1009,7 +1069,7 @@ fn build_azure_tools(mcp_tools: &[McpTool]) -> (Vec<AzureTool>, usize) {
 struct RankedAzureTool {
     score: i64,
     local_preferred: bool,
-    tool: AzureTool,
+    tool: LlmTool,
 }
 
 fn build_tool_selection_query(
@@ -1037,10 +1097,7 @@ fn build_tool_selection_query(
     parts.join("\n")
 }
 
-fn advertised_mcp_tools<'a>(
-    azure_tools: &[AzureTool],
-    mcp_tools: &'a [McpTool],
-) -> Vec<&'a McpTool> {
+fn advertised_mcp_tools<'a>(azure_tools: &[LlmTool], mcp_tools: &'a [McpTool]) -> Vec<&'a McpTool> {
     let advertised_names = azure_tools
         .iter()
         .map(|tool| tool.name.as_str())
@@ -1119,7 +1176,7 @@ fn tokenize_tool_selection_text(text: &str) -> HashSet<String> {
         .collect()
 }
 
-fn score_local_tool(tool: &AzureTool, context_tokens: &HashSet<String>) -> i64 {
+fn score_local_tool(tool: &LlmTool, context_tokens: &HashSet<String>) -> i64 {
     let mut score = 0;
     if PINNED_LOCAL_TOOL_NAMES.contains(&tool.name.as_str()) {
         score += 10_000;
@@ -1144,8 +1201,8 @@ fn score_text_match(text: &str, context_tokens: &HashSet<String>, weight: i64) -
         * weight
 }
 
-fn mcp_tool_to_azure_tool(tool: &McpTool) -> AzureTool {
-    AzureTool {
+fn mcp_tool_to_azure_tool(tool: &McpTool) -> LlmTool {
+    LlmTool {
         name: tool.external_name.clone(),
         description: format!("{} (server: {})", tool.description, tool.server_name),
         parameters: sanitize_azure_tool_schema(tool.input_schema.clone()),
@@ -1180,20 +1237,6 @@ fn sanitize_azure_tool_schema(value: Value) -> Value {
     }
 }
 
-fn json_value_len(value: &Value) -> usize {
-    match value {
-        Value::Null => 0,
-        Value::Bool(boolean) => usize::from(*boolean),
-        Value::Number(number) => number.to_string().len(),
-        Value::String(text) => text.chars().count(),
-        Value::Array(items) => items.iter().map(json_value_len).sum(),
-        Value::Object(map) => map
-            .iter()
-            .map(|(key, value)| key.chars().count() + json_value_len(value))
-            .sum(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1201,7 +1244,9 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use crate::{
-        azure::AzureTool, conversation_store::ConversationStore, mcp_runtime::McpTool,
+        conversation_store::ConversationStore,
+        llm::{LlmAssistantBlock, LlmMessage, LlmTool},
+        mcp_runtime::McpTool,
         types::AgentPermissions,
     };
 
@@ -1214,18 +1259,19 @@ mod tests {
     #[test]
     fn estimates_context_chars_from_nested_messages() {
         let messages = vec![
-            json!({"role": "system", "content": "hello"}),
-            json!({"role": "assistant", "tool_calls": [{"id": "1", "function": {"name": "demo", "arguments": "{\"x\":1}"}}]}),
+            LlmMessage::System("hello".to_string()),
+            LlmMessage::Assistant {
+                blocks: vec![LlmAssistantBlock::ToolUse {
+                    id: "1".to_string(),
+                    name: "demo".to_string(),
+                    input: json!({"x":1}),
+                }],
+            },
         ];
 
         let chars = estimate_context_chars(&messages);
 
-        assert!(
-            chars
-                >= "systemhelloroleassistanttool_callsid1functionnamedemoarguments{\"x\":1}"
-                    .chars()
-                    .count()
-        );
+        assert!(chars >= "hello1demox1".chars().count());
     }
 
     #[test]
@@ -1254,7 +1300,7 @@ mod tests {
     #[test]
     fn caps_combined_local_and_mcp_tools_to_azure_limit() {
         let local_tools = (0..MAX_AZURE_TOOL_COUNT)
-            .map(|index| AzureTool {
+            .map(|index| LlmTool {
                 name: format!("local_{index}"),
                 description: format!("local tool {index}"),
                 parameters: json!({"type": "object"}),
@@ -1284,7 +1330,7 @@ mod tests {
 
     #[test]
     fn ranks_relevant_mcp_tools_ahead_of_irrelevant_filler() {
-        let local_tools = vec![AzureTool {
+        let local_tools = vec![LlmTool {
             name: "local__run_skill".to_string(),
             description: "Execute a skill script".to_string(),
             parameters: json!({"type": "object"}),
@@ -1333,12 +1379,12 @@ mod tests {
     fn preserves_pinned_local_tools_when_tool_budget_is_tight() {
         let local_tools = PINNED_LOCAL_TOOL_NAMES
             .iter()
-            .map(|name| AzureTool {
+            .map(|name| LlmTool {
                 name: (*name).to_string(),
                 description: format!("{name} description"),
                 parameters: json!({"type": "object"}),
             })
-            .chain((0..200).map(|index| AzureTool {
+            .chain((0..200).map(|index| LlmTool {
                 name: format!("local__extra_{index}"),
                 description: format!("extra local tool {index}"),
                 parameters: json!({"type": "object"}),
@@ -1392,7 +1438,9 @@ mod tests {
             user_message_override: None,
         });
 
-        let system_prompt = messages[0]["content"].as_str().unwrap();
+        let LlmMessage::System(system_prompt) = &messages[0] else {
+            panic!("first message should be system");
+        };
 
         assert!(system_prompt.contains("local__run_skill"));
         assert!(

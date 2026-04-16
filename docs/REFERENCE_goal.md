@@ -158,7 +158,7 @@ Fields:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `name` | string | Unique identifier |
-| `transport` | string | Common values: `streamable_http`, `http`, `sse` |
+| `transport` | string | Common values: `streamable_http`, `sse`, `stdio` |
 | `url` | URL | MCP endpoint |
 | `headers` | map | Static headers merged with auth-derived headers |
 | `timeout` | float or null | Transport timeout |

@@ -1,8 +1,8 @@
 # rusty-bidule
 
 `rusty-bidule` is a prototype Rust client for investigation workflows. It pairs
-Azure OpenAI reasoning with MCP tools, optional local skill scripts, persistent
-conversation state, and both terminal and browser interfaces.
+Azure-hosted LLM reasoning with MCP tools, optional local skill scripts,
+persistent conversation state, and both terminal and browser interfaces.
 
 The project is aimed at operators who want a tool-grounded assistant rather than
 an open-ended chat shell.
@@ -11,7 +11,7 @@ an open-ended chat shell.
 
 - Runs interactive conversations in a Ratatui terminal UI
 - Exposes a lightweight web UI and REST API
-- Calls Azure OpenAI chat completions for reasoning
+- Calls Azure OpenAI or Azure Anthropic chat completions for reasoning
 - Discovers and invokes MCP tools from configured servers
 - Executes selected local skill scripts through `local__run_skill`
 - Executes configured allowlisted local CLI tools through `local__exec_cli`
@@ -33,7 +33,7 @@ Treat it as an operator tool under active iteration, not a finished platform.
 ## Requirements
 
 - Rust toolchain with Cargo
-- Network access to your Azure OpenAI endpoint
+- Network access to your configured Azure LLM endpoint
 - Zero or more reachable MCP servers if you want MCP-backed tools
 - A local browser if you use OAuth-enabled MCP servers
 
@@ -45,14 +45,14 @@ Treat it as an operator tool under active iteration, not a finished platform.
    cp config/config.example.yaml config/config.local.yaml
    ```
 
-2. Export your Azure key:
+2. Export your provider key:
 
    ```bash
    export AZURE_OPENAI_API_KEY='your-key-here'
    ```
 
-3. Edit `config/config.local.yaml` with your Azure endpoint, deployment, and
-   any MCP server settings.
+3. Edit `config/config.local.yaml` with your selected provider block,
+   endpoint, deployment, and any MCP server settings.
 
 4. Launch the terminal UI:
 
@@ -141,6 +141,8 @@ If you want to start without MCP servers, keep `mcp_servers` empty or omit it:
 prompt: |
   You are a CSIRT investigation assistant.
 
+llm_provider: azure_openai
+
 azure_openai:
   api_key: env:AZURE_OPENAI_API_KEY
   api_version: 2025-03-01-preview
@@ -150,9 +152,19 @@ azure_openai:
 mcp_servers: []
 ```
 
-### Azure OpenAI
+### LLM Provider Selection
 
-The current Azure block looks like this:
+Use `llm_provider` to select the active backend:
+
+```yaml
+llm_provider: azure_openai
+```
+
+If `llm_provider` is omitted, the app defaults to `azure_openai` when that
+block is present; otherwise it falls back to `azure_anthropic` when only that
+block is configured.
+
+### Azure OpenAI
 
 ```yaml
 azure_openai:
@@ -165,9 +177,27 @@ azure_openai:
   max_output_tokens: 1200
 ```
 
+### Azure Anthropic
+
+```yaml
+azure_anthropic:
+  api_key: env:AZURE_ANTHROPIC_API_KEY
+  anthropic_version: 2023-06-01
+  endpoint: https://example.services.ai.azure.com/anthropic/
+  deployment: claude-opus-4-6
+  temperature: 0.2
+  max_output_tokens: 1200
+```
+
 Values prefixed with `env:` are resolved from environment variables at startup.
-That resolution is supported for the Azure key, endpoint, MCP URLs, MCP header
+That resolution is supported for both LLM providers, MCP URLs, MCP header
 values, and OAuth client settings.
+
+`azure_anthropic` uses Anthropic's version header, not Azure OpenAI preview API
+versions. If you omit `anthropic_version`, the client defaults to `2023-06-01`.
+For Anthropic requests, set either `temperature` or `top_p`, not both. The
+default path uses `temperature`; if you set a non-default `top_p`, it replaces
+`temperature` in the outgoing request.
 
 ### Agent Permissions
 
@@ -218,7 +248,7 @@ mcp_runtime:
 
 ### MCP Servers
 
-MCP is optional. Each server currently supports `streamable_http` or `sse`
+MCP is optional. Each server supports `streamable_http`, `sse`, or `stdio`
 transport:
 
 ```yaml
@@ -234,6 +264,18 @@ mcp_servers:
 ```
 
 Configured headers are passed through as-is after `env:` resolution.
+
+For stdio-backed MCP servers, configure the launcher command and args instead
+of a URL:
+
+```yaml
+  - name: chrome-devtools
+    transport: stdio
+    command: npx
+    args:
+      - -y
+      - chrome-devtools-mcp@latest
+```
 
 ### OAuth-enabled MCP Servers
 

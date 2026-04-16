@@ -12,9 +12,9 @@ use tokio::io::AsyncReadExt;
 use tokio::time::Duration;
 
 use crate::{
-    azure::AzureTool,
     config::LocalToolsConfig,
     conversation_store::ConversationStore,
+    llm::LlmTool,
     skills::{SkillRegistry, SkillTool},
     types::{AgentPermissions, FilesystemAccess, RememberedJob},
 };
@@ -1330,9 +1330,9 @@ Tools:
 pub fn local_tool_definitions(
     enabled_local_tools: Option<&[String]>,
     local_tools_config: &LocalToolsConfig,
-) -> Vec<AzureTool> {
+) -> Vec<LlmTool> {
     let mut defs = vec![
-        AzureTool {
+        LlmTool {
             name: "local__sleep".to_string(),
             description: "Sleep for a specified number of seconds (max 300). Use to wait between polling operations.".to_string(),
             parameters: json!({
@@ -1344,7 +1344,7 @@ pub fn local_tool_definitions(
                 "required": ["seconds"]
             }),
         },
-        AzureTool {
+        LlmTool {
             name: "local__remember_job".to_string(),
             description: "Store a job/transaction alias for later retrieval within this conversation. Supports automation metadata. Requires filesystem write permission.".to_string(),
             parameters: json!({
@@ -1368,7 +1368,7 @@ pub fn local_tool_definitions(
                 "required": ["alias", "transaction_id"]
             }),
         },
-        AzureTool {
+        LlmTool {
             name: "local__update_job".to_string(),
             description: "Update a stored job record within this conversation. Requires filesystem write permission.".to_string(),
             parameters: json!({
@@ -1392,7 +1392,7 @@ pub fn local_tool_definitions(
                 "required": ["alias"]
             }),
         },
-        AzureTool {
+        LlmTool {
             name: "local__get_job".to_string(),
             description: "Retrieve a stored job by alias. Requires filesystem read permission.".to_string(),
             parameters: json!({
@@ -1403,7 +1403,7 @@ pub fn local_tool_definitions(
                 "required": ["alias"]
             }),
         },
-        AzureTool {
+        LlmTool {
             name: "local__list_jobs".to_string(),
             description: "List all stored jobs in this conversation. Requires filesystem read permission.".to_string(),
             parameters: json!({
@@ -1411,7 +1411,7 @@ pub fn local_tool_definitions(
                 "properties": {}
             }),
         },
-        AzureTool {
+        LlmTool {
             name: "local__forget_job".to_string(),
             description: "Remove a stored job by alias. Requires filesystem write permission.".to_string(),
             parameters: json!({
@@ -1422,7 +1422,7 @@ pub fn local_tool_definitions(
                 "required": ["alias"]
             }),
         },
-        AzureTool {
+        LlmTool {
             name: "local__time".to_string(),
             description: "Return the current UTC and local time, plus optional relative-time calculations. Use this before reasoning about windows like last 12 hours, last 2 days, today, or yesterday.".to_string(),
             parameters: json!({
@@ -1435,7 +1435,7 @@ pub fn local_tool_definitions(
                 }
             }),
         },
-        AzureTool {
+        LlmTool {
             name: "local__configure_mcp_servers".to_string(),
             description: "Update the conversation-scoped MCP server selection for subsequent turns. Requires filesystem write permission.".to_string(),
             parameters: json!({
@@ -1450,7 +1450,7 @@ pub fn local_tool_definitions(
     ];
 
     if !local_tools_config.allowed_cli_tools.is_empty() {
-        defs.push(AzureTool {
+        defs.push(LlmTool {
             name: "local__exec_cli".to_string(),
             description: format!(
                 "Execute an allowed local CLI binary with direct argv execution only; no shell parsing, pipes, redirects, or paths. Allowed commands: {}. Requires network permission when the command performs remote lookups.",
@@ -1468,7 +1468,7 @@ pub fn local_tool_definitions(
         });
     }
 
-    defs.push(AzureTool {
+    defs.push(LlmTool {
         name: "local__run_skill".to_string(),
         description: "Execute one or more skill scripts with parameters. Omitting tool_slug runs every executable tool in the matched skill. Skill-specific network/filesystem permissions are enforced unless yolo mode is enabled. Local skill execution defaults to 180s and can be overridden with timeout_seconds. Scripts may return a JSON pending-job envelope so long-running remote work can be remembered and auto-polled.".to_string(),
         parameters: json!({

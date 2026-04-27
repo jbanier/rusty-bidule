@@ -235,6 +235,9 @@ local_tools:
 - `local__run_skill` executes script-backed skills
 - `local__exec_cli` executes only the listed binary names with direct argv execution
 - `local__time` returns current UTC/local time and computes relative windows like last 12 hours or last 2 days
+- `local__get_investigation_memory`, `local__update_investigation_memory`,
+  `local__clear_investigation_memory`, and `local__search_conversation_memories`
+  manage durable case carry-over state
 - `local__exec_cli` does not invoke a shell, and does not support pipes, redirects, or path-based commands
 
 ### MCP Runtime
@@ -400,7 +403,8 @@ chat-completions transport they are exposed as capability metadata plus
 optional script-backed tools executed through `local__run_skill`.
 
 Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`. They let you preload
-instructions, an initial prompt, and an MCP server filter for a conversation.
+instructions, an initial prompt, workflow guidance, and local-tool/MCP filters
+for a conversation.
 
 ## Persistence, Logging, And Evidence
 
@@ -408,7 +412,7 @@ Durable output is split by purpose:
 
 - `var/bidule.log` stores application-level logs
 - `data/conversations/...` stores messages, per-conversation logs, compactions,
-  and tool artifacts
+  tool artifacts, scratchpads, jobs, and investigation memory
 - `data/oauth/...` stores OAuth state, tokens, and client registration data
 
 This is deliberate: `var/` is for runtime diagnostics, while `data/` is for

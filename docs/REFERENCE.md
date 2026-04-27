@@ -1,533 +1,333 @@
 # rusty-bidule Reference
 
-This document is the engineering reference for `rusty-bidule`. It describes
-how the application is composed, how a turn is executed, what gets persisted,
-and which interfaces and configuration surfaces exist today.
+`rusty-bidule` is a Rust CSIRT investigation client. It combines:
 
-## System Overview
+- an Azure OpenAI chat-completions agent,
+- optional MCP servers for remote security tools,
+- local tools for time, job tracking, skills, and investigation memory,
+- Markdown skills and recipes loaded from the repository,
+- filesystem-backed conversations, evidence, and OAuth state,
+- TUI, one-shot CLI, and web/API interfaces over the same orchestrator.
 
-`rusty-bidule` is a single-process Rust application with three operator-facing
-modes:
+This document describes the Rust client as implemented in this repository.
 
-- TUI mode through Ratatui and Crossterm
-- Web mode through Axum plus a small browser UI
-- One-shot CLI mode for a single turn
-
-All three modes share the same orchestration core:
-
-1. Load YAML configuration
-2. Initialize logging
-3. Construct the orchestrator and persistent stores
-4. Accept a user message through TUI, web, or `--once`
-   - Before dispatch, preprocess inline `@file` references in the user text
-5. Discover tools, call Azure OpenAI, execute tools, and persist results
-
-## High-Level Architecture
-
-Core runtime components:
-
-- `src/main.rs`: CLI parsing, config loading, logging bootstrap, interface selection
-- `src/orchestrator.rs`: turn execution, tool advertisement, tool loop, recipe injection, compaction
-- `src/azure.rs`: Azure OpenAI request/response handling
-- `src/mcp_runtime.rs`: MCP server management, tool discovery, tool invocation, OAuth-aware connectivity
-- `src/local_tools.rs`: built-in local tool definitions and execution
-- `src/skills.rs`: skill loading from `skills/*/SKILL.md`
-- `src/recipes.rs`: recipe loading from `recipes/*/RECIPE.md`
-- `src/conversation_store.rs`: persisted conversation state and audit logs
-- `src/tool_evidence.rs`: captured tool output persistence
-- `src/oauth.rs`: OAuth public-client flow support for MCP servers
-- `src/ui.rs`: terminal interface and slash-command handling
-- `src/web.rs`: browser UI hosting, REST API, and async job registry
-- `src/types.rs`: shared domain types such as conversations, permissions, and progress events
-- `src/logging.rs`: file and optional console logging setup
-
-## Runtime Boundaries
-
-There is no separate worker service, database, or message broker.
-
-- Persistence is filesystem-backed under `data/` and `var/`
-- Concurrency is in-process with Tokio tasks
-- Per-conversation turns are serialized with conversation-level async locks
-- Web message submission is asynchronous and tracked through an in-memory job registry
-
-This makes the project easy to run locally, but it also means there is no
-cross-process coordination or hard isolation boundary between tool execution and
-the main app.
-
-## Turn Lifecycle
-
-The main turn path lives in `Orchestrator::run_turn`.
-
-1. Acquire the per-conversation lock
-2. Persist the incoming user message
-3. Load conversation state, including pending recipe, MCP filter, and agent permissions
-4. Resolve the effective MCP filter
-5. Discover MCP tools if network access is allowed
-6. Build local tool definitions
-7. Merge local and MCP tools into the Azure tool list, truncating if needed
-8. Build the prompt stack from:
-   - base config prompt
-   - conversation history
-   - active recipe instructions
-   - MCP degradation notes
-   - skill capability summary
-   - active permission summary
-   - optional compaction context
-9. Call Azure OpenAI
-10. Execute any requested local or MCP tool calls
-11. Persist tool evidence and append audit logs
-12. Repeat the Azure/tool loop until a final assistant reply or iteration limit
-13. Persist the assistant reply with timing and tool metadata
-
-Current hard limits:
-
-- Maximum agent iterations per turn: `10`
-- Maximum tools advertised to Azure: `128`
-
-If MCP discovery fails, the application degrades rather than aborting the turn.
-The failure is surfaced to both logs and the model context.
-
-## Prompt Composition
-
-Before a normal user turn is recorded, the app preprocesses prompt text for
-inline file references:
-
-- `@path/to/file.md` reads a local text file and replaces the token inline
-- `\@path/to/file.md` keeps a literal `@...` without expansion
-- relative paths resolve from the detected project root
-- expansion requires conversation filesystem read permission
-- unresolved or unreadable references fail the submission before the turn runs
-
-The effective system context is assembled dynamically. Inputs can include:
-
-- `prompt` from configuration
-- recipe instructions from the active `RECIPE.md`
-- skill capability summary from loaded skills
-- current permission summary
-- notes about degraded MCP availability
-- historical messages and optionally an active compaction checkpoint
-
-The app does not inject arbitrary skill Markdown into the model. Skills are
-reduced to structured capability metadata.
-
-Recipes are instruction bundles, not a workflow runner. They can constrain
-available MCP/local tools and supply reusable investigation guidance, but they
-do not currently provide deterministic branching, stateful step outputs, or
-hard guarantees that the model will execute every described step.
-
-## Configuration Model
-
-Default config discovery:
-
-- default path: `config/config.local.yaml`
-- search behavior: discover project root by walking upward from the current working directory
-- override: `--config <PATH>` or `RUSTY_BIDULE_CONFIG`
-
-Top-level keys:
-
-| Key | Required | Notes |
-|-----|----------|-------|
-| `llm_provider` | no | `azure_openai` or `azure_anthropic`; when omitted, `azure_openai` wins if both are configured |
-| `azure_openai` | no | Azure OpenAI endpoint, deployment, API version, and key |
-| `azure_anthropic` | no | Azure Anthropic endpoint, deployment, Anthropic API version, and key |
-| `prompt` | no | Extra system prompt text |
-| `data_dir` | no | Defaults to `data` |
-| `agent_permissions` | no | Default permissions applied to new conversations |
-| `mcp_runtime` | no | Shared MCP timeout configuration |
-| `mcp_servers` | no | List of configured MCP servers |
-| `tracing` | no | Logging/tracing mode |
-
-### Secret Resolution
-
-Selected string fields support `env:VARNAME` indirection. Resolution happens
-when configuration is loaded.
-
-Current resolution targets:
-
-- `azure_openai.api_key`
-- `azure_openai.endpoint`
-- `azure_anthropic.api_key`
-- `azure_anthropic.endpoint`
-- `mcp_servers[].url`
-- `mcp_servers[].command`
-- `mcp_servers[].args[*]`
-- `mcp_servers[].headers[*]`
-- `mcp_servers[].auth.client_id`
-- `mcp_servers[].auth.client_secret`
-- `mcp_servers[].auth.redirect_uri`
-- `mcp_servers[].auth.resource`
-
-### Azure OpenAI
-
-`azure_openai` fields:
-
-| Field | Required | Notes |
-|-------|----------|-------|
-| `api_key` | yes | Supports `env:` |
-| `api_version` | yes | Azure API version string |
-| `endpoint` | yes | Supports `env:` |
-| `deployment` | yes | Azure deployment/model name |
-| `temperature` | no | Default `0.2` |
-| `top_p` | no | Default `1.0` |
-| `max_output_tokens` | no | Default `1200` |
-
-### Azure Anthropic
-
-`azure_anthropic` fields:
-
-| Field | Required | Notes |
-|-------|----------|-------|
-| `api_key` | yes | Supports `env:` |
-| `anthropic_version` | no | Anthropic API version header. Defaults to `2023-06-01` |
-| `api_version` | no | Deprecated legacy field. Ignored unless it already matches an Anthropic version date |
-| `endpoint` | yes | Supports `env:` |
-| `deployment` | yes | Azure Anthropic deployment/model name |
-| `temperature` | no | Default `0.2` |
-| `top_p` | no | Advanced option. When set below `1.0`, it is sent instead of `temperature` |
-| `max_output_tokens` | no | Default `1200` |
-
-### Agent Permissions
-
-`agent_permissions` fields:
-
-| Field | Notes |
-|-------|-------|
-| `allow_network` | Enables networked tool execution such as MCP calls |
-| `filesystem` | One of `none`, `read_only`, `read_write` |
-| `yolo` | Bypasses internal permission checks |
-
-Permission defaults are copied into each new conversation. In the TUI, the
-conversation can then diverge from config defaults.
-
-### MCP Runtime
-
-`mcp_runtime` fields:
-
-| Field | Notes |
-|-------|-------|
-| `connect_timeout_seconds` | Shared connection timeout for MCP server contact |
-
-### MCP Servers
-
-`mcp_servers[]` fields:
-
-| Field | Required | Notes |
-|-------|----------|-------|
-| `name` | yes | Stable server identifier |
-| `transport` | yes | `streamable_http`, `sse`, or `stdio` |
-| `url` | conditional | Required for HTTP/SSE transports, supports `env:` |
-| `command` | conditional | Required for `stdio`, supports `env:` |
-| `args` | no | Process args for `stdio`, each entry supports `env:` |
-| `headers` | no | Extra request headers, values support `env:` |
-| `timeout` | no | Per-server request timeout |
-| `sse_read_timeout` | no | Per-server SSE read timeout |
-| `client_session_timeout_seconds` | no | Per-server client session timeout |
-| `auth` | no | OAuth configuration |
-
-Supported auth config:
-
-| `auth.type` | Meaning |
-|-------------|---------|
-| `oauth_public` | Browser-based OAuth public-client flow |
-
-`oauth_public` fields:
-
-| Field | Notes |
-|-------|-------|
-| `scopes` | Requested scopes |
-| `client_id` | Required if dynamic registration is disabled |
-| `client_secret` | Optional |
-| `token_endpoint_auth_method` | Defaults to `none` |
-| `resource` | Optional resource/audience |
-| `redirect_uri` | Required callback URI |
-| `redirect_host` | Optional callback host override |
-| `redirect_port` | Optional callback port override |
-| `redirect_path` | Optional callback path override |
-| `callback_timeout_seconds` | Defaults to `300` |
-| `open_browser` | Defaults to `true` |
-| `use_dynamic_client_registration` | Enables DCR flow |
-
-### Tracing
-
-Supported tracing providers:
-
-| Provider | Behavior |
-|----------|----------|
-| `none` | File logging only |
-| `console` | File logging plus console logs |
-| `phoenix` | Accepted config value, currently warns and falls back to file logging |
-
-## Conversation Model
-
-Each conversation is persisted as a structured object with:
-
-- `conversation_id`
-- `created_at`
-- `updated_at`
-- `pending_recipe`
-- `enabled_mcp_servers`
-- `active_compaction`
-- `agent_permissions`
-- `messages`
-
-Assistant messages carry metadata for:
-
-- assistant reply index
-- cumulative tool execution seconds
-- LLM inference seconds
-- total turn duration
-- tool call count
-
-`enabled_mcp_servers` semantics:
-
-- `None`: all configured MCP servers are active
-- `Some([])`: all configured MCP servers are filtered out
-- `Some(["name-a", "name-b"])`: only those configured servers are active
-
-Conversation IDs are validated ASCII identifiers before filesystem access.
-
-## Persistence Layout
-
-Expected filesystem layout:
+## Repository Layout
 
 ```text
-rusty-bidule/
-├── src/
-├── config/config.example.yaml
-├── skills/<skill-name>/SKILL.md
-├── recipes/<recipe-name>/RECIPE.md
-├── data/
-│   ├── conversations/<conversation-id>/
-│   └── oauth/
-└── var/bidule.log
+src/
+  main.rs                 process entrypoint
+  orchestrator.rs         agent loop, tool routing, prompts, recipe application
+  local_tools.rs          built-in local tools and skill execution
+  mcp_runtime.rs          MCP discovery and tool execution
+  skills.rs               SKILL.md registry and tool metadata
+  recipes.rs              RECIPE.md registry and prompt/config overlays
+  conversation_store.rs   conversations, scratchpads, findings, jobs, memory
+  web.rs                  Axum web server and JSON API
+  ui.rs                   terminal UI and slash commands
+config/
+  config.example.yaml     example runtime config
+skills/
+  */SKILL.md              skill metadata plus optional local scripts
+recipes/
+  */RECIPE.md             prompt/config recipes
+data/
+  conversations/          durable conversation state
+  oauth/                  MCP OAuth registration and token state
+  findings.json           global finding records
+var/
+  bidule.log              process log by default
 ```
 
-Per-conversation data lives under `data/conversations/<conversation-id>/`.
+`config/config.local.yaml`, `data/`, and `var/` are local runtime state and are not required to exist before first run.
 
-Stored artifacts:
+## Runtime Model
 
-- `conversation.json`: canonical conversation state
-- `logs/conversation.log`: per-conversation audit trail
-- `tool_output/*.txt`: captured tool outputs
-- `compactions/*.json`: saved compaction summaries
+The process loads config, initializes `ConversationStore`, loads skills and recipes from the project root, creates an MCP manager, and then starts one of three interfaces:
 
-OAuth state is stored separately under `data/oauth/`.
+- TUI: default interactive terminal client.
+- One-shot CLI: `--once <message>` sends one prompt and exits.
+- Web: `--interface web` starts the Axum API and browser UI.
+
+For each normal turn:
+
+1. The user message is persisted to `conversation.json`.
+2. Conversation permissions, pending recipe, MCP filters, local-tool filters, skills, and durable memory are loaded.
+3. MCP tools are discovered only when network permission is active.
+4. Local tools and a ranked subset of MCP tools are advertised to the model.
+5. The model may call tools for up to 10 agent iterations.
+6. Tool outputs are saved as evidence.
+7. The final assistant reply is stored with timing and tool-call metadata.
+8. A pending recipe is cleared after a non-automation turn.
+
+Recipes are prompt guidance and configuration overlays. They are not executable scripts or deterministic workflow engines.
+
+## Configuration
+
+The config model is defined in `src/config.rs`. Main top-level keys:
+
+| Key | Purpose |
+| --- | --- |
+| `prompt` | Optional base system prompt text. |
+| `data_dir` | Runtime data root. Defaults to `data`. |
+| `llm_provider` | Provider selector. Supported values are `azure_openai` and `azure_anthropic`. |
+| `azure_openai` | Azure OpenAI endpoint, deployment, API key, and sampling settings. |
+| `azure_anthropic` | Azure Anthropic endpoint, deployment, API key, and sampling settings. |
+| `mcp_servers` | Remote MCP server definitions. |
+| `mcp_runtime` | MCP connection timeout and parallelism settings. |
+| `local_tools` | Local execution timeout and allowed CLI binaries. |
+| `agent_permissions` | Default per-conversation network/filesystem/yolo permissions. |
+| `tracing` | Log path and filtering settings. |
+
+Per-conversation permissions can differ from defaults and are stored in each conversation record.
+
+## Persistence
+
+Each conversation lives under `data/conversations/<conversation-id>/`:
+
+```text
+conversation.json
+scratchpad.md
+investigation_memory.json
+job_state.json
+logs/conversation.log
+tool_output/
+compactions/
+```
+
+The store also keeps:
+
+- `data/findings.json` for global finding records,
+- `data/exports/` for exported conversation summaries,
+- `data/oauth/` for MCP OAuth token/client state.
+
+### Investigation Memory
+
+Investigation memory is durable structured JSON for case carry-over. It is injected into the system prompt when present and can be managed through local tools.
+
+Stable fields:
+
+- `updated_at`
+- `updated_by`
+- `summary`
+- `entities`
+- `timeline`
+- `decisions`
+- `hypotheses`
+- `trusted_sources`
+- `unresolved_questions`
+
+`updated_at` and `updated_by` are metadata fields set by the local update tool. `entities`, `timeline`, `decisions`, `hypotheses`, `trusted_sources`, and `unresolved_questions` are arrays of JSON values so skills and agents can store domain-shaped records without schema migrations. Merge updates deduplicate exact JSON array entries, and memory search indexes readable field/value lines rather than compact raw JSON.
+
+## Local Tools
+
+Built-in local tools are advertised as model tools when enabled by the current conversation/recipe:
+
+| Tool | Purpose |
+| --- | --- |
+| `local__sleep` | Wait between polling operations. |
+| `local__time` | Return UTC/local time and relative windows. |
+| `local__configure_mcp_servers` | Update the conversation-scoped MCP server filter. |
+| `local__exec_cli` | Execute an explicitly allowlisted bare CLI command with direct argv. |
+| `local__run_skill` | Execute script-backed skill tools. |
+| `local__remember_job` | Store a long-running job or transaction alias. |
+| `local__update_job` | Update stored job metadata. |
+| `local__get_job` | Retrieve one stored job. |
+| `local__list_jobs` | List stored jobs. |
+| `local__forget_job` | Remove a stored job. |
+| `local__get_investigation_memory` | Return this conversation's durable memory. |
+| `local__update_investigation_memory` | Merge or replace this conversation's durable memory. |
+| `local__clear_investigation_memory` | Clear this conversation's durable memory. |
+| `local__search_conversation_memories` | Search durable memories across conversations. |
+
+Permission checks are enforced before local tools run:
+
+- networked skills and `local__exec_cli` require network permission,
+- read-only skill/file operations require filesystem read permission,
+- memory/job updates require filesystem write permission,
+- `yolo` bypasses these application-level checks.
 
 ## Skills
 
-Skills are loaded from `skills/<skill-name>/SKILL.md`.
+Skills are loaded from `skills/<skill-name>/SKILL.md`. A skill file uses YAML frontmatter plus Markdown sections. Canonical Rust-native shape:
 
-Current runtime use of `SKILL.md` is intentionally narrow:
+```markdown
+---
+name: gmail-read
+description: Reads Gmail messages from a saved read-only OAuth token.
+keywords: gmail, email, inbox
+---
 
-- skill name
-- skill description
-- `Tools:` block
+# Gmail Read
 
-Supported `Tools:` forms:
-
-```text
 Tools:
-  - name: Retrieve Emails
-    slug: retrieve_emails
-    description: Fetch emails from a folder.
-    script: scripts/retrieve_emails.py
+  - name: Read Gmail Messages
+    slug: gmail_read_messages
+    description: Read Gmail messages matching a query.
+    script: scripts/gmail_read_messages.py
+    network: true
+    filesystem: read_only
+
+## When to use
+
+- Check recent inbox messages.
 ```
 
-```text
-Tools:
-  retrieve_emails: scripts/retrieve_emails.py
-```
+The shared document parser supports frontmatter plus labeled sections such as:
 
-```text
-Tools:
-  - scripts/retrieve_emails.py
-```
+- `Tools:`
+- `## When to use`
+- `## Constraints`
+- `## Authentication setup`
+- `## Output`
+- `## Edge cases`
 
-Recognized skill tool fields:
+Tool metadata fields:
 
 | Field | Notes |
-|-------|-------|
-| `name` | Optional display name |
-| `slug` | Internal identifier |
-| `description` | Optional model-facing description |
-| `script` | Relative path to a local executable script |
-| `server` | Metadata for MCP-backed capability entries |
-| `network` | Optional boolean capability hint |
-| `filesystem` | Optional; `none`, `read_only`, or `read_write` |
+| --- | --- |
+| `name` | Human-readable tool name. |
+| `slug` | Required local tool selector. |
+| `description` | Prompt-facing tool description. |
+| `script` | Script path relative to the skill directory. |
+| `network` | Boolean network requirement. |
+| `filesystem` | `none`, `read_only`, or `read_write`. |
+| `mcp` | Metadata-only MCP-backed marker. |
+| `server` | Optional MCP server label for metadata-only skills. |
 
-Current limitations:
+Script-backed tools are executed with:
 
-- Only script-backed skill tools are locally executable
-- Skill body Markdown is not injected into the prompt
-- MCP-backed skill entries are metadata only
-- Permission checks are policy checks, not OS sandboxing of child processes
+```json
+{
+  "skill_name": "gmail-read",
+  "tool_slug": "gmail_read_messages",
+  "parameters": "{\"query\":\"is:unread newer_than:1d\"}"
+}
+```
+
+`parameters` is a JSON string. Object keys become CLI flags by converting underscores to hyphens.
+
+Python scripts run via `python3`, falling back to `python`. Non-Python scripts run directly and must be executable.
+
+### Pending Skill Jobs
+
+A skill script can return this JSON envelope to store long-running remote work:
+
+```json
+{
+  "status": "pending",
+  "job": {
+    "alias": "splunk-search",
+    "transaction_id": "sid-123",
+    "status": "running",
+    "poll_interval_seconds": 30,
+    "automation_prompt": "Poll this job and summarize the result."
+  }
+}
+```
+
+The local runner stores the job in `job_state.json`. `AutoPullRuntime` can later continue jobs whose mode is `auto_pull`.
 
 ## Recipes
 
-Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`.
+Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`. They use the same shared frontmatter/section parser as skills.
 
-Recognized frontmatter:
+Canonical shape:
 
-| Key | Notes |
-|-----|-------|
-| `name` | Machine-readable identifier |
-| `title` | Optional UI label |
-| `description` | Optional summary |
-| `keywords` | Optional search tags |
+```markdown
+---
+name: morning-routine
+title: Morning Shift Handover
+description: Summarize overnight CSIRT activity.
+keywords: morning, handover, night
+---
 
-Recognized sections:
+Instructions:
+Use local__time, collect the required sources, and write concise operator notes.
 
-| Section | Notes |
-|---------|-------|
-| `Instructions:` | Injected into the system prompt |
-| `Initial Prompt:` | Loaded into the TUI input box on activation |
-| `Config:` | Currently enforces `mcp_servers` |
-| `Response Template:` | Plain text wrapper using `{{ recipe_title }}` and `{{ response }}` |
+Config:
+  local_tools:
+    - local__time
+    - local__run_skill
+  mcp_servers:
+    - splunk
 
-Recipes are prompt/configuration assets, not executable scripts. They do not
-currently restrict built-in local tools.
+Workflow:
+  type: guided_collection
 
-## Built-in Local Tools
+Initial Prompt:
+I need a summary of the last 12 hours.
 
-Always-advertised local tools:
+Response Template:
+## {{ recipe_title }}
 
-- `local__sleep`
-- `local__remember_job`
-- `local__get_job`
-- `local__list_jobs`
-- `local__forget_job`
-- `local__time`
-- `local__exec_cli`
-- `local__run_skill`
+{{ response }}
+```
 
-Behavior notes:
+Supported recipe sections:
 
-- `local__run_skill` executes a local script from a selected skill definition
-- `local__exec_cli` executes only config-allowlisted binary names with direct argv execution
-- `local__time` provides current UTC/local time and relative window calculations for prompt grounding
-- job memory tools depend on filesystem access
-- local tools are advertised even when MCP is disabled
+- `Instructions:` - prompt guidance injected into the system prompt.
+- `Config:` - optional `local_tools` and `mcp_servers` filters for the turn.
+- `Workflow:` - preserved as model guidance, not executed deterministically.
+- `Initial Prompt:` - loaded into the TUI input when a recipe is selected.
+- `Response Template:` - simple `{{ recipe_title }}` and `{{ response }}` replacement.
 
-## MCP Behavior
+If a recipe restricts `local_tools`, only those local tools are advertised for the turn.
 
-If MCP servers are configured and network access is allowed, the app discovers
-tools at turn time and advertises them to Azure.
+## MCP
 
-Effective MCP server selection can come from:
+MCP servers are configured in `mcp_servers`. Network permission must be enabled before MCP discovery or tool calls happen. The orchestrator advertises a ranked subset of local and MCP tools to stay under the provider tool limit.
 
-- the conversation state
-- a recipe `Config: mcp_servers:`
+MCP tool names are externalized as `<server>__<tool>`. The original server and tool names are retained internally for execution.
 
-The recipe filter takes precedence over the conversation filter.
-
-If network access is disabled:
-
-- MCP tools are hidden from the model
-- MCP tool execution is rejected unless YOLO mode is enabled
-
-If no MCP servers are configured, the app continues with local tools only.
+OAuth-capable MCP servers use `auth.type: oauth_public`. Token/client state is stored under `data/oauth/`.
 
 ## Interfaces
 
-### CLI
+### TUI
 
-Supported arguments:
+The TUI supports chat plus slash commands for:
 
-| Option | Meaning |
-|--------|---------|
-| `--config <PATH>` | Override config path |
-| `--interface <tui|web>` | Select interface |
-| `--host <HOST>` | Web bind address |
-| `--port <PORT>` | Web port |
-| `--once <MESSAGE>` | Run one turn and exit |
-| `--conversation <ID>` | Conversation to use with `--once` |
+- conversation navigation,
+- recipe activation,
+- MCP filters,
+- permissions,
+- scratchpad,
+- findings,
+- local search,
+- compaction,
+- logging/help/exit.
 
-### TUI Commands
+### Web/API
 
-| Command | Behavior |
-|---------|----------|
-| `/new` | Create a conversation |
-| `/list [all|archived]` | List active, all, or archived conversations |
-| `/use <id>` | Switch conversation |
-| `/show [id]` | Switch to and display a conversation |
-| `/title [text]` | Set or clear the current conversation title |
-| `/archive [id]` | Archive the current or specified conversation |
-| `/unarchive <id>` | Restore an archived conversation |
-| `/export [id]` | Write a local JSON session summary under `data/exports/` |
-| `/delete <id>` | Delete a conversation |
-| `/login <server>` | Start MCP OAuth login |
-| `/compact` | Compact current conversation |
-| `/recipes` | List recipes |
-| `/recipe use <name>` | Activate a recipe |
-| `/recipe show <name>` | Show recipe instructions |
-| `/recipe clear` | Clear active recipe |
-| `/mcp` or `/mcp status` | List configured MCP servers and current filter state |
-| `/mcp reset|enable|disable|only ...` | Manage per-conversation MCP filter |
-| `/permissions` | Show active permissions |
-| `/permissions network on|off` | Toggle network access |
-| `/permissions fs none|read|write` | Set filesystem access |
-| `/permissions yolo on|off` | Toggle YOLO mode |
-| `/permissions reset` | Reset to config defaults |
-| `/yolo on|off` | Shortcut for YOLO toggle |
-| `/scratch [show|set|append|clear]` | Manage the per-conversation scratchpad |
-| `/findings [list|add|update|remove]` | Manage structured local findings, including tags, confidence, and artifact references |
-| `/search <query>` | Search conversations, scratchpads, and findings locally |
-| `/logging` | Show current logging note |
-| `/exit` or `/quit` | Exit the TUI |
+The web server exposes:
 
-### Web API
+- `GET /healthz`
+- `GET/POST /api/conversations`
+- `GET/PUT/DELETE /api/conversations/{id}`
+- `POST /api/conversations/{id}/messages`
+- `POST /api/conversations/{id}/compact`
+- `POST/DELETE /api/conversations/{id}/recipe`
+- `GET/PUT/DELETE /api/conversations/{id}/mcp-servers`
+- `GET /api/conversations/{id}/mcp-statuses`
+- `GET /api/conversations/{id}/jobs`
+- `GET/PUT /api/conversations/{id}/scratchpad`
+- `GET/POST /api/conversations/{id}/findings`
+- `PUT/DELETE /api/findings/{finding_id}`
+- `GET /api/search`
+- `GET /api/recipes`
+- `GET/DELETE /api/jobs/{job_id}`
+- MCP OAuth helper routes under `/api/mcp/oauth-servers`
 
-Routes currently exposed by the Axum server:
+`/api/search` searches conversation messages, scratchpads, findings, and investigation memory.
 
-| Method | Path | Notes |
-|--------|------|-------|
-| `GET` | `/` | Browser UI shell |
-| `GET` | `/healthz` | Health check |
-| `GET` | `/api/conversations` | List conversations, defaults to active only; `?include_archived=true` includes archived |
-| `POST` | `/api/conversations` | Create conversation |
-| `GET` | `/api/conversations/{id}` | Load conversation |
-| `PUT` | `/api/conversations/{id}` | Update conversation metadata such as the title |
-| `DELETE` | `/api/conversations/{id}` | Delete conversation |
-| `POST` | `/api/conversations/{id}/archive` | Archive conversation |
-| `POST` | `/api/conversations/{id}/unarchive` | Restore conversation |
-| `GET` | `/api/conversations/{id}/export-summary` | Generate and return the current JSON session summary |
-| `POST` | `/api/conversations/{id}/export-summary` | Generate and save the JSON session summary under `data/exports/` |
-| `POST` | `/api/conversations/{id}/messages` | Submit a message, preprocesses inline `@file` references, returns async job id |
-| `POST` | `/api/conversations/{id}/compact` | Compact conversation |
-| `POST` | `/api/conversations/{id}/recipe` | Set active recipe |
-| `DELETE` | `/api/conversations/{id}/recipe` | Clear active recipe |
-| `GET` | `/api/conversations/{id}/mcp-servers` | Get effective conversation MCP filter |
-| `PUT` | `/api/conversations/{id}/mcp-servers` | Set conversation MCP filter |
-| `DELETE` | `/api/conversations/{id}/mcp-servers` | Reset conversation MCP filter |
-| `GET` | `/api/conversations/{id}/scratchpad` | Load conversation scratchpad |
-| `PUT` | `/api/conversations/{id}/scratchpad` | Save conversation scratchpad |
-| `GET` | `/api/conversations/{id}/findings` | List findings for a conversation |
-| `POST` | `/api/conversations/{id}/findings` | Add a finding to a conversation |
-| `PUT` | `/api/findings/{finding_id}` | Replace finding metadata such as note, tags, confidence, or artifact reference |
-| `DELETE` | `/api/findings/{finding_id}` | Remove a stored finding |
-| `GET` | `/api/search?q=...` | Search conversations, scratchpads, and findings locally |
-| `GET` | `/api/recipes` | List recipes |
-| `GET` | `/api/jobs/{job_id}` | Poll async job state |
-| `DELETE` | `/api/jobs/{job_id}` | Delete async job state |
+## Current Non-Goals
 
-Web message delivery is asynchronous. `POST /api/conversations/{id}/messages`
-returns `202 Accepted` with a `job_id`; clients then poll `/api/jobs/{job_id}`.
+The Rust client does not currently implement:
 
-Completed jobs are kept in memory for up to one hour unless deleted earlier.
+- deterministic iterative recipe execution,
+- scheduled recipes/prompts,
+- outbound delivery wrappers,
+- command-backed skill adapters beyond `local__exec_cli`,
+- full compatibility with the older Python `bidule2` internals.
 
-## Logging And Observability
-
-Primary log destinations:
-
-- `var/bidule.log`: application-level logs
-- `data/conversations/<id>/logs/conversation.log`: per-conversation audit trail
-
-One-shot mode also emits progress updates to `stderr`.
-
-## Limitations And Risks
-
-- Tool permission checks are application-level, not OS sandboxing
-- Web job state is in-memory and disappears on process restart
-- Completed web jobs are TTL-based rather than durably queued
-- Large tool inventories are truncated to satisfy Azure limits
-- The app is single-process and filesystem-backed, so it is not designed for high-concurrency multi-node deployment
+Those concepts may be added later, but current recipes and skills should target the Rust-native `local__run_skill` and local-tool contracts.

@@ -32,6 +32,9 @@ const MAX_AZURE_TOOL_COUNT: usize = 128;
 const PINNED_LOCAL_TOOL_NAMES: &[&str] = &[
     "local__configure_mcp_servers",
     "local__run_skill",
+    "local__get_investigation_memory",
+    "local__update_investigation_memory",
+    "local__search_conversation_memories",
     "local__get_job",
     "local__list_jobs",
 ];
@@ -112,13 +115,41 @@ impl Orchestrator {
         let skills_dir = discover_project_root()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("skills");
-        let skills = SkillRegistry::load(&skills_dir).unwrap_or_default();
+        let skills = match SkillRegistry::load(&skills_dir) {
+            Ok(skills) => skills,
+            Err(err) => {
+                warn!(
+                    path = %skills_dir.display(),
+                    error = %err,
+                    "failed to load skills registry; continuing with no skills"
+                );
+                eprintln!(
+                    "Warning: failed to load skills from {}: {err}. Continuing with no skills.",
+                    skills_dir.display()
+                );
+                SkillRegistry::default()
+            }
+        };
 
         // Load recipes from {project_root}/recipes/
         let recipes_dir = discover_project_root()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("recipes");
-        let recipes = RecipeRegistry::load(&recipes_dir).unwrap_or_default();
+        let recipes = match RecipeRegistry::load(&recipes_dir) {
+            Ok(recipes) => recipes,
+            Err(err) => {
+                warn!(
+                    path = %recipes_dir.display(),
+                    error = %err,
+                    "failed to load recipe registry; continuing with no recipes"
+                );
+                eprintln!(
+                    "Warning: failed to load recipes from {}: {err}. Continuing with no recipes.",
+                    recipes_dir.display()
+                );
+                RecipeRegistry::default()
+            }
+        };
 
         info!(
             mcp_server_count = config.mcp_servers.len(),
@@ -375,12 +406,13 @@ impl Orchestrator {
 
         // Skills capability summary
         let capability_summary = self.inner.skills.capability_summary();
+        let recipe_guidance = recipe.as_ref().map(|r| r.prompt_guidance());
 
         let mut messages = build_messages(MessageBuildContext {
             prompt: self.inner.config.prompt.as_deref(),
             history: &history,
             mcp_error: mcp_error.as_deref(),
-            recipe_instructions: recipe.as_ref().map(|r| r.instructions.as_str()),
+            recipe_instructions: recipe_guidance.as_deref(),
             capability_summary: if capability_summary.is_empty() {
                 None
             } else {
@@ -770,6 +802,24 @@ impl Orchestrator {
             }
         }
 
+        if local_executor.is_known_local_tool(tool_name) {
+            let failure = format!(
+                "local tool '{tool_name}' is disabled by the active recipe or conversation local tool filter. Enable it in Config.local_tools or reset the conversation local tool filter before retrying."
+            );
+            self.inner.evidence.write_artifact(
+                conversation_id,
+                tool_name,
+                &arguments,
+                "failure",
+                &failure,
+            )?;
+            self.inner.store.append_log(
+                conversation_id,
+                &format!("local tool call disabled: {} error={}", tool_name, failure),
+            )?;
+            return Err(anyhow!(failure));
+        }
+
         if !agent_permissions.allows_network() {
             let failure = format!(
                 "permission denied: MCP tool '{tool_name}' requires network access. Enable it with /permissions network on, or use /yolo on."
@@ -858,6 +908,7 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
         - Prefer local skill execution when an appropriate listed skill exists.\n\
         - A listed skill with a local script must be executed via `local__run_skill`.\n\
         - Use `local__time` before making claims about relative windows like last 12 hours, last 2 days, today, or yesterday.\n\
+        - Use investigation memory to preserve durable case context: read it when resuming a case, update it when durable conclusions, entities, decisions, or unresolved questions change.\n\
         - Use `local__exec_cli` only for explicitly allowed local CLI binaries such as `whois`, `dig`, `nslookup`, `vt`, or `nmap` when that tool is advertised.\n\
         - Never say a listed local skill is unavailable because of MCP; use the local runner first.\n\
         - Only describe MCP as unavailable when an advertised MCP tool is actually required or a skill explicitly says it is MCP-backed.\n\
@@ -870,6 +921,16 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
     if let Some(prompt) = ctx.prompt {
         system_prompt.push_str("\n\nOperator prompt:\n");
         system_prompt.push_str(prompt);
+    }
+    if let Ok(memory) = ctx.store.load_investigation_memory(ctx.conversation_id)
+        && !memory.is_empty()
+        && let Ok(memory_json) = serde_json::to_string_pretty(&memory)
+    {
+        system_prompt.push_str("\n\nDurable investigation memory for this conversation:\n");
+        system_prompt.push_str(&memory_json);
+        system_prompt.push_str(
+            "\nUse this as carry-over context. Update it with `local__update_investigation_memory` if the durable case state changes.",
+        );
     }
     if let Some(summary) = ctx.capability_summary {
         system_prompt.push_str("\n\n");
@@ -1091,7 +1152,7 @@ fn build_tool_selection_query(
 
     if let Some(recipe) = recipe {
         parts.push(recipe.name.clone());
-        parts.push(recipe.instructions.clone());
+        parts.push(recipe.prompt_guidance());
     }
 
     parts.join("\n")

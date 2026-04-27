@@ -4,7 +4,7 @@ use anyhow::Result;
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -24,6 +24,7 @@ use crate::{
 };
 
 static INDEX_HTML: &str = include_str!("static/index.html");
+static STYLES_CSS: &str = include_str!("static/styles.css");
 
 // ---------------------------------------------------------------------------
 // Job registry
@@ -209,6 +210,13 @@ async fn healthz() -> axum::Json<serde_json::Value> {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn styles() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        STYLES_CSS,
+    )
 }
 
 async fn list_conversations(
@@ -458,6 +466,11 @@ async fn list_recipes(
                 "title": r.title,
                 "description": r.description,
                 "keywords": r.keywords,
+                "initial_prompt": r.initial_prompt,
+                "config": {
+                    "mcp_servers": r.config_mcp_servers,
+                    "local_tools": r.config_local_tools,
+                },
             })
         })
         .collect::<Vec<_>>();
@@ -759,7 +772,7 @@ async fn oauth_callback(Path(server_name): Path<String>) -> Html<String> {
   <script>
     try {{
       if (window.opener && !window.opener.closed) {{
-        window.opener.postMessage({{ type: 'rusty-bidule-oauth-complete', server: '{}' }}, window.location.origin);
+        window.opener.postMessage({{ type: 'agent-console-oauth-complete', server: '{}' }}, window.location.origin);
       }}
     }} catch (_) {{}}
     setTimeout(() => window.close(), 400);
@@ -812,6 +825,8 @@ pub async fn run_web_server(
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/styles.css", get(styles))
+        .route("/static/styles.css", get(styles))
         .route("/healthz", get(healthz))
         .route("/oauth/callback/{server_name}", get(oauth_callback))
         .route("/api/config", get(get_config).put(put_config))

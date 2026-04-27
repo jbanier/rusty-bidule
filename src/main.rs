@@ -1,6 +1,7 @@
 mod auto_pull;
 mod config;
 mod conversation_store;
+mod doc_sections;
 mod llm;
 mod local_tools;
 mod logging;

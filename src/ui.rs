@@ -1920,7 +1920,7 @@ fn ordered_transcript_messages(messages: &[Message], command_output: &[Message])
     let mut combined = Vec::with_capacity(messages.len() + command_output.len());
     combined.extend(messages.iter().cloned());
     combined.extend(command_output.iter().cloned());
-    combined.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+    combined.sort_by_key(|message| std::cmp::Reverse(message.timestamp));
     combined
 }
 

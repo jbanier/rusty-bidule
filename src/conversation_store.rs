@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::types::{
-    AgentPermissions, Conversation, ConversationSummary, FindingRecord, Message, MessageMetadata,
-    RememberedJob, SearchResult,
+    AgentPermissions, Conversation, ConversationSummary, FindingRecord, InvestigationMemory,
+    Message, MessageMetadata, RememberedJob, SearchResult,
 };
 
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ impl ConversationStore {
                 enabled_mcp_servers: conversation.enabled_mcp_servers,
             });
         }
-        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
         Ok(summaries)
     }
 
@@ -206,6 +206,12 @@ impl ConversationStore {
             .join("scratchpad.md"))
     }
 
+    fn investigation_memory_path(&self, conversation_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .conversation_dir(conversation_id)?
+            .join("investigation_memory.json"))
+    }
+
     fn findings_path(&self) -> PathBuf {
         self.data_root.join("findings.json")
     }
@@ -229,6 +235,38 @@ impl ConversationStore {
         fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))
     }
 
+    pub fn load_investigation_memory(&self, conversation_id: &str) -> Result<InvestigationMemory> {
+        self.ensure_layout(conversation_id)?;
+        let path = self.investigation_memory_path(conversation_id)?;
+        if !path.exists() {
+            return Ok(InvestigationMemory::default());
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    pub fn save_investigation_memory(
+        &self,
+        conversation_id: &str,
+        memory: &InvestigationMemory,
+    ) -> Result<()> {
+        self.ensure_layout(conversation_id)?;
+        let path = self.investigation_memory_path(conversation_id)?;
+        let payload = serde_json::to_string_pretty(memory)?;
+        fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    pub fn clear_investigation_memory(&self, conversation_id: &str) -> Result<bool> {
+        self.ensure_layout(conversation_id)?;
+        let path = self.investigation_memory_path(conversation_id)?;
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+        Ok(true)
+    }
+
     pub fn load_findings(&self) -> Result<Vec<FindingRecord>> {
         self.init()?;
         let path = self.findings_path();
@@ -247,6 +285,7 @@ impl ConversationStore {
         fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_finding(
         &self,
         conversation_id: &str,
@@ -275,11 +314,12 @@ impl ConversationStore {
         );
         let mut findings = self.load_findings()?;
         findings.push(finding.clone());
-        findings.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        findings.sort_by_key(|finding| std::cmp::Reverse(finding.updated_at));
         self.save_findings(&findings)?;
         Ok(finding)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_finding(
         &self,
         finding_id: &str,
@@ -307,7 +347,7 @@ impl ConversationStore {
             break;
         }
         if updated.is_some() {
-            findings.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            findings.sort_by_key(|finding| std::cmp::Reverse(finding.updated_at));
             self.save_findings(&findings)?;
         }
         Ok(updated)
@@ -359,6 +399,7 @@ impl ConversationStore {
     pub fn export_conversation_summary(&self, conversation_id: &str) -> Result<PathBuf> {
         let conversation = self.load(conversation_id)?;
         let scratchpad = self.load_scratchpad(conversation_id)?;
+        let investigation_memory = self.load_investigation_memory(conversation_id)?;
         let jobs = self.load_job_state(conversation_id)?;
         let findings = self
             .load_findings()?
@@ -392,6 +433,7 @@ impl ConversationStore {
             "exported_at": Utc::now().to_rfc3339(),
             "conversation": conversation,
             "scratchpad": scratchpad,
+            "investigation_memory": investigation_memory,
             "jobs": jobs,
             "findings": findings,
             "active_compaction_summary": active_compaction_summary,
@@ -434,6 +476,18 @@ impl ConversationStore {
                     title: summary.conversation_id.clone(),
                     snippet: summarize_match(&scratchpad, query),
                 });
+            }
+
+            let memory = self.load_investigation_memory(&summary.conversation_id)?;
+            if !memory.is_empty() {
+                let memory_text = investigation_memory_search_text(&memory);
+                if memory_text.to_ascii_lowercase().contains(&needle) {
+                    results.push(SearchResult {
+                        scope: "investigation_memory".to_string(),
+                        title: summary.conversation_id.clone(),
+                        snippet: summarize_match(&memory_text, query),
+                    });
+                }
             }
         }
 
@@ -487,6 +541,30 @@ impl ConversationStore {
             }
         }
 
+        Ok(results)
+    }
+
+    pub fn search_investigation_memories(&self, query: &str) -> Result<Vec<SearchResult>> {
+        let needle = query.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        for summary in self.list_conversations_with_archived(true)? {
+            let memory = self.load_investigation_memory(&summary.conversation_id)?;
+            if memory.is_empty() {
+                continue;
+            }
+            let memory_text = investigation_memory_search_text(&memory);
+            if memory_text.to_ascii_lowercase().contains(&needle) {
+                results.push(SearchResult {
+                    scope: "investigation_memory".to_string(),
+                    title: summary.conversation_id,
+                    snippet: summarize_match(&memory_text, query),
+                });
+            }
+        }
         Ok(results)
     }
 
@@ -659,6 +737,45 @@ fn summarize_match(text: &str, query: &str) -> String {
     }
 }
 
+fn investigation_memory_search_text(memory: &InvestigationMemory) -> String {
+    let mut parts = Vec::new();
+    if let Some(updated_at) = memory.updated_at.as_ref() {
+        parts.push(format!("updated_at: {}", updated_at.to_rfc3339()));
+    }
+    if let Some(updated_by) = memory.updated_by.as_deref()
+        && !updated_by.trim().is_empty()
+    {
+        parts.push(format!("updated_by: {}", updated_by.trim()));
+    }
+    if !memory.summary.trim().is_empty() {
+        parts.push(format!("summary: {}", memory.summary.trim()));
+    }
+    append_memory_values(&mut parts, "entities", &memory.entities);
+    append_memory_values(&mut parts, "timeline", &memory.timeline);
+    append_memory_values(&mut parts, "decisions", &memory.decisions);
+    append_memory_values(&mut parts, "hypotheses", &memory.hypotheses);
+    append_memory_values(&mut parts, "trusted_sources", &memory.trusted_sources);
+    append_memory_values(
+        &mut parts,
+        "unresolved_questions",
+        &memory.unresolved_questions,
+    );
+    parts.join("\n")
+}
+
+fn append_memory_values(parts: &mut Vec<String>, label: &str, values: &[serde_json::Value]) {
+    for value in values {
+        parts.push(format!("{label}: {}", memory_value_text(value)));
+    }
+}
+
+fn memory_value_text(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
+}
+
 fn normalize_optional_text(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -678,9 +795,10 @@ fn normalize_tags(tags: &[String]) -> Vec<String> {
 mod tests {
     use std::fs;
 
+    use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::types::AgentPermissions;
+    use crate::types::{AgentPermissions, InvestigationMemory};
 
     use super::ConversationStore;
 
@@ -822,6 +940,7 @@ mod tests {
             conversation.conversation_id
         );
         assert_eq!(value["scratchpad"], "working notes");
+        assert!(value.get("investigation_memory").is_some());
         assert_eq!(value["findings"].as_array().unwrap().len(), 1);
         assert_eq!(value["findings"][0]["confidence"], 80);
         assert_eq!(
@@ -861,5 +980,45 @@ mod tests {
 
         assert!(results.iter().any(|result| result.scope == "conversation"));
         assert!(results.iter().any(|result| result.scope == "finding"));
+    }
+
+    #[test]
+    fn investigation_memory_round_trip_and_search_works() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let memory = InvestigationMemory {
+            summary: "Tracking suspicious admin login".to_string(),
+            entities: vec![json!({"type": "user", "value": "alice@example.com"})],
+            timeline: vec![json!({"time": "2026-04-23T02:00:00Z", "event": "login"})],
+            ..InvestigationMemory::default()
+        };
+
+        store
+            .save_investigation_memory(&conversation.conversation_id, &memory)
+            .unwrap();
+
+        let loaded = store
+            .load_investigation_memory(&conversation.conversation_id)
+            .unwrap();
+        assert_eq!(loaded.summary, "Tracking suspicious admin login");
+
+        let results = store
+            .search_investigation_memories("alice@example.com")
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].scope, "investigation_memory");
+
+        assert!(
+            store
+                .clear_investigation_memory(&conversation.conversation_id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .load_investigation_memory(&conversation.conversation_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

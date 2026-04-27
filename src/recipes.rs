@@ -6,6 +6,8 @@ use std::{
 use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
+use crate::doc_sections::ParsedMarkdownDoc;
+
 #[derive(Debug, Clone)]
 pub struct Recipe {
     pub name: String,
@@ -16,6 +18,7 @@ pub struct Recipe {
     pub initial_prompt: Option<String>,
     pub config_mcp_servers: Option<Vec<String>>,
     pub config_local_tools: Option<Vec<String>>,
+    pub workflow: Option<String>,
     pub response_template: Option<String>,
 }
 
@@ -29,6 +32,21 @@ impl Recipe {
         } else {
             response.to_string()
         }
+    }
+
+    pub fn prompt_guidance(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.instructions.trim().is_empty() {
+            parts.push(format!("Instructions:\n{}", self.instructions.trim()));
+        }
+        if let Some(workflow) = self.workflow.as_deref().map(str::trim)
+            && !workflow.is_empty()
+        {
+            parts.push(format!(
+                "Workflow guidance:\n{workflow}\n\nTreat this workflow as model guidance. Do not claim it was executed unless you used the relevant tools and grounded the result in their output."
+            ));
+        }
+        parts.join("\n\n")
     }
 }
 
@@ -82,17 +100,14 @@ impl RecipeRegistry {
 fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-
-    let (frontmatter, body) = split_frontmatter(&raw);
+    let doc = ParsedMarkdownDoc::parse(&raw, &path.display().to_string())?;
 
     let name;
     let mut title = None;
     let mut description = None;
     let mut keywords = Vec::new();
 
-    if let Some(fm) = frontmatter {
-        let yaml: serde_yaml::Value = serde_yaml::from_str(fm)
-            .with_context(|| format!("failed to parse frontmatter in {}", path.display()))?;
+    if let Some(yaml) = doc.frontmatter.as_ref() {
         name = yaml
             .get("name")
             .and_then(|v| v.as_str())
@@ -106,7 +121,7 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
             .get("description")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        keywords = parse_keywords(&yaml);
+        keywords = parse_keywords(yaml);
     } else {
         name = path
             .parent()
@@ -116,17 +131,12 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
             .to_string();
     }
 
-    let instructions = extract_section(&body, "Instructions:");
-    let initial_prompt = {
-        let s = extract_section(&body, "Initial Prompt:");
-        if s.is_empty() { None } else { Some(s) }
-    };
-    let response_template = {
-        let s = extract_section(&body, "Response Template:");
-        if s.is_empty() { None } else { Some(s) }
-    };
+    let instructions = doc.section_string("Instructions");
+    let initial_prompt = non_empty_section(&doc, "Initial Prompt");
+    let response_template = non_empty_section(&doc, "Response Template");
+    let workflow = non_empty_section(&doc, "Workflow");
 
-    let (config_mcp_servers, config_local_tools) = parse_config_section(&body);
+    let (config_mcp_servers, config_local_tools) = parse_config_section(&doc);
 
     Ok(Recipe {
         name,
@@ -137,21 +147,14 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
         initial_prompt,
         config_mcp_servers,
         config_local_tools,
+        workflow,
         response_template,
     })
 }
 
-fn split_frontmatter(raw: &str) -> (Option<&str>, String) {
-    if !raw.starts_with("---\n") {
-        return (None, raw.to_string());
-    }
-    if let Some(end_pos) = raw[4..].find("\n---\n") {
-        let fm = &raw[4..4 + end_pos];
-        let body = raw[4 + end_pos + 5..].to_string();
-        (Some(fm), body)
-    } else {
-        (None, raw.to_string())
-    }
+fn non_empty_section(doc: &ParsedMarkdownDoc, heading: &str) -> Option<String> {
+    let value = doc.section_string(heading);
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn parse_keywords(yaml: &serde_yaml::Value) -> Vec<String> {
@@ -170,65 +173,37 @@ fn parse_keywords(yaml: &serde_yaml::Value) -> Vec<String> {
     }
 }
 
-/// Extract the content under a section heading until the next section.
-/// Section headings are lines like "Instructions:", "Initial Prompt:", etc.
-fn extract_section(body: &str, heading: &str) -> String {
-    let section_headings = [
-        "Instructions:",
-        "Initial Prompt:",
-        "Config:",
-        "Response Template:",
-    ];
-
-    let start = if let Some(pos) = body.find(heading) {
-        pos + heading.len()
-    } else {
-        return String::new();
+fn parse_config_section(doc: &ParsedMarkdownDoc) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    let Some(config_text) = doc.section("Config") else {
+        return (None, None);
     };
 
-    let remaining = &body[start..];
-    // Find next section heading
-    let end = section_headings
-        .iter()
-        .filter(|&&h| h != heading)
-        .filter_map(|h| {
-            // Find heading that occurs after start in remaining
-            remaining.find(h)
-        })
-        .min()
-        .unwrap_or(remaining.len());
-
-    remaining[..end].trim().to_string()
-}
-
-fn parse_config_section(body: &str) -> (Option<Vec<String>>, Option<Vec<String>>) {
-    let config_text = extract_section(body, "Config:");
-    if config_text.is_empty() {
-        return (None, None);
-    }
-
-    let yaml: serde_yaml::Value = match serde_yaml::from_str(&config_text) {
+    let yaml: serde_yaml::Value = match serde_yaml::from_str(config_text) {
         Ok(v) => v,
         Err(_) => return (None, None),
     };
 
-    let mcp_servers = yaml
-        .get("mcp_servers")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        });
-    let local_tools = yaml
-        .get("local_tools")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        });
+    let mcp_servers = yaml_string_list(yaml.get("mcp_servers"));
+    let local_tools = yaml_string_list(yaml.get("local_tools"));
     (mcp_servers, local_tools)
+}
+
+fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
+    match value {
+        Some(serde_yaml::Value::Sequence(seq)) => Some(
+            seq.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        ),
+        Some(serde_yaml::Value::String(s)) => Some(
+            s.split([',', '\n'])
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect(),
+        ),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -255,9 +230,9 @@ Follow the recipe.
 Initial Prompt:
 Draft this first.
 
-Response Template:
-{{ response }}
-"#,
+	Response Template:
+	{{ response }}
+	"#,
         )
         .unwrap();
 
@@ -265,5 +240,82 @@ Response Template:
 
         assert_eq!(recipe.initial_prompt.as_deref(), Some("Draft this first."));
         assert_eq!(recipe.instructions, "Follow the recipe.");
+    }
+
+    #[test]
+    fn keeps_markdown_heading_response_template() {
+        let dir = tempdir().unwrap();
+        let recipe_dir = dir.path().join("demo");
+        std::fs::create_dir(&recipe_dir).unwrap();
+        let recipe_path = recipe_dir.join("RECIPE.md");
+        std::fs::write(
+            &recipe_path,
+            r#"---
+name: demo
+title: Demo Recipe
+---
+
+Instructions:
+Follow the recipe.
+
+Response Template:
+## {{ recipe_title }}
+
+{{ response }}
+"#,
+        )
+        .unwrap();
+
+        let recipe = parse_recipe_md(&recipe_path, recipe_dir).unwrap();
+
+        assert_eq!(
+            recipe.response_template.as_deref(),
+            Some("## {{ recipe_title }}\n\n{{ response }}")
+        );
+        assert_eq!(recipe.apply_template("Done."), "## Demo Recipe\n\nDone.");
+    }
+
+    #[test]
+    fn parses_config_and_workflow_sections() {
+        let dir = tempdir().unwrap();
+        let recipe_dir = dir.path().join("demo");
+        std::fs::create_dir(&recipe_dir).unwrap();
+        let recipe_path = recipe_dir.join("RECIPE.md");
+        std::fs::write(
+            &recipe_path,
+            r#"---
+name: demo
+keywords: morning, handover
+---
+
+Instructions:
+Summarize the shift.
+
+Config:
+  local_tools:
+    - local__time
+    - local__run_skill
+  mcp_servers: csirt, splunk
+
+Workflow:
+  type: guided_collection
+"#,
+        )
+        .unwrap();
+
+        let recipe = parse_recipe_md(&recipe_path, recipe_dir).unwrap();
+
+        assert_eq!(
+            recipe.config_local_tools,
+            Some(vec![
+                "local__time".to_string(),
+                "local__run_skill".to_string()
+            ])
+        );
+        assert_eq!(
+            recipe.config_mcp_servers,
+            Some(vec!["csirt".to_string(), "splunk".to_string()])
+        );
+        assert!(recipe.prompt_guidance().contains("Workflow guidance"));
     }
 }

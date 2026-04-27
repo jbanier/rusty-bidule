@@ -200,6 +200,7 @@ pub struct FindingRecord {
 }
 
 impl FindingRecord {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         finding_id: String,
         conversation_id: String,
@@ -231,6 +232,40 @@ pub struct SearchResult {
     pub scope: String,
     pub title: String,
     pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct InvestigationMemory {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hypotheses: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_sources: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_questions: Vec<Value>,
+}
+
+impl InvestigationMemory {
+    pub fn is_empty(&self) -> bool {
+        self.summary.trim().is_empty()
+            && self.entities.is_empty()
+            && self.timeline.is_empty()
+            && self.decisions.is_empty()
+            && self.hypotheses.is_empty()
+            && self.trusted_sources.is_empty()
+            && self.unresolved_questions.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

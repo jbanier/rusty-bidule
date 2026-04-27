@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
-use crate::types::FilesystemAccess;
+use crate::{doc_sections::ParsedMarkdownDoc, types::FilesystemAccess};
 
 #[derive(Debug, Clone)]
 pub struct SkillTool {
@@ -124,10 +124,8 @@ impl SkillRegistry {
                         }
                         (None, Some(server)) => {
                             out.push_str(&format!(
-                                "- `{}`: {} MCP-backed{}; not locally executable.\n",
-                                display_name,
-                                desc,
-                                format!(" via server `{server}`")
+                                "- `{}`: {} MCP-backed via server `{server}`; not locally executable.\n",
+                                display_name, desc
                             ));
                         }
                         (None, None) if tool.mcp_backed => {
@@ -248,15 +246,12 @@ fn find_tool_fuzzy<'a>(skill: &'a Skill, tool_slug: &str) -> Option<&'a SkillToo
 fn parse_skill_md(path: &Path, skill_dir: PathBuf) -> Result<Skill> {
     let raw =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-
-    let (frontmatter, body) = split_frontmatter(&raw);
+    let doc = ParsedMarkdownDoc::parse(&raw, &path.display().to_string())?;
 
     let name;
     let mut description = String::new();
 
-    if let Some(fm) = frontmatter {
-        let yaml: serde_yaml::Value = serde_yaml::from_str(fm)
-            .with_context(|| format!("failed to parse frontmatter in {}", path.display()))?;
+    if let Some(yaml) = doc.frontmatter.as_ref() {
         name = yaml
             .get("name")
             .and_then(|v| v.as_str())
@@ -280,7 +275,10 @@ fn parse_skill_md(path: &Path, skill_dir: PathBuf) -> Result<Skill> {
             .to_string();
     }
 
-    let tools = parse_tools_block(&body);
+    let tools = doc
+        .section("Tools")
+        .map(parse_tools_section)
+        .unwrap_or_default();
 
     Ok(Skill {
         name,
@@ -290,52 +288,15 @@ fn parse_skill_md(path: &Path, skill_dir: PathBuf) -> Result<Skill> {
     })
 }
 
-fn split_frontmatter(raw: &str) -> (Option<&str>, String) {
-    if !raw.starts_with("---\n") {
-        return (None, raw.to_string());
-    }
-    if let Some(end_pos) = raw[4..].find("\n---\n") {
-        let fm = &raw[4..4 + end_pos];
-        let body = raw[4 + end_pos + 5..].to_string();
-        (Some(fm), body)
-    } else {
-        (None, raw.to_string())
-    }
+#[cfg(test)]
+fn parse_tools_block(body: &str) -> Vec<SkillTool> {
+    ParsedMarkdownDoc::parse(body, "skill tools block")
+        .ok()
+        .and_then(|doc| doc.section("Tools").map(parse_tools_section))
+        .unwrap_or_default()
 }
 
-fn parse_tools_block(body: &str) -> Vec<SkillTool> {
-    // Find "Tools:" section
-    let tools_start = if let Some(pos) = body.find("Tools:\n") {
-        pos + "Tools:\n".len()
-    } else {
-        return Vec::new();
-    };
-
-    // Extract the tool block only. Stop at the next markdown heading or
-    // obvious non-tool prose line, but still allow the documented shorthand
-    // forms such as `slug: script.py` at column 0.
-    let tools_text = &body[tools_start..];
-    let tools_section: String = tools_text
-        .lines()
-        .take_while(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return true;
-            }
-
-            if line.starts_with('#') {
-                return false;
-            }
-
-            if line.starts_with(' ') || line.starts_with('\t') || trimmed.starts_with("- ") {
-                return true;
-            }
-
-            trimmed.contains(':') && !trimmed.ends_with(':')
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
+fn parse_tools_section(tools_section: &str) -> Vec<SkillTool> {
     // Try to parse as YAML list
     let yaml_attempt = format!("tools:\n{}", tools_section);
     if let Ok(yaml_val) = serde_yaml::from_str::<serde_yaml::Value>(&yaml_attempt)
@@ -363,12 +324,16 @@ fn parse_tools_block(body: &str) -> Vec<SkillTool> {
                             .map(str::to_string),
                         server: map
                             .get("server")
+                            .or_else(|| map.get("mcp_server"))
                             .and_then(|v| v.as_str())
                             .map(str::to_string),
                         mcp_backed: map
                             .get("mcp")
+                            .or_else(|| map.get("mcp_backed"))
                             .and_then(|v| v.as_bool())
-                            .unwrap_or_else(|| map.get("server").is_some()),
+                            .unwrap_or_else(|| {
+                                map.get("server").is_some() || map.get("mcp_server").is_some()
+                            }),
                         requires_network: map
                             .get("network")
                             .and_then(|v| v.as_bool())

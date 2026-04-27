@@ -1,2298 +1,2108 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rusty Bidule - Operator Console</title>
-<style>
-  :root {
-    --bg: #06070d;
-    --panel: rgba(12, 16, 24, 0.9);
-    --panel-strong: rgba(14, 19, 29, 0.96);
-    --panel-soft: rgba(10, 14, 22, 0.88);
-    --panel-alt: rgba(18, 24, 35, 0.84);
-    --border: rgba(0, 255, 200, 0.15);
-    --border-strong: rgba(255, 0, 153, 0.22);
-    --text: #d7fff7;
-    --muted: #8bb4ac;
-    --muted-soft: #54756f;
-    --accent: #00ffd5;
-    --accent-soft: rgba(0, 255, 213, 0.12);
-    --ok: #68ff7d;
-    --ok-soft: rgba(104, 255, 125, 0.14);
-    --warn: #ffd447;
-    --warn-soft: rgba(255, 212, 71, 0.14);
-    --danger: #ff6b8b;
-    --danger-soft: rgba(255, 107, 139, 0.16);
-    --shadow: 0 20px 60px rgba(0, 0, 0, 0.42);
-    --radius-xl: 24px;
-    --radius-lg: 20px;
-    --radius-md: 16px;
-    --radius-sm: 12px;
-  }
-
-  * {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-  }
-
-  html, body {
-    height: 100%;
-  }
-
-  body {
-    font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-    color: var(--text);
-    background:
-      radial-gradient(circle at top left, rgba(0, 255, 213, 0.12), transparent 22%),
-      radial-gradient(circle at top right, rgba(255, 59, 157, 0.1), transparent 24%),
-      linear-gradient(180deg, #090a10 0%, #05070c 54%, #030409 100%);
-    overflow: hidden;
-  }
-
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    background:
-      linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
-    background-size: 28px 28px;
-    mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.36), transparent 88%);
-  }
-
-  button,
-  input,
-  textarea,
-  select {
-    font: inherit;
-  }
-
-  button {
-    border: none;
-    cursor: pointer;
-    transition: transform 140ms ease, background 140ms ease, border-color 140ms ease, opacity 140ms ease;
-  }
-
-  button:hover:not(:disabled) {
-    transform: translateY(-1px);
-  }
-
-  button:disabled {
-    opacity: 0.48;
-    cursor: not-allowed;
-    transform: none;
-  }
-
-  input,
-  textarea,
-  select {
-    width: 100%;
-    background: rgba(6, 12, 20, 0.78);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: var(--radius-sm);
-    color: var(--text);
-    padding: 11px 12px;
-  }
-
-  textarea {
-    resize: vertical;
-  }
-
-  input:focus,
-  textarea:focus,
-  select:focus {
-    outline: 1px solid rgba(0, 255, 213, 0.24);
-    border-color: rgba(0, 255, 213, 0.2);
-  }
-
-  .page {
-    height: 100vh;
-    padding: 16px;
-  }
-
-  .shell {
-    height: 100%;
-    display: grid;
-    grid-template-columns: minmax(310px, 360px) minmax(0, 1fr);
-    gap: 14px;
-  }
-
-  .card {
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-xl);
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent),
-      var(--panel);
-    box-shadow: var(--shadow);
-    backdrop-filter: blur(20px);
-    overflow: hidden;
-  }
-
-  .sidebar {
-    position: sticky;
-    top: 16px;
-    height: calc(100vh - 32px);
-  }
-
-  .sidebar-top {
-    padding: 18px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(0, 255, 213, 0.08), rgba(255, 59, 157, 0.03));
-  }
-
-  .brand-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 14px;
-  }
-
-  .brand-mark {
-    width: 44px;
-    height: 44px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 14px;
-    background: linear-gradient(135deg, rgba(0, 255, 213, 0.16), rgba(255, 59, 157, 0.2));
-    border: 1px solid rgba(0, 255, 213, 0.2);
-    color: var(--text);
-    font-weight: 700;
-    letter-spacing: 0.08em;
-  }
-
-  .brand-copy h1 {
-    font-size: 1rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .brand-copy p {
-    margin-top: 8px;
-    color: var(--muted);
-    font-size: 0.8rem;
-    line-height: 1.6;
-  }
-
-  .sidebar-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 16px;
-  }
-
-  .icon-btn,
-  .primary-btn,
-  .secondary-btn,
-  .ghost-btn,
-  .danger-btn,
-  .tiny-btn {
-    border-radius: 12px;
-    color: var(--text);
-  }
-
-  .icon-btn {
-    width: 42px;
-    height: 42px;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    font-size: 1rem;
-  }
-
-  .primary-btn,
-  .secondary-btn,
-  .ghost-btn,
-  .danger-btn {
-    padding: 10px 12px;
-    font-size: 0.84rem;
-    font-weight: 600;
-  }
-
-  .primary-btn {
-    background: linear-gradient(135deg, rgba(0, 255, 213, 0.18), rgba(255, 59, 157, 0.2));
-    border: 1px solid rgba(0, 255, 213, 0.2);
-  }
-
-  .secondary-btn {
-    background: rgba(0, 255, 213, 0.1);
-    border: 1px solid rgba(0, 255, 213, 0.16);
-  }
-
-  .ghost-btn,
-  .tiny-btn {
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .danger-btn {
-    background: rgba(255, 107, 139, 0.12);
-    border: 1px solid rgba(255, 107, 139, 0.18);
-  }
-
-  .tiny-btn {
-    padding: 7px 8px;
-    font-size: 0.74rem;
-    color: var(--muted);
-  }
-
-  .sidebar-meta {
-    display: flex;
-    gap: 8px;
-    margin-top: 14px;
-    flex-wrap: wrap;
-  }
-
-  .status-chip,
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 10px;
-    border-radius: 999px;
-    font-size: 0.74rem;
-    line-height: 1;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.04);
-    color: var(--muted);
-  }
-
-  .badge.recipe {
-    color: var(--accent);
-    background: rgba(0, 255, 213, 0.1);
-    border-color: rgba(0, 255, 213, 0.16);
-  }
-
-  .badge.ctx {
-    color: #ffc7eb;
-    background: rgba(255, 59, 157, 0.1);
-    border-color: rgba(255, 59, 157, 0.18);
-  }
-
-  .badge.mcp {
-    color: var(--warn);
-    background: rgba(255, 212, 71, 0.1);
-    border-color: rgba(255, 212, 71, 0.16);
-  }
-
-  .badge.run {
-    color: var(--ok);
-    background: rgba(104, 255, 125, 0.1);
-    border-color: rgba(104, 255, 125, 0.16);
-  }
-
-  .sidebar-list {
-    min-height: 0;
-    flex: 1;
-    overflow-y: auto;
-    padding: 14px;
-  }
-
-  .conversation-group + .conversation-group {
-    margin-top: 18px;
-  }
-
-  .group-label {
-    margin: 0 6px 8px;
-    color: var(--muted-soft);
-    font-size: 0.74rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .conversation-card {
-    padding: 14px;
-    border-radius: var(--radius-md);
-    border: 1px solid transparent;
-    background: rgba(255, 255, 255, 0.02);
-    cursor: pointer;
-  }
-
-  .conversation-card + .conversation-card {
-    margin-top: 8px;
-  }
-
-  .conversation-card:hover {
-    background: rgba(255, 255, 255, 0.04);
-    border-color: rgba(255, 255, 255, 0.08);
-  }
-
-  .conversation-card.active {
-    background: linear-gradient(135deg, rgba(0, 255, 213, 0.12), rgba(255, 59, 157, 0.12));
-    border-color: var(--border-strong);
-  }
-
-  .conversation-head,
-  .workspace-head,
-  .row-between {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .conversation-title {
-    font-size: 0.92rem;
-    font-weight: 700;
-    line-height: 1.35;
-  }
-
-  .conversation-id {
-    margin-top: 6px;
-    color: var(--muted-soft);
-    font-size: 0.74rem;
-    word-break: break-all;
-  }
-
-  .conversation-time,
-  .conversation-preview {
-    margin-top: 8px;
-    color: var(--muted);
-    font-size: 0.78rem;
-    line-height: 1.5;
-  }
-
-  .conversation-preview {
-    color: #b7dad3;
-  }
-
-  .conversation-badges,
-  .header-chips,
-  .inline-actions,
-  .stack-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .conversation-badges {
-    margin-top: 12px;
-  }
-
-  .conversation-card-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 12px;
-  }
-
-  .workspace {
-    height: calc(100vh - 32px);
-    min-height: 0;
-    display: grid;
-  }
-
-  .workspace-shell {
-    height: 100%;
-    min-height: 0;
-    display: grid;
-    grid-template-rows: auto minmax(280px, 1fr) minmax(240px, auto);
-  }
-
-  .workspace-top {
-    padding: 18px 20px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(255, 59, 157, 0.08), rgba(0, 255, 213, 0.03));
-  }
-
-  .workspace-title {
-    font-size: 1.12rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
-
-  .workspace-subtitle {
-    margin-top: 8px;
-    color: var(--muted);
-    font-size: 0.84rem;
-    line-height: 1.55;
-  }
-
-  .header-chips {
-    margin-top: 14px;
-  }
-
-  .menu-wrap {
-    position: relative;
-  }
-
-  .menu {
-    position: absolute;
-    right: 0;
-    top: calc(100% + 8px);
-    min-width: 220px;
-    display: none;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px;
-    border-radius: 14px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(10, 14, 22, 0.96);
-    box-shadow: var(--shadow);
-    z-index: 12;
-  }
-
-  .menu.open {
-    display: flex;
-  }
-
-  .menu button {
-    text-align: left;
-  }
-
-  .transcript {
-    min-height: 0;
-    overflow-y: auto;
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.01), transparent);
-  }
-
-  .message {
-    max-width: min(860px, 94%);
-    padding: 16px 18px;
-    border-radius: 18px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(8, 12, 18, 0.86);
-  }
-
-  .message.assistant {
-    align-self: flex-start;
-    border-color: rgba(0, 255, 213, 0.16);
-  }
-
-  .message.user {
-    align-self: flex-end;
-    background: linear-gradient(135deg, rgba(255, 59, 157, 0.18), rgba(0, 255, 213, 0.12));
-    border-color: rgba(255, 59, 157, 0.24);
-  }
-
-  .message-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    margin-bottom: 10px;
-  }
-
-  .role-tag {
-    font-size: 0.74rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--accent);
-  }
-
-  .message.user .role-tag {
-    color: #f4d2ea;
-  }
-
-  .meta {
-    color: var(--muted-soft);
-    font-size: 0.76rem;
-  }
-
-  .content,
-  .markdown-body {
-    white-space: pre-wrap;
-    word-break: break-word;
-    line-height: 1.65;
-    font-size: 0.87rem;
-  }
-
-  .markdown-body {
-    white-space: normal;
-  }
-
-  .markdown-body > * + * {
-    margin-top: 12px;
-  }
-
-  .markdown-body h1,
-  .markdown-body h2,
-  .markdown-body h3,
-  .markdown-body h4 {
-    line-height: 1.3;
-  }
-
-  .markdown-body h1 { font-size: 1.2rem; }
-  .markdown-body h2 { font-size: 1.08rem; }
-  .markdown-body h3 { font-size: 0.98rem; }
-  .markdown-body h4 { font-size: 0.92rem; }
-
-  .markdown-body ul,
-  .markdown-body ol {
-    padding-left: 1.4rem;
-  }
-
-  .markdown-body li + li {
-    margin-top: 6px;
-  }
-
-  .markdown-body code {
-    padding: 0.1rem 0.35rem;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.06);
-    color: #ecf6ff;
-  }
-
-  .markdown-body pre {
-    overflow-x: auto;
-    padding: 12px;
-    border-radius: 14px;
-    background: rgba(3, 6, 10, 0.95);
-    border: 1px solid rgba(255, 255, 255, 0.07);
-  }
-
-  .markdown-body pre code {
-    padding: 0;
-    background: transparent;
-  }
-
-  .markdown-body blockquote {
-    padding-left: 14px;
-    border-left: 3px solid rgba(0, 255, 213, 0.24);
-    color: #b9ddd6;
-  }
-
-  .markdown-body a {
-    color: var(--accent);
-  }
-
-  .table-scroll {
-    position: relative;
-    overflow-x: auto;
-    padding-top: 10px;
-  }
-
-  .table-scroll::before {
-    content: "scroll →";
-    position: absolute;
-    top: 0;
-    right: 0;
-    font-size: 0.68rem;
-    color: var(--muted-soft);
-  }
-
-  .markdown-body table {
-    min-width: 100%;
-    border-collapse: collapse;
-    font-size: 0.82rem;
-  }
-
-  .markdown-body th,
-  .markdown-body td {
-    padding: 8px 10px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    text-align: left;
-    vertical-align: top;
-  }
-
-  .markdown-body th {
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  .operations {
-    min-height: 0;
-    max-height: min(42vh, 520px);
-    overflow-y: auto;
-    padding: 0 20px 20px;
-    display: grid;
-    gap: 12px;
-  }
-
-  .panel-block {
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: var(--radius-lg);
-    background: var(--panel-strong);
-    overflow: hidden;
-  }
-
-  .panel-block-head {
-    padding: 14px 16px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .panel-block-head h3 {
-    font-size: 0.82rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .panel-block-body {
-    padding: 14px 16px;
-  }
-
-  .metric-row {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 8px;
-  }
-
-  .metric {
-    padding: 10px 12px;
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .metric-label {
-    color: var(--muted-soft);
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .metric-value {
-    margin-top: 8px;
-    font-size: 0.84rem;
-    color: var(--text);
-  }
-
-  .event-list,
-  .job-list,
-  .recipe-list,
-  .oauth-list,
-  .mcp-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .event-list {
-    margin-top: 12px;
-    max-height: 220px;
-    overflow-y: auto;
-  }
-
-  .event-item,
-  .job-item,
-  .recipe-item,
-  .oauth-item,
-  .mcp-item {
-    padding: 12px;
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .event-kind,
-  .job-status,
-  .recipe-title,
-  .oauth-name,
-  .mcp-name {
-    font-size: 0.76rem;
-    color: var(--accent);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .event-message,
-  .job-meta,
-  .recipe-copy,
-  .oauth-url,
-  .mcp-state {
-    margin-top: 8px;
-    color: var(--muted);
-    font-size: 0.82rem;
-    line-height: 1.55;
-  }
-
-  .job-head,
-  .recipe-head,
-  .oauth-head,
-  .mcp-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .recipe-item.active {
-    border-color: rgba(0, 255, 213, 0.18);
-    background: rgba(0, 255, 213, 0.07);
-  }
-
-  .composer textarea {
-    min-height: 120px;
-    border: none;
-    background: transparent;
-    padding: 0;
-    line-height: 1.6;
-  }
-
-  .composer textarea:focus {
-    outline: none;
-    border: none;
-  }
-
-  .composer-footer {
-    margin-top: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .composer-hint {
-    color: var(--muted);
-    font-size: 0.8rem;
-  }
-
-  .empty-state {
-    margin: auto;
-    max-width: 620px;
-    padding: 32px 28px;
-    border-radius: 24px;
-    text-align: center;
-    background: rgba(10, 18, 30, 0.72);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-  }
-
-  .empty-state h3 {
-    font-size: 1.18rem;
-  }
-
-  .empty-state p {
-    margin-top: 10px;
-    color: var(--muted);
-    line-height: 1.6;
-  }
-
-  .status-line {
-    margin-top: 12px;
-    font-size: 0.82rem;
-    color: var(--muted);
-  }
-
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.46);
-    backdrop-filter: blur(4px);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 160ms ease;
-    z-index: 30;
-  }
-
-  .modal-backdrop.open {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .settings-sheet,
-  .history-modal {
-    position: fixed;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-xl);
-    background: rgba(10, 18, 30, 0.97);
-    box-shadow: var(--shadow);
-    z-index: 31;
-    opacity: 0;
-    pointer-events: none;
-    transition: transform 180ms ease, opacity 180ms ease;
-  }
-
-  .settings-sheet {
-    top: 16px;
-    right: 16px;
-    bottom: 16px;
-    width: min(480px, calc(100vw - 32px));
-    display: flex;
-    flex-direction: column;
-    transform: translateX(calc(100% + 24px));
-  }
-
-  .settings-sheet.open {
-    transform: translateX(0);
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .history-modal {
-    inset: 50% auto auto 50%;
-    width: min(960px, calc(100vw - 32px));
-    height: min(82vh, 860px);
-    transform: translate(-50%, -46%);
-    display: flex;
-    flex-direction: column;
-  }
-
-  .history-modal.open {
-    opacity: 1;
-    pointer-events: auto;
-    transform: translate(-50%, -50%);
-  }
-
-  .sheet-head,
-  .history-head {
-    padding: 18px 20px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .sheet-head h2,
-  .history-head h2 {
-    font-size: 0.94rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .sheet-body,
-  .history-body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  details.section {
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: var(--radius-lg);
-    background: var(--panel-soft);
-    overflow: hidden;
-  }
-
-  details.section summary {
-    list-style: none;
-    cursor: pointer;
-    padding: 14px 16px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  details.section summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .section-copy {
-    color: var(--muted);
-    font-size: 0.8rem;
-    margin-top: 4px;
-    line-height: 1.5;
-  }
-
-  .section-body {
-    padding: 0 16px 16px;
-    display: grid;
-    gap: 12px;
-  }
-
-  .history-message {
-    padding: 14px;
-    border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(255, 255, 255, 0.03);
-  }
-
-  .history-message.user {
-    border-color: rgba(255, 59, 157, 0.18);
-  }
-
-  .spinner {
-    display: inline-block;
-    margin-right: 8px;
-    color: var(--accent);
-  }
-
-  .hidden {
-    display: none !important;
-  }
-
-  @media (max-width: 1180px) {
-    .metric-row {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-
-  @media (max-width: 980px) {
-    body {
-      overflow: auto;
-    }
-
-    .page {
-      height: auto;
-      min-height: 100vh;
-    }
-
-    .shell {
-      height: auto;
-      grid-template-columns: 1fr;
-    }
-
-    .sidebar {
-      position: static;
-      height: auto;
-    }
-
-    .workspace {
-      height: auto;
-      min-height: unset;
-    }
-
-    .workspace-shell {
-      height: auto;
-      min-height: 72vh;
-      grid-template-rows: auto minmax(320px, 1fr) auto;
-    }
-
-    .settings-sheet {
-      inset: 50% auto auto 50%;
-      width: min(720px, calc(100vw - 24px));
-      height: min(84vh, 880px);
-      transform: translate(-50%, -46%);
-    }
-
-    .settings-sheet.open {
-      transform: translate(-50%, -50%);
-    }
-
-    .workspace-head,
-    .conversation-head,
-    .composer-footer,
-    .job-head,
-    .recipe-head,
-    .oauth-head,
-    .mcp-head,
-    .row-between {
-      flex-direction: column;
-      align-items: stretch;
-    }
-
-    .metric-row {
-      grid-template-columns: 1fr;
-    }
-  }
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Console</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    window.marked = window.marked || {
+      use() {},
+      parse(value) {
+        const text = String(value || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+        return text
+          .split(/\n{2,}/)
+          .map((paragraph) => `<p>${paragraph.replace(/\n/g, '<br>')}</p>`)
+          .join('');
+      },
+    };
+  </script>
 </head>
-<body>
-  <div class="modal-backdrop" id="modal-backdrop" onclick="closeAllOverlays()"></div>
-
-  <aside class="settings-sheet" id="settings-sheet">
-    <div class="sheet-head">
-      <div>
-        <h2>Settings</h2>
-        <div class="section-copy">Config editing, MCP OAuth, and conversation-level MCP controls.</div>
-      </div>
-      <button class="ghost-btn" onclick="closeSettings()">Close</button>
-    </div>
-    <div class="sheet-body">
-      <details class="section" open>
-        <summary>
-          <div>
-            <strong>Config</strong>
-            <div class="section-copy">Review or edit the runtime config loaded by the web console.</div>
-          </div>
-          <span class="status-chip" id="config-status-chip">idle</span>
-        </summary>
-        <div class="section-body">
-          <textarea id="config-editor" rows="16" placeholder="Config will load here."></textarea>
-          <div class="inline-actions">
-            <button class="secondary-btn" onclick="loadConfig()">Reload Config</button>
-            <button class="primary-btn" onclick="saveConfig()">Save Config</button>
-          </div>
-        </div>
-      </details>
-
-      <details class="section">
-        <summary>
-          <div>
-            <strong>MCP OAuth</strong>
-            <div class="section-copy">Launch OAuth sign-in for MCP servers that use public OAuth.</div>
-          </div>
-          <span class="status-chip" id="oauth-status-chip">idle</span>
-        </summary>
-        <div class="section-body">
-          <div id="oauth-list" class="oauth-list"></div>
-        </div>
-      </details>
-
-      <details class="section">
-        <summary>
-          <div>
-            <strong>Conversation MCP</strong>
-            <div class="section-copy">Toggle which MCP servers are active for the selected conversation.</div>
-          </div>
-          <span class="status-chip" id="mcp-settings-chip">select thread</span>
-        </summary>
-        <div class="section-body">
-          <div class="inline-actions">
-            <button class="secondary-btn" id="mcp-reset-btn" onclick="resetMcpServers()" disabled>Enable All</button>
-          </div>
-          <div id="mcp-list" class="mcp-list"></div>
-        </div>
-      </details>
-    </div>
-  </aside>
-
-  <section class="history-modal" id="history-modal">
-    <div class="history-head">
-      <div>
-        <h2>Conversation History</h2>
-        <div class="section-copy" id="history-caption">Full transcript for the selected conversation.</div>
-      </div>
-      <button class="ghost-btn" onclick="closeHistory()">Close</button>
-    </div>
-    <div class="history-body" id="history-body"></div>
-  </section>
-
-  <div class="page">
-    <div class="shell">
-      <aside class="card sidebar">
-        <div class="sidebar-top">
-          <div class="brand-row">
-            <div class="brand-mark">RB</div>
-            <div class="stack-actions">
-              <button class="icon-btn" title="New conversation" onclick="newConversation()">+</button>
-              <button class="icon-btn" title="Settings" onclick="openSettings()">⚙</button>
-            </div>
-          </div>
-          <div class="brand-copy">
-            <h1>Rusty Bidule</h1>
-            <p>Incident-response workspace with conversation routing, live run telemetry, and MCP visibility.</p>
-          </div>
-          <div class="sidebar-actions">
-            <button class="primary-btn" id="new-btn" onclick="newConversation()">New Conversation</button>
-          </div>
-          <div class="sidebar-meta">
-            <div class="status-chip"><span id="conversation-count">0</span> active</div>
-            <div class="status-chip" id="sidebar-status">Ready</div>
-          </div>
-        </div>
-        <div class="sidebar-list" id="conversation-list"></div>
-      </aside>
-
-      <main class="workspace">
-        <section class="card workspace-shell">
-          <div class="workspace-top">
-            <div class="workspace-head">
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-scroll">
+          <div class="sidebar-header">
+            <div class="app-logo">
+              <div class="app-mark" aria-hidden="true">AC</div>
               <div>
-                <div class="workspace-title" id="conversation-title-heading">Operator Workspace</div>
-                <div class="workspace-subtitle" id="conversation-context">Create or select a conversation to start a background run.</div>
-                <div class="header-chips" id="conversation-header-badges"></div>
+                <div class="brand-wordmark">Agent Console</div>
+                <div class="logo-label">Investigator Workspace</div>
               </div>
-              <div class="menu-wrap">
-                <button class="ghost-btn" id="actions-menu-btn" onclick="toggleActionsMenu()">Actions</button>
-                <div class="menu" id="actions-menu">
-                  <button class="ghost-btn" onclick="compactConversation()" id="compact-btn" disabled>Compact Context</button>
-                  <button class="ghost-btn" onclick="openHistory()" id="history-btn" disabled>Show History</button>
-                  <button class="ghost-btn" onclick="toggleArchiveConversation()" id="archive-btn" disabled>Archive Conversation</button>
-                  <button class="ghost-btn" onclick="exportConversationSummary()" id="export-btn" disabled>Export Summary</button>
-                </div>
+            </div>
+            <div class="sidebar-title-row">
+              <h1>Conversations</h1>
+              <div class="toolbar-actions">
+                <button id="new-convo" class="icon-button icon-button-primary" type="button" title="Start a new conversation" aria-label="Start a new conversation">
+                  <span aria-hidden="true">+</span>
+                </button>
+                <button
+                  id="open-tools"
+                  class="icon-button"
+                  type="button"
+                  aria-label="Open tools"
+                  aria-controls="tools-panel"
+                  aria-expanded="false"
+                  title="Schedules and recipes"
+                >
+                  <span aria-hidden="true">🧰</span>
+                </button>
+                <button
+                  id="open-settings"
+                  class="icon-button"
+                  type="button"
+                  aria-label="Open settings"
+                  aria-controls="settings-panel"
+                  aria-expanded="false"
+                  title="MCP and sign-in settings"
+                >
+                  <span aria-hidden="true">⚙</span>
+                </button>
               </div>
             </div>
           </div>
-
-          <div class="transcript" id="messages">
-            <div class="empty-state">
-              <h3>Start or select a conversation</h3>
-              <p>Choose a thread on the left, queue a recipe or MCP selection if needed, then send a prompt. Runs execute asynchronously and stream status below.</p>
+          <ul id="conversation-list" class="conversation-list"></ul>
+        </div>
+      </aside>
+      <main class="conversation-pane">
+      <div class="conversation-header">
+        <div class="conversation-header-main">
+          <p class="conversation-label">Active Conversation</p>
+          <div class="conversation-title-row">
+            <h2 id="active-convo-title">None selected</h2>
+            <span id="active-run-indicator" class="conversation-badge hidden">Idle</span>
+          </div>
+        </div>
+        <div class="conversation-header-actions">
+          <p id="active-updated" class="timestamp">—</p>
+          <div class="menu-shell">
+            <button
+              id="conversation-actions-toggle"
+              class="icon-button icon-button-subtle"
+              type="button"
+              aria-label="Conversation actions"
+              aria-controls="conversation-actions-menu"
+              aria-expanded="false"
+              title="Conversation actions"
+            >
+              <span aria-hidden="true">⋯</span>
+            </button>
+            <div id="conversation-actions-menu" class="action-menu hidden" role="menu">
+              <button id="compact-conversation" type="button" role="menuitem">Compact Context</button>
+              <button id="history-button" type="button" role="menuitem">Show History</button>
+              <button id="delete-convo" type="button" role="menuitem">Delete Conversation</button>
             </div>
           </div>
-
-          <div class="operations">
-            <section class="panel-block">
-              <div class="panel-block-head">
-                <h3>Request Status</h3>
-                <div class="status-chip" id="request-status-chip">idle</div>
-              </div>
-              <div class="panel-block-body">
-                <div class="metric-row">
-                  <div class="metric">
-                    <div class="metric-label">Request</div>
-                    <div class="metric-value" id="request-metric-state">Idle</div>
-                  </div>
-                  <div class="metric">
-                    <div class="metric-label">Job Id</div>
-                    <div class="metric-value" id="request-metric-job">None</div>
-                  </div>
-                  <div class="metric">
-                    <div class="metric-label">Events</div>
-                    <div class="metric-value" id="request-metric-events">0</div>
-                  </div>
-                  <div class="metric">
-                    <div class="metric-label">Last Event</div>
-                    <div class="metric-value" id="request-metric-last">Waiting</div>
-                  </div>
-                </div>
-                <div class="event-list" id="request-events"></div>
-              </div>
-            </section>
-
-            <section class="panel-block">
-              <div class="panel-block-head">
-                <h3>Tracked Jobs</h3>
-                <div class="status-chip" id="jobs-status-chip">0 jobs</div>
-              </div>
-              <div class="panel-block-body">
-                <div class="job-list" id="jobs-list"></div>
-              </div>
-            </section>
-
-            <section class="panel-block">
-              <div class="panel-block-head">
-                <h3>Recipe Selection</h3>
-                <div class="status-chip" id="recipe-status-chip">none queued</div>
-              </div>
-              <div class="panel-block-body">
-                <div class="recipe-list" id="recipe-list"></div>
-              </div>
-            </section>
-
-            <section class="panel-block composer">
-              <div class="panel-block-head">
-                <h3>Message Composer</h3>
-                <div class="status-chip" id="composer-status-chip">ready</div>
-              </div>
-              <div class="panel-block-body">
-                <textarea id="msg-input" placeholder="Type your prompt here. Ctrl+Enter sends a background turn." onkeydown="handleInputKey(event)" oninput="updateComposerState()"></textarea>
-                <div class="composer-footer">
-                  <div class="composer-hint" id="composer-hint">Create or select a conversation first. Sending starts a background job and locks the composer until completion.</div>
-                  <button id="send-btn" class="primary-btn" onclick="sendMessage()" disabled>Send</button>
-                </div>
-                <div class="status-line" id="status-bar">Ready</div>
-              </div>
-            </section>
+        </div>
+      </div>
+      <section id="conversation-stream" class="conversation-stream"></section>
+      <section id="jobs-panel" class="jobs-panel hidden">
+        <div class="run-status-header">
+          <p class="conversation-label">Tracked Jobs</p>
+          <div class="jobs-panel-indicators">
+            <span id="jobs-running-indicator" class="jobs-running-indicator hidden">
+              <span class="jobs-running-dot" aria-hidden="true"></span>
+              <span id="jobs-running-count">0 running</span>
+            </span>
+            <span id="jobs-panel-badge" class="jobs-badge hidden">0</span>
           </div>
-        </section>
-      </main>
-    </div>
+        </div>
+        <div id="jobs-list" class="jobs-list"></div>
+      </section>
+      <div class="composer">
+        <textarea id="message-input" placeholder="Select or start a conversation to begin." disabled></textarea>
+        <button id="send-button" disabled title="Send with Ctrl/Cmd+Enter">Send</button>
+      </div>
+      <p id="composer-hint" class="composer-hint">Select or start a conversation to begin.</p>
+    </main>
   </div>
 
-<script>
-let currentConvoId = null;
-let currentConvoTitle = '';
-let currentConvoArchived = false;
-let currentMessages = [];
-let currentRecipes = [];
-let currentRecipeName = null;
-let currentJobs = [];
-let currentMcpStatuses = [];
-let currentConfig = '';
-let currentOAuthServers = [];
-let conversationSummaries = [];
-let requestEvents = [];
-let activeJobId = null;
-let activeJobKind = null;
-let activeConversationJobs = {};
-let pollTimer = null;
-let persistentWarning = '';
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-async function api(method, path, body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
-  if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch('/api' + path, opts);
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  if (res.status === 204) return null;
-  return res.json();
-}
+  <section id="settings-panel" class="settings-panel hidden" aria-hidden="true">
+    <div class="settings-card">
+      <div class="settings-header">
+        <div>
+          <p class="conversation-label">Settings</p>
+          <h3>Workspace Settings</h3>
+        </div>
+        <button id="close-settings" class="icon-button" type="button" aria-label="Close settings">
+          <span aria-hidden="true">×</span>
+        </button>
+      </div>
+      <div class="settings-content">
+        <section id="config-panel" class="config-panel collapsible-panel">
+          <div class="run-status-header">
+            <button
+              id="toggle-config-panel"
+              class="panel-toggle panel-toggle-label"
+              type="button"
+              aria-expanded="true"
+              aria-controls="config-panel-body"
+            >
+              Configuration
+            </button>
+            <div class="settings-actions">
+              <button id="reload-config" type="button">Discard</button>
+              <button id="save-config" type="button">Save</button>
+            </div>
+          </div>
+          <div id="config-panel-body" class="collapsible-panel-body">
+            <p id="config-save-status" class="status-message">Loading configuration…</p>
+            <div id="config-restart-notice" class="restart-notice hidden"></div>
+            <div id="config-validation-errors" class="config-errors hidden"></div>
+            <div id="config-form" class="config-form"></div>
+          </div>
+        </section>
+        <section id="oauth-panel" class="oauth-panel collapsible-panel">
+          <div class="oauth-panel-header">
+            <button
+              id="toggle-oauth-panel"
+              class="panel-toggle"
+              type="button"
+              aria-expanded="true"
+              aria-controls="oauth-panel-body"
+            >
+              MCP Sign-in
+            </button>
+            <button id="refresh-oauth">Refresh</button>
+          </div>
+          <div id="oauth-panel-body" class="collapsible-panel-body">
+            <div id="oauth-servers" class="oauth-servers"></div>
+          </div>
+        </section>
+        <section id="mcp-panel" class="mcp-panel collapsible-panel">
+          <div class="run-status-header">
+            <button
+              id="toggle-mcp-panel"
+              class="panel-toggle panel-toggle-label"
+              type="button"
+              aria-expanded="true"
+              aria-controls="mcp-panel-body"
+            >
+              MCP Servers
+            </button>
+            <button id="reset-mcp-servers" type="button">Reset to all</button>
+          </div>
+          <div id="mcp-panel-body" class="collapsible-panel-body">
+            <p id="mcp-server-summary" class="status-message">No conversation selected.</p>
+            <div id="mcp-server-list" class="mcp-server-list"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </section>
 
-function escHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+  <section id="tools-panel" class="tools-panel hidden" aria-hidden="true">
+    <div class="tools-card">
+      <div class="settings-header">
+        <div>
+          <p class="conversation-label">Tools</p>
+          <h3>Recipes And Schedules</h3>
+        </div>
+        <button id="close-tools" class="icon-button" type="button" aria-label="Close tools">
+          <span aria-hidden="true">×</span>
+        </button>
+      </div>
+      <div class="tools-content">
+        <section id="schedules-panel" class="schedules-panel">
+          <div class="run-status-header">
+            <p class="conversation-label">Schedules</p>
+            <div class="jobs-panel-indicators">
+              <span id="schedules-running-indicator" class="jobs-running-indicator hidden">
+                <span class="jobs-running-dot" aria-hidden="true"></span>
+                <span id="schedules-running-count">0 running</span>
+              </span>
+              <span id="schedules-panel-badge" class="jobs-badge hidden">0</span>
+            </div>
+          </div>
+          <div class="schedule-form">
+            <select id="schedule-run-type">
+              <option value="recipe">Recipe</option>
+              <option value="prompt">Prompt</option>
+            </select>
+            <input id="schedule-name" type="text" placeholder="Schedule name" />
+            <select id="schedule-recipe-select">
+              <option value="">Select recipe</option>
+            </select>
+            <select id="schedule-cadence-kind">
+              <option value="every">Every</option>
+              <option value="daily">Daily</option>
+              <option value="weekdays">Weekdays</option>
+            </select>
+            <input id="schedule-cadence-value" type="text" placeholder="15m or 07:30" />
+            <textarea id="schedule-prompt" class="hidden" rows="3" placeholder="Scheduled prompt"></textarea>
+            <button id="create-schedule" type="button">Create</button>
+          </div>
+          <p id="schedule-form-hint" class="status-message">Create a scheduled recipe or prompt run.</p>
+          <div id="schedules-list" class="schedules-list"></div>
+        </section>
+        <section class="recipe-panel">
+          <div class="run-status-header">
+            <p class="conversation-label">Recipe</p>
+          </div>
+          <div class="recipe-controls">
+            <select id="recipe-select">
+              <option value="">No recipe</option>
+            </select>
+            <button id="apply-recipe">Apply Next</button>
+            <button id="clear-recipe" type="button">Clear</button>
+          </div>
+          <p id="recipe-description" class="status-message">Select a recipe to prefill the next prompt.</p>
+          <div id="pending-recipe" class="pending-recipe empty-state">No recipe queued for the next message.</div>
+        </section>
+      </div>
+    </div>
+  </section>
 
-function shortId(id) {
-  return id ? `${id.slice(0, 8)}...${id.slice(-4)}` : 'None';
-}
+  <section id="history-panel" class="history-panel hidden">
+    <div class="history-card">
+      <div class="history-header">
+        <h3>Conversation History</h3>
+        <button id="close-history">Close</button>
+      </div>
+      <div id="history-content" class="history-content"></div>
+    </div>
+  </section>
 
-function formatTime(ts) {
-  if (!ts) return 'unknown';
-  const date = new Date(ts);
-  return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-}
+  <template id="message-template">
+    <article class="message">
+      <header>
+        <div class="message-heading">
+          <span class="role"></span>
+          <div class="message-badges"></div>
+        </div>
+        <span class="timestamp"></span>
+      </header>
+      <div class="content"></div>
+    </article>
+  </template>
 
-function truncate(value, limit) {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
-}
+  <script>
+  // Configure marked for safe, GFM-flavoured markdown
+  marked.use({
+    gfm: true,
+    breaks: true,
+  });
 
-function createEmptyState(title, description) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'empty-state';
-  wrapper.innerHTML = `<h3>${escHtml(title)}</h3><p>${escHtml(description)}</p>`;
-  return wrapper;
-}
-
-function createCollectionEmptyState(message) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'job-item';
-  wrapper.textContent = message;
-  return wrapper;
-}
-
-function setStatus(msg, spinning) {
-  const bar = document.getElementById('status-bar');
-  const sidebar = document.getElementById('sidebar-status');
-  const showWarning = !spinning && persistentWarning && !msg.toLowerCase().startsWith('error');
-  const text = showWarning ? `Warning: ${persistentWarning}` : msg;
-  bar.innerHTML = spinning ? `<span class="spinner">⣾</span><span>${escHtml(text)}</span>` : escHtml(text);
-  sidebar.textContent = spinning ? 'Working' : text.toLowerCase().startsWith('error') ? 'Error' : showWarning ? 'Warning' : 'Ready';
-}
-
-function closeAllOverlays() {
-  closeSettings();
-  closeHistory();
-  closeActionsMenu();
-}
-
-function setBackdrop(open) {
-  document.getElementById('modal-backdrop').classList.toggle('open', open);
-}
-
-function openSettings() {
-  document.getElementById('settings-sheet').classList.add('open');
-  setBackdrop(true);
-  loadConfig();
-  loadOAuthServers();
-  renderMcpStatuses(currentMcpStatuses);
-}
-
-function closeSettings() {
-  document.getElementById('settings-sheet').classList.remove('open');
-  if (!document.getElementById('history-modal').classList.contains('open')) {
-    setBackdrop(false);
-  }
-}
-
-function openHistory() {
-  document.getElementById('history-modal').classList.add('open');
-  setBackdrop(true);
-  renderHistory();
-}
-
-function closeHistory() {
-  document.getElementById('history-modal').classList.remove('open');
-  if (!document.getElementById('settings-sheet').classList.contains('open')) {
-    setBackdrop(false);
-  }
-}
-
-function toggleActionsMenu() {
-  document.getElementById('actions-menu').classList.toggle('open');
-}
-
-function closeActionsMenu() {
-  document.getElementById('actions-menu').classList.remove('open');
-}
-
-window.addEventListener('click', event => {
-  const menu = document.getElementById('actions-menu');
-  const button = document.getElementById('actions-menu-btn');
-  if (!menu.contains(event.target) && event.target !== button) {
-    closeActionsMenu();
-  }
-});
-
-window.addEventListener('keydown', event => {
-  if (event.key === 'Escape') {
-    closeAllOverlays();
-  }
-});
-
-window.addEventListener('message', event => {
-  if (event.data?.type === 'rusty-bidule-oauth-complete') {
-    setStatus(`OAuth callback received for ${event.data.server}`);
-    document.getElementById('oauth-status-chip').textContent = 'callback';
-  }
-});
-
-function updateConversationContext() {
-  const summary = conversationSummaries.find(item => item.conversation_id === currentConvoId);
-  currentRecipeName = summary?.pending_recipe || currentRecipeName || null;
-  document.getElementById('conversation-title-heading').textContent = currentConvoTitle || 'Operator Workspace';
-  document.getElementById('conversation-context').textContent = currentConvoId
-    ? `${shortId(currentConvoId)}${currentConvoArchived ? ' · archived' : ''} · ${summary?.preview ? 'active workspace' : 'ready for first prompt'}`
-    : 'Create or select a conversation to start a background run.';
-  document.getElementById('archive-btn').disabled = !currentConvoId;
-  document.getElementById('archive-btn').textContent = currentConvoArchived ? 'Restore Conversation' : 'Archive Conversation';
-  document.getElementById('export-btn').disabled = !currentConvoId;
-  document.getElementById('history-btn').disabled = !currentConvoId;
-  document.getElementById('compact-btn').disabled = !currentConvoId || Boolean(activeJobId);
-  document.getElementById('mcp-reset-btn').disabled = !currentConvoId;
-  document.getElementById('mcp-settings-chip').textContent = currentConvoId ? `${currentMcpStatuses.length} configured` : 'select thread';
-  renderHeaderBadges(summary);
-  updateComposerState();
-}
-
-function renderHeaderBadges(summary) {
-  const container = document.getElementById('conversation-header-badges');
-  container.innerHTML = '';
-  if (!currentConvoId) return;
-
-  const chips = [
-    ['ID', shortId(currentConvoId)],
-    ['Msgs', String(currentMessages.length)],
-  ];
-  if (summary?.pending_recipe) chips.push(['Recipe', summary.pending_recipe]);
-  if (summary?.active_compaction) chips.push(['Ctx', 'Compacted']);
-  if (summary?.enabled_mcp_servers !== null && summary?.enabled_mcp_servers !== undefined) {
-    chips.push(['MCP', `${summary.enabled_mcp_servers.length} enabled`]);
-  }
-  if (activeConversationJobs[currentConvoId]) chips.push(['Run', activeConversationJobs[currentConvoId].kind]);
-
-  for (const [label, value] of chips) {
-    const chip = document.createElement('div');
-    chip.className = 'status-chip';
-    chip.textContent = `${label}: ${value}`;
-    container.appendChild(chip);
-  }
-}
-
-function updateComposerState() {
-  const input = document.getElementById('msg-input');
-  const disabled = !currentConvoId || !input.value.trim() || Boolean(activeJobId);
-  document.getElementById('send-btn').disabled = disabled;
-  document.getElementById('msg-input').disabled = !currentConvoId || Boolean(activeJobId);
-  document.getElementById('composer-status-chip').textContent = activeJobId ? 'working' : currentConvoId ? 'ready' : 'select thread';
-  document.getElementById('composer-hint').textContent = !currentConvoId
-    ? 'Create or select a conversation first. Sending starts a background job and locks the composer until completion.'
-    : activeJobId
-      ? `Background ${activeJobKind || 'job'} ${shortId(activeJobId)} is running. Composer will unlock on completion.`
-      : 'Ctrl+Enter sends a background turn. The request-status panel below follows tool and run events live.';
-}
-
-async function loadConversations() {
-  try {
-    conversationSummaries = await api('GET', '/conversations?include_archived=true');
-    renderConversationGroups(conversationSummaries);
-    const activeCount = conversationSummaries.filter(item => !item.archived_at).length;
-    document.getElementById('conversation-count').textContent = String(activeCount);
-    if (currentConvoId && !conversationSummaries.some(item => item.conversation_id === currentConvoId)) {
-      currentConvoId = null;
-      currentConvoTitle = '';
-      currentConvoArchived = false;
-      currentMessages = [];
-    }
-    updateConversationContext();
-  } catch (e) {
-    setStatus('Error loading conversations: ' + e.message);
-  }
-}
-
-function renderConversationGroups(conversations) {
-  const list = document.getElementById('conversation-list');
-  list.innerHTML = '';
-
-  if (!conversations.length) {
-    list.appendChild(createEmptyState('No conversations yet', 'Start a thread to open the operator workspace.'));
-    return;
+  function renderMarkdown(text) {
+    return marked.parse(text);
   }
 
-  const active = conversations.filter(item => !item.archived_at);
-  const archived = conversations.filter(item => item.archived_at);
-  renderConversationGroup(list, 'Active', active);
-  renderConversationGroup(list, 'Archived', archived);
-}
-
-function renderConversationGroup(container, label, conversations) {
-  if (!conversations.length) return;
-  const group = document.createElement('section');
-  group.className = 'conversation-group';
-  const heading = document.createElement('div');
-  heading.className = 'group-label';
-  heading.textContent = label;
-  group.appendChild(heading);
-
-  for (const convo of conversations) {
-    const card = document.createElement('article');
-    card.className = 'conversation-card' + (convo.conversation_id === currentConvoId ? ' active' : '');
-    card.onclick = event => {
-      if (event.target.closest('button')) return;
-      switchConversation(convo.conversation_id);
-    };
-
-    const head = document.createElement('div');
-    head.className = 'conversation-head';
-
-    const left = document.createElement('div');
-    const title = document.createElement('div');
-    title.className = 'conversation-title';
-    title.textContent = convo.title || `Conversation ${shortId(convo.conversation_id)}`;
-    const id = document.createElement('div');
-    id.className = 'conversation-id';
-    id.textContent = convo.conversation_id;
-    const time = document.createElement('div');
-    time.className = 'conversation-time';
-    time.textContent = convo.archived_at
-      ? `Archived ${formatTime(convo.archived_at)} · ${convo.message_count} msgs`
-      : `Updated ${formatTime(convo.updated_at)} · ${convo.message_count} msgs`;
-    const preview = document.createElement('div');
-    preview.className = 'conversation-preview';
-    preview.textContent = convo.preview || 'No transcript yet.';
-
-    left.appendChild(title);
-    left.appendChild(id);
-    left.appendChild(time);
-    left.appendChild(preview);
-    head.appendChild(left);
-    card.appendChild(head);
-
-    const badges = document.createElement('div');
-    badges.className = 'conversation-badges';
-    if (convo.pending_recipe) badges.appendChild(createBadge('Recipe', 'recipe'));
-    if (convo.active_compaction) badges.appendChild(createBadge('Ctx', 'ctx'));
-    if (convo.enabled_mcp_servers !== null && convo.enabled_mcp_servers !== undefined) {
-      badges.appendChild(createBadge(`MCP ${convo.enabled_mcp_servers.length}`, 'mcp'));
-    }
-    if (activeConversationJobs[convo.conversation_id]) {
-      badges.appendChild(createBadge(activeConversationJobs[convo.conversation_id].kind, 'run'));
-    }
-    if (badges.childNodes.length) card.appendChild(badges);
-
-    const actions = document.createElement('div');
-    actions.className = 'conversation-card-actions';
-    const rename = document.createElement('button');
-    rename.className = 'tiny-btn';
-    rename.textContent = 'Rename';
-    rename.onclick = async event => {
-      event.stopPropagation();
-      await promptRenameConversation(convo);
-    };
-    const remove = document.createElement('button');
-    remove.className = 'tiny-btn';
-    remove.textContent = 'Delete';
-    remove.onclick = async event => {
-      event.stopPropagation();
-      await deleteConversation(convo.conversation_id);
-    };
-    actions.appendChild(rename);
-    actions.appendChild(remove);
-    card.appendChild(actions);
-    group.appendChild(card);
+  function renderUserText(text) {
+    return `<pre class="user-message-text">${escapeHtml(text || '')}</pre>`;
   }
 
-  container.appendChild(group);
-}
-
-function createBadge(text, type) {
-  const badge = document.createElement('span');
-  badge.className = `badge ${type}`;
-  badge.textContent = text;
-  return badge;
-}
-
-async function newConversation() {
-  try {
-    setStatus('Creating conversation...', true);
-    const convo = await api('POST', '/conversations');
-    currentConvoId = convo.conversation_id;
-    currentConvoTitle = '';
-    currentConvoArchived = false;
-    currentMessages = [];
-    requestEvents = [];
-    activeJobId = null;
-    activeJobKind = null;
-    persistentWarning = '';
-    await Promise.all([loadConversations(), loadRecipes()]);
-    await loadConversationState();
-    document.getElementById('msg-input').focus();
-    setStatus('Conversation ready');
-  } catch (e) {
-    setStatus('Error: ' + e.message);
-  }
-}
-
-async function switchConversation(id) {
-  currentConvoId = id;
-  persistentWarning = '';
-  requestEvents = [];
-  renderRequestStatus();
-  setStatus('Loading conversation...', true);
-  await Promise.all([loadConversations(), loadRecipes()]);
-  await loadConversationState();
-  setStatus('Conversation loaded');
-}
-
-async function promptRenameConversation(convo) {
-  const next = window.prompt('Conversation title', convo.title || '');
-  if (next === null) return;
-  try {
-    await api('PUT', `/conversations/${convo.conversation_id}`, { title: next.trim() || null });
-    if (convo.conversation_id === currentConvoId) {
-      currentConvoTitle = next.trim();
-    }
-    await loadConversations();
-    setStatus(next.trim() ? 'Conversation renamed' : 'Conversation title cleared');
-  } catch (e) {
-    setStatus('Error renaming conversation: ' + e.message);
-  }
-}
-
-async function deleteConversation(conversationId) {
-  if (!window.confirm(`Delete ${conversationId}?`)) return;
-  try {
-    await api('DELETE', `/conversations/${conversationId}`);
-    delete activeConversationJobs[conversationId];
-    if (conversationId === currentConvoId) {
-      currentConvoId = null;
-      currentConvoTitle = '';
-      currentConvoArchived = false;
-      currentMessages = [];
-      currentJobs = [];
-      currentMcpStatuses = [];
-      requestEvents = [];
-      activeJobId = null;
-      activeJobKind = null;
-      renderMessages([]);
-      renderJobs([]);
-      renderMcpStatuses([]);
-      renderRequestStatus();
-      renderHistory();
-    }
-    await loadConversations();
-    updateComposerState();
-    setStatus('Conversation deleted');
-  } catch (e) {
-    setStatus('Error deleting conversation: ' + e.message);
-  }
-}
-
-async function loadConversationState() {
-  if (!currentConvoId) {
-    renderMessages([]);
-    renderJobs([]);
-    renderMcpStatuses([]);
-    renderHistory();
-    updateConversationContext();
-    updateComposerState();
-    return;
+  function formatRelativeTime(value) {
+    if (!value) return '—';
+    const timestamp = new Date(value).getTime();
+    if (!Number.isFinite(timestamp)) return '—';
+    const diffSeconds = Math.round((timestamp - Date.now()) / 1000);
+    const absSeconds = Math.abs(diffSeconds);
+    const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+    if (absSeconds < 60) return formatter.format(diffSeconds, 'second');
+    if (absSeconds < 3600) return formatter.format(Math.round(diffSeconds / 60), 'minute');
+    if (absSeconds < 86400) return formatter.format(Math.round(diffSeconds / 3600), 'hour');
+    if (absSeconds < 604800) return formatter.format(Math.round(diffSeconds / 86400), 'day');
+    return new Date(value).toLocaleDateString();
   }
 
-  await Promise.all([
-    loadMessages(),
-    loadJobs(),
-    loadMcpStatuses(),
-    loadRecipes(),
-  ]);
-  updateConversationContext();
-  renderHistory();
-}
-
-async function loadMessages() {
-  try {
-    const convo = await api('GET', `/conversations/${currentConvoId}`);
-    currentConvoTitle = convo.title || '';
-    currentConvoArchived = Boolean(convo.archived_at);
-    currentMessages = convo.messages || [];
-    currentRecipeName = convo.pending_recipe || null;
-    renderMessages(currentMessages);
-    renderHistory();
-    renderRecipes(currentRecipes);
-  } catch (e) {
-    setStatus('Error loading messages: ' + e.message);
-  }
-}
-
-function renderMessages(messages) {
-  const container = document.getElementById('messages');
-  container.innerHTML = '';
-
-  if (!messages.length) {
-    container.appendChild(createEmptyState('No messages yet', 'Queue a recipe if useful, then send the first prompt from the composer.'));
-    return;
-  }
-
-  for (const msg of messages) {
-    const div = document.createElement('article');
-    div.className = `message ${msg.role}`;
-
-    const top = document.createElement('div');
-    top.className = 'message-top';
-    const role = document.createElement('div');
-    role.className = 'role-tag';
-    role.textContent = msg.role === 'user' ? 'Operator' : 'Assistant';
-    top.appendChild(role);
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    if (msg.metadata) {
-      meta.textContent = `#${msg.metadata.assistant_index} · ${msg.metadata.timing.total_seconds.toFixed(1)}s · ${msg.metadata.tool_call_count} tools`;
-    } else {
-      meta.textContent = formatTime(msg.timestamp);
-    }
-    top.appendChild(meta);
-
-    const content = document.createElement('div');
-    if (msg.role === 'assistant') {
-      content.className = 'markdown-body';
-      content.innerHTML = renderMarkdown(msg.content);
-    } else {
-      content.className = 'content';
-      content.textContent = msg.content;
-    }
-
-    div.appendChild(top);
-    div.appendChild(content);
-    container.appendChild(div);
-  }
-
-  container.scrollTop = container.scrollHeight;
-}
-
-function renderHistory() {
-  const container = document.getElementById('history-body');
-  container.innerHTML = '';
-  document.getElementById('history-caption').textContent = currentConvoId
-    ? `${currentConvoTitle || shortId(currentConvoId)} · ${currentMessages.length} messages`
-    : 'Full transcript for the selected conversation.';
-
-  if (!currentConvoId) {
-    container.appendChild(createEmptyState('No conversation selected', 'Pick a conversation in the sidebar to inspect the full transcript.'));
-    return;
-  }
-
-  if (!currentMessages.length) {
-    container.appendChild(createEmptyState('No transcript yet', 'The first prompt will populate history here.'));
-    return;
-  }
-
-  for (const msg of currentMessages) {
-    const item = document.createElement('article');
-    item.className = `history-message ${msg.role}`;
-    const head = document.createElement('div');
-    head.className = 'message-top';
-    head.innerHTML = `<div class="role-tag">${escHtml(msg.role === 'user' ? 'Operator' : 'Assistant')}</div><div class="meta">${escHtml(formatTime(msg.timestamp))}</div>`;
-    const body = document.createElement('div');
-    body.className = msg.role === 'assistant' ? 'markdown-body' : 'content';
-    if (msg.role === 'assistant') {
-      body.innerHTML = renderMarkdown(msg.content);
-    } else {
-      body.textContent = msg.content;
-    }
-    item.appendChild(head);
-    item.appendChild(body);
-    container.appendChild(item);
-  }
-}
-
-function handleInputKey(event) {
-  if (event.key === 'Enter' && event.ctrlKey) {
-    event.preventDefault();
-    sendMessage();
-  }
-}
-
-async function sendMessage() {
-  if (!currentConvoId || activeJobId) return;
-  const input = document.getElementById('msg-input');
-  const content = input.value.trim();
-  if (!content) return;
-
-  input.value = '';
-  requestEvents = [];
-  activeJobKind = 'turn';
-  updateComposerState();
-  renderRequestStatus();
-  persistentWarning = '';
-  setStatus('Sending message...', true);
-
-  try {
-    const result = await api('POST', `/conversations/${currentConvoId}/messages`, { content });
-    activeJobId = result.job_id;
-    activeConversationJobs[currentConvoId] = { jobId: activeJobId, kind: 'run' };
-    updateComposerState();
-    renderRequestStatus();
-    await loadConversations();
-    pollJob(activeJobId);
-  } catch (e) {
-    activeJobId = null;
-    activeJobKind = null;
-    delete activeConversationJobs[currentConvoId];
-    updateComposerState();
-    renderRequestStatus();
-    setStatus('Error: ' + e.message);
-  }
-}
-
-async function compactConversation() {
-  closeActionsMenu();
-  if (!currentConvoId || activeJobId) return;
-  requestEvents = [];
-  activeJobKind = 'compact';
-  renderRequestStatus();
-  updateComposerState();
-  setStatus('Compacting conversation...', true);
-  try {
-    const result = await api('POST', `/conversations/${currentConvoId}/compact`);
-    activeJobId = result.job_id;
-    activeConversationJobs[currentConvoId] = { jobId: activeJobId, kind: 'compact' };
-    updateComposerState();
-    renderRequestStatus();
-    await loadConversations();
-    pollJob(activeJobId);
-  } catch (e) {
-    activeJobId = null;
-    activeJobKind = null;
-    delete activeConversationJobs[currentConvoId];
-    updateComposerState();
-    renderRequestStatus();
-    setStatus('Error compacting conversation: ' + e.message);
-  }
-}
-
-async function pollJob(jobId) {
-  try {
-    const job = await api('GET', `/jobs/${jobId}`);
-    requestEvents = job.events || [];
-    renderRequestStatus(job);
-    const toolLimitEvent = job.events.findLast?.(event => event.type === 'tool_limit')
-      || [...(job.events || [])].reverse().find(event => event.type === 'tool_limit');
-    persistentWarning = toolLimitEvent ? toolLimitEvent.message : persistentWarning;
-
-    if (job.status === 'running') {
-      const lastEvent = job.events.length ? job.events[job.events.length - 1].message : 'Processing request...';
-      setStatus(lastEvent, true);
-      pollTimer = setTimeout(() => pollJob(jobId), 500);
+  function updateTableScrollCue(container) {
+    if (!container) return;
+    const hasOverflow = container.scrollWidth > container.clientWidth + 1;
+    container.classList.toggle('is-scrollable', hasOverflow);
+    if (!hasOverflow) {
+      container.classList.remove('can-scroll-left', 'can-scroll-right');
       return;
     }
+    container.classList.toggle('can-scroll-left', container.scrollLeft > 4);
+    container.classList.toggle(
+      'can-scroll-right',
+      container.scrollLeft + container.clientWidth < container.scrollWidth - 4
+    );
+  }
 
-    clearTimeout(pollTimer);
-    activeJobId = null;
-    delete activeConversationJobs[currentConvoId];
-    await Promise.all([loadConversationState(), loadConversations()]);
-    updateComposerState();
-    renderRequestStatus(job);
+  function enhanceScrollableTables(root) {
+    if (!root) return;
+    root.querySelectorAll('.markdown-body table').forEach((table) => {
+      let container = table.parentElement;
+      if (!container || !container.classList.contains('table-scroll')) {
+        container = document.createElement('div');
+        container.className = 'table-scroll';
+        table.parentNode.insertBefore(container, table);
+        container.appendChild(table);
+      }
+      if (!container.dataset.scrollCueBound) {
+        container.addEventListener('scroll', () => updateTableScrollCue(container), { passive: true });
+        container.dataset.scrollCueBound = 'true';
+      }
+      updateTableScrollCue(container);
+    });
+  }
 
-    if (job.status === 'done') {
-      const toolInfo = job.result ? `${job.result.tool_calls} tool calls` : 'No tool calls';
-      setStatus(persistentWarning || `Done. ${toolInfo}`);
-    } else {
-      setStatus('Error: ' + (job.error || 'unknown error'));
+  function getMessageMetadata(message) {
+    return message && message.metadata && typeof message.metadata === 'object' ? message.metadata : {};
+  }
+
+  function formatDuration(seconds) {
+    if (!Number.isFinite(seconds)) return '';
+    const rounded = Math.round(seconds);
+    if (rounded <= 0) return '<1s';
+    if (rounded < 60) return `${rounded}s`;
+    const minutes = Math.floor(rounded / 60);
+    const remainder = rounded % 60;
+    return remainder ? `${minutes}m ${String(remainder).padStart(2, '0')}s` : `${minutes}m`;
+  }
+
+  function formatMessageRole(message) {
+    if (message.role !== 'assistant') {
+      return 'User';
     }
-    activeJobKind = null;
-  } catch (e) {
-    activeJobId = null;
-    delete activeConversationJobs[currentConvoId];
-    activeJobKind = null;
-    updateComposerState();
-    renderRequestStatus();
-    setStatus('Poll error: ' + e.message);
-  }
-}
-
-function renderRequestStatus(job) {
-  document.getElementById('request-status-chip').textContent = activeJobId
-    ? activeJobKind === 'compact' ? 'compacting' : 'running'
-    : job?.status || 'idle';
-  document.getElementById('request-metric-state').textContent = activeJobId
-    ? activeJobKind === 'compact' ? 'Compacting' : 'Running'
-    : job?.status ? job.status[0].toUpperCase() + job.status.slice(1) : 'Idle';
-  document.getElementById('request-metric-job').textContent = activeJobId ? shortId(activeJobId) : job ? shortId(job.job_id || '') : 'None';
-  document.getElementById('request-metric-events').textContent = String(requestEvents.length);
-  document.getElementById('request-metric-last').textContent = requestEvents.length
-    ? truncate(requestEvents[requestEvents.length - 1].message, 32)
-    : 'Waiting';
-
-  const list = document.getElementById('request-events');
-  list.innerHTML = '';
-  if (!requestEvents.length) {
-    list.appendChild(createCollectionEmptyState(currentConvoId ? 'No live events yet.' : 'Select a conversation to track requests.'));
-    return;
+    const metadata = getMessageMetadata(message);
+    return metadata.assistant_index ? `Assistant #${metadata.assistant_index}` : 'Assistant';
   }
 
-  for (const event of [...requestEvents].reverse().slice(0, 20)) {
-    const item = document.createElement('article');
-    item.className = 'event-item';
-    item.innerHTML = `
-      <div class="row-between">
-        <div class="event-kind">${escHtml(event.type || event.kind || 'event')}</div>
-        <div class="meta">${escHtml(event.tool_name || '')}</div>
-      </div>
-      <div class="event-message">${escHtml(event.message || '')}</div>
-    `;
-    list.appendChild(item);
-  }
-}
-
-async function toggleArchiveConversation() {
-  closeActionsMenu();
-  if (!currentConvoId) return;
-  try {
-    if (currentConvoArchived) {
-      await api('POST', `/conversations/${currentConvoId}/unarchive`);
-      currentConvoArchived = false;
-      setStatus('Conversation restored');
-    } else {
-      await api('POST', `/conversations/${currentConvoId}/archive`);
-      currentConvoArchived = true;
-      setStatus('Conversation archived');
+  function renderAssistantBadges(message) {
+    if (message.role !== 'assistant') {
+      return '';
     }
-    await loadConversations();
-    updateConversationContext();
-  } catch (e) {
-    setStatus('Error updating archive state: ' + e.message);
+    const metadata = getMessageMetadata(message);
+    const timing = metadata.timing && typeof metadata.timing === 'object' ? metadata.timing : null;
+    if (!timing) {
+      return '';
+    }
+    const badges = [];
+    if (Number.isFinite(timing.tool_seconds)) {
+      badges.push(`<span class="message-pill">tools: ${escapeHtml(formatDuration(timing.tool_seconds))}</span>`);
+    }
+    if (Number.isFinite(timing.llm_seconds)) {
+      badges.push(`<span class="message-pill">llm: ${escapeHtml(formatDuration(timing.llm_seconds))}</span>`);
+    }
+    return badges.join('');
   }
-}
 
-async function exportConversationSummary() {
-  closeActionsMenu();
-  if (!currentConvoId) return;
-  try {
-    const result = await api('POST', `/conversations/${currentConvoId}/export-summary`);
-    setStatus(`Summary exported to ${result.saved_to}`);
-  } catch (e) {
-    setStatus('Error exporting summary: ' + e.message);
+  function getAssistantDisplay(message) {
+    if (!message || message.role !== 'assistant') {
+      return { body: message && message.content ? message.content : '', sections: [] };
+    }
+    const display = message.display && typeof message.display === 'object' ? message.display : null;
+    const body = display && typeof display.body === 'string' ? display.body : (message.content || '');
+    const sections = display && Array.isArray(display.sections) ? display.sections : [];
+    return { body, sections };
   }
-}
 
-async function loadJobs() {
-  if (!currentConvoId) {
-    currentJobs = [];
+  function renderAssistantSections(message) {
+    const { sections } = getAssistantDisplay(message);
+    if (!sections.length) return '';
+    return sections.map((section) => `
+      <details class="message-section">
+        <summary>${escapeHtml(section.title)}${Number.isFinite(section.entry_count) ? ` <span class="message-section-count">${escapeHtml(String(section.entry_count))}</span>` : ''}</summary>
+        <div class="message-section-body markdown-body">${renderMarkdown(section.content || '')}</div>
+      </details>
+    `).join('');
+  }
+
+  const state = {
+    conversations: [],
+    schedules: [],
+    scheduleSnapshot: {},
+    activeConversationId: null,
+    activeJobId: null,
+    jobPollTimer: null,
+    config: null,
+    configDraft: null,
+    configPath: 'config/config.yaml',
+    configDirty: false,
+    configSaving: false,
+    oauthServers: [],
+    recipes: [],
+    activeConversation: null,
+    jobSnapshot: {},
+    schedulesUnavailable: false,
+    runStatus: {
+      kind: 'idle',
+      message: 'No request in progress.',
+      events: [],
+    },
+  };
+
+  const listEl = document.getElementById('conversation-list');
+  const streamEl = document.getElementById('conversation-stream');
+  const historyPanel = document.getElementById('history-panel');
+  const settingsPanel = document.getElementById('settings-panel');
+  const toolsPanel = document.getElementById('tools-panel');
+  const historyContent = document.getElementById('history-content');
+  const configFormEl = document.getElementById('config-form');
+  const configSaveStatusEl = document.getElementById('config-save-status');
+  const configRestartNoticeEl = document.getElementById('config-restart-notice');
+  const configValidationErrorsEl = document.getElementById('config-validation-errors');
+  const oauthServersEl = document.getElementById('oauth-servers');
+  const recipeSelectEl = document.getElementById('recipe-select');
+  const recipeDescriptionEl = document.getElementById('recipe-description');
+  const pendingRecipeEl = document.getElementById('pending-recipe');
+  const mcpServerSummaryEl = document.getElementById('mcp-server-summary');
+  const mcpServerListEl = document.getElementById('mcp-server-list');
+  const messageInputEl = document.getElementById('message-input');
+  const sendButtonEl = document.getElementById('send-button');
+  const composerHintEl = document.getElementById('composer-hint');
+  const deleteButtonEl = document.getElementById('delete-convo');
+  const historyButtonEl = document.getElementById('history-button');
+  const compactConversationButtonEl = document.getElementById('compact-conversation');
+  const applyRecipeButtonEl = document.getElementById('apply-recipe');
+  const clearRecipeButtonEl = document.getElementById('clear-recipe');
+  const resetMcpButtonEl = document.getElementById('reset-mcp-servers');
+  const saveConfigButtonEl = document.getElementById('save-config');
+  const reloadConfigButtonEl = document.getElementById('reload-config');
+  const jobsPanelEl = document.getElementById('jobs-panel');
+  const jobsListEl = document.getElementById('jobs-list');
+  const jobsBadgeEl = document.getElementById('jobs-panel-badge');
+  const jobsRunningIndicatorEl = document.getElementById('jobs-running-indicator');
+  const jobsRunningCountEl = document.getElementById('jobs-running-count');
+  const schedulesPanelEl = document.getElementById('schedules-panel');
+  const schedulesListEl = document.getElementById('schedules-list');
+  const schedulesBadgeEl = document.getElementById('schedules-panel-badge');
+  const schedulesRunningIndicatorEl = document.getElementById('schedules-running-indicator');
+  const schedulesRunningCountEl = document.getElementById('schedules-running-count');
+  const scheduleRunTypeEl = document.getElementById('schedule-run-type');
+  const scheduleNameEl = document.getElementById('schedule-name');
+  const scheduleRecipeSelectEl = document.getElementById('schedule-recipe-select');
+  const scheduleCadenceKindEl = document.getElementById('schedule-cadence-kind');
+  const scheduleCadenceValueEl = document.getElementById('schedule-cadence-value');
+  const schedulePromptEl = document.getElementById('schedule-prompt');
+  const scheduleHintEl = document.getElementById('schedule-form-hint');
+  const createScheduleButtonEl = document.getElementById('create-schedule');
+  const activeRunIndicatorEl = document.getElementById('active-run-indicator');
+  const toastContainerEl = document.getElementById('toast-container');
+  const openToolsButton = document.getElementById('open-tools');
+  const closeToolsButton = document.getElementById('close-tools');
+  const openSettingsButton = document.getElementById('open-settings');
+  const closeSettingsButton = document.getElementById('close-settings');
+  const conversationActionsToggleEl = document.getElementById('conversation-actions-toggle');
+  const conversationActionsMenuEl = document.getElementById('conversation-actions-menu');
+  const sidebarPanels = {
+    config: {
+      section: document.getElementById('config-panel'),
+      toggle: document.getElementById('toggle-config-panel'),
+    },
+    oauth: {
+      section: document.getElementById('oauth-panel'),
+      toggle: document.getElementById('toggle-oauth-panel'),
+    },
+    mcp: {
+      section: document.getElementById('mcp-panel'),
+      toggle: document.getElementById('toggle-mcp-panel'),
+    },
+  };
+
+  document.getElementById('new-convo').addEventListener('click', async () => {
+    const response = await fetch('/api/conversations', { method: 'POST' });
+    const conversation = response.ok ? await response.json() : null;
+    if (conversation && conversation.conversation_id) {
+      state.activeConversationId = conversation.conversation_id;
+      state.activeConversation = null;
+    }
+    await refreshConversations();
+    if (conversation && conversation.conversation_id) {
+      await selectConversation(conversation.conversation_id);
+      messageInputEl.focus();
+    }
+  });
+
+  document.getElementById('delete-convo').addEventListener('click', async () => {
+    if (!state.activeConversationId) return;
+    if (!confirm('Delete this conversation?')) return;
+    await fetch(`/api/conversations/${state.activeConversationId}`, { method: 'DELETE' });
+    state.activeConversationId = null;
+    state.activeConversation = null;
+    document.getElementById('active-convo-title').textContent = 'None selected';
+    document.getElementById('active-updated').textContent = '—';
+    streamEl.innerHTML = '';
+    renderPendingRecipe(null);
+    renderMcpServers([]);
     renderJobs([]);
-    return;
-  }
-  try {
-    currentJobs = await api('GET', `/conversations/${currentConvoId}/jobs`) || [];
-    renderJobs(currentJobs);
-  } catch (e) {
-    currentJobs = [];
-    renderJobs([]);
-    setStatus('Error loading jobs: ' + e.message);
-  }
-}
+    updateActionState();
+    await refreshConversations();
+  });
 
-function renderJobs(jobs) {
-  const list = document.getElementById('jobs-list');
-  list.innerHTML = '';
-  const total = jobs.length + (activeJobId ? 1 : 0);
-  document.getElementById('jobs-status-chip').textContent = `${total} job${total === 1 ? '' : 's'}`;
+  document.getElementById('history-button').addEventListener('click', () => {
+    if (!state.activeConversationId) return;
+    historyPanel.classList.remove('hidden');
+  });
 
-  if (!currentConvoId) {
-    list.appendChild(createCollectionEmptyState('Select a conversation to inspect remembered jobs and background work.'));
-    return;
-  }
-
-  if (activeJobId) {
-    const item = document.createElement('article');
-    item.className = 'job-item';
-    item.innerHTML = `
-      <div class="job-head">
-        <div>
-          <div class="job-status">Live Web Job</div>
-          <div class="job-meta">${escHtml(shortId(activeJobId))} · ${escHtml(activeJobKind || 'run')}</div>
-        </div>
-        <span class="badge run">running</span>
-      </div>
-    `;
-    list.appendChild(item);
-  }
-
-  if (!jobs.length) {
-    if (!activeJobId) {
-      list.appendChild(createCollectionEmptyState('No remembered jobs for this conversation.'));
+  document.getElementById('close-history').addEventListener('click', () => {
+    historyPanel.classList.add('hidden');
+  });
+  openToolsButton.addEventListener('click', () => setToolsPanelOpen(true));
+  openSettingsButton.addEventListener('click', () => setSettingsPanelOpen(true));
+  conversationActionsToggleEl.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setConversationActionsMenuOpen(conversationActionsMenuEl.classList.contains('hidden'));
+  });
+  conversationActionsMenuEl.addEventListener('click', () => setConversationActionsMenuOpen(false));
+  closeToolsButton.addEventListener('click', () => setToolsPanelOpen(false));
+  closeSettingsButton.addEventListener('click', () => setSettingsPanelOpen(false));
+  toolsPanel.addEventListener('click', (event) => {
+    if (event.target === toolsPanel) {
+      setToolsPanelOpen(false);
     }
-    return;
+  });
+  settingsPanel.addEventListener('click', (event) => {
+    if (event.target === settingsPanel) {
+      setSettingsPanelOpen(false);
+    }
+  });
+  document.addEventListener('click', (event) => {
+    if (!conversationActionsMenuEl.classList.contains('hidden') && !event.target.closest('.menu-shell')) {
+      setConversationActionsMenuOpen(false);
+    }
+  });
+  document.getElementById('refresh-oauth').addEventListener('click', refreshOAuthServers);
+  document.getElementById('apply-recipe').addEventListener('click', applyRecipe);
+  document.getElementById('clear-recipe').addEventListener('click', clearRecipe);
+  document.getElementById('reset-mcp-servers').addEventListener('click', resetMcpServers);
+  createScheduleButtonEl.addEventListener('click', createSchedule);
+  scheduleRunTypeEl.addEventListener('change', renderScheduleFormState);
+  scheduleCadenceKindEl.addEventListener('change', renderScheduleFormState);
+  compactConversationButtonEl.addEventListener('click', compactConversation);
+  saveConfigButtonEl.addEventListener('click', saveConfig);
+  reloadConfigButtonEl.addEventListener('click', refreshConfig);
+  recipeSelectEl.addEventListener('change', renderRecipeSelection);
+
+  sendButtonEl.addEventListener('click', sendMessage);
+  messageInputEl.addEventListener('input', updateActionState);
+  messageInputEl.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      sendMessage();
+      return;
+    }
+    if (event.key === 'Escape' && !historyPanel.classList.contains('hidden')) {
+      historyPanel.classList.add('hidden');
+      return;
+    }
+    if (event.key === 'Escape' && !settingsPanel.classList.contains('hidden')) {
+      setSettingsPanelOpen(false);
+      return;
+    }
+    if (event.key === 'Escape' && !toolsPanel.classList.contains('hidden')) {
+      setToolsPanelOpen(false);
+      return;
+    }
+    if (event.key === 'Escape' && !conversationActionsMenuEl.classList.contains('hidden')) {
+      setConversationActionsMenuOpen(false);
+    }
+  });
+  window.addEventListener('message', async (event) => {
+    if (event.origin !== window.location.origin) return;
+    if (!event.data || event.data.type !== 'agent-console-oauth-complete') return;
+    setRunStatus(event.data.success ? 'oauth' : 'error', event.data.message || 'OAuth flow finished.');
+    await refreshOAuthServers();
+  });
+
+  configFormEl.addEventListener('input', handleConfigFormInput);
+  configFormEl.addEventListener('change', handleConfigFormInput);
+  configFormEl.addEventListener('click', (event) => {
+    const action = event.target.dataset.action;
+    if (action === 'add-server') {
+      addConfigServer();
+    }
+    if (action === 'remove-server') {
+      removeConfigServer(Number(event.target.dataset.index));
+    }
+  });
+
+  function cloneData(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
   }
 
-  for (const job of jobs) {
-    const item = document.createElement('article');
-    item.className = 'job-item';
-    item.innerHTML = `
-      <div class="job-head">
-        <div>
-          <div class="job-status">${escHtml(job.alias || 'Job')}</div>
-          <div class="job-meta">${escHtml(job.status || 'unknown')} · ${escHtml(job.source_tool || 'local')} · updated ${escHtml(formatTime(job.updated_at))}</div>
-        </div>
-        <span class="status-chip">${escHtml(job.mode || 'tracked')}</span>
-      </div>
-      <div class="job-meta">${escHtml(job.notes || job.last_error || job.transaction_id || 'No extra metadata')}</div>
-    `;
-    list.appendChild(item);
-  }
-}
-
-async function loadRecipes() {
-  try {
-    currentRecipes = await api('GET', '/recipes') || [];
-    renderRecipes(currentRecipes);
-  } catch (e) {
-    setStatus('Error loading recipes: ' + e.message);
-  }
-}
-
-function renderRecipes(recipes) {
-  const list = document.getElementById('recipe-list');
-  list.innerHTML = '';
-  document.getElementById('recipe-status-chip').textContent = currentRecipeName || 'none queued';
-
-  if (!currentConvoId) {
-    list.appendChild(createCollectionEmptyState('Select a conversation to queue a recipe.'));
-    return;
+  function formatCadence(cadence) {
+    if (!cadence || typeof cadence !== 'object') return 'unknown';
+    if (cadence.kind === 'daily') return `daily ${cadence.time || ''}`.trim();
+    if (cadence.kind === 'weekdays') return `weekdays ${cadence.time || ''}`.trim();
+    if (cadence.kind === 'interval') {
+      return `every ${cadence.every || '?'}${cadence.unit === 'hours' ? 'h' : 'm'}`;
+    }
+    return String(cadence.kind || 'unknown');
   }
 
-  if (!recipes.length) {
-    list.appendChild(createCollectionEmptyState('No recipes installed.'));
-    return;
-  }
-
-  for (const recipe of recipes) {
-    const item = document.createElement('article');
-    item.className = 'recipe-item' + (recipe.name === currentRecipeName ? ' active' : '');
-    item.innerHTML = `
-      <div class="recipe-head">
-        <div>
-          <div class="recipe-title">${escHtml(recipe.title || recipe.name)}</div>
-          <div class="recipe-copy">${escHtml(recipe.description || 'No description available.')}</div>
-        </div>
-        <button class="${recipe.name === currentRecipeName ? 'ghost-btn' : 'secondary-btn'}">${recipe.name === currentRecipeName ? 'Queued' : 'Queue'}</button>
-      </div>
-    `;
-    const button = item.querySelector('button');
-    button.onclick = async () => {
-      if (recipe.name === currentRecipeName) return;
-      await useRecipe(recipe.name);
+  function defaultAuthConfig() {
+    return {
+      type: 'static_headers',
+      client_id: null,
+      client_secret: null,
+      token_endpoint_auth_method: null,
+      scopes: [],
+      authorization_endpoint: null,
+      token_endpoint: null,
+      registration_endpoint: null,
+      resource: null,
+      redirect_uri: null,
+      redirect_host: '127.0.0.1',
+      redirect_port: 8765,
+      redirect_path: '/callback',
+      callback_timeout_seconds: 300,
+      open_browser: true,
+      use_dynamic_client_registration: true,
+      client_name: 'agent-console',
     };
+  }
 
-    if (recipe.name === currentRecipeName) {
-      const clear = document.createElement('button');
-      clear.className = 'tiny-btn';
-      clear.textContent = 'Clear';
-      clear.onclick = async () => clearRecipe();
-      item.appendChild(clear);
+  function defaultServerConfig() {
+    return {
+      name: '',
+      transport: 'streamable_http',
+      url: '',
+      headers: {},
+      timeout: 600,
+      sse_read_timeout: 300,
+      client_session_timeout_seconds: 600,
+      auth: defaultAuthConfig(),
+    };
+  }
+
+  function normalizeConfigDraft(config) {
+    const draft = cloneData(config || {});
+    draft.prompt = draft.prompt || '';
+    draft.agent = draft.agent || {};
+    draft.mcp_runtime = draft.mcp_runtime || {};
+    draft.azure_openai = draft.azure_openai || {
+      api_key: '',
+      api_version: '',
+      endpoint: '',
+      deployment: '',
+      temperature: 0,
+      top_p: 1,
+      max_output_tokens: 4096,
+    };
+    draft.tracing = draft.tracing || {
+      provider: 'none',
+      phoenix_endpoint: 'http://localhost:4317',
+      phoenix_project: 'agent-console',
+    };
+    if (!Number.isFinite(Number(draft.agent.max_turns))) {
+      draft.agent.max_turns = 20;
     }
-    list.appendChild(item);
-  }
-}
-
-async function useRecipe(name) {
-  if (!currentConvoId) return;
-  try {
-    await api('POST', `/conversations/${currentConvoId}/recipe`, { name });
-    currentRecipeName = name;
-    await loadConversations();
-    renderRecipes(currentRecipes);
-    updateConversationContext();
-    setStatus(`Queued recipe ${name}`);
-  } catch (e) {
-    setStatus('Error queuing recipe: ' + e.message);
-  }
-}
-
-async function clearRecipe() {
-  if (!currentConvoId) return;
-  try {
-    await api('DELETE', `/conversations/${currentConvoId}/recipe`);
-    currentRecipeName = null;
-    await loadConversations();
-    renderRecipes(currentRecipes);
-    updateConversationContext();
-    setStatus('Recipe cleared');
-  } catch (e) {
-    setStatus('Error clearing recipe: ' + e.message);
-  }
-}
-
-async function loadMcpStatuses() {
-  const list = document.getElementById('mcp-list');
-  list.innerHTML = '';
-  if (!currentConvoId) {
-    currentMcpStatuses = [];
-    renderMcpStatuses([]);
-    return;
+    draft.mcp_servers = Array.isArray(draft.mcp_servers) ? draft.mcp_servers : [];
+    draft.mcp_servers = draft.mcp_servers.map((server) => ({
+      ...defaultServerConfig(),
+      ...server,
+      headers: server && typeof server.headers === 'object' && server.headers ? server.headers : {},
+      auth: {
+        ...defaultAuthConfig(),
+        ...(server && server.auth ? server.auth : {}),
+        scopes: Array.isArray(server && server.auth && server.auth.scopes) ? server.auth.scopes : [],
+      },
+    }));
+    return draft;
   }
 
-  try {
-    currentMcpStatuses = await api('GET', `/conversations/${currentConvoId}/mcp-statuses?include_counts=1`) || [];
-    renderMcpStatuses(currentMcpStatuses);
-  } catch (e) {
-    currentMcpStatuses = [];
-    renderMcpStatuses([]);
-    setStatus('Error loading MCP servers: ' + e.message);
-  }
-}
-
-function renderMcpStatuses(statuses) {
-  const list = document.getElementById('mcp-list');
-  list.innerHTML = '';
-  if (!currentConvoId) {
-    list.appendChild(createCollectionEmptyState('Select a conversation to view MCP status.'));
-    return;
-  }
-  if (!statuses.length) {
-    list.appendChild(createCollectionEmptyState('No MCP servers configured.'));
-    return;
+  function configStatusMessage() {
+    if (state.configSaving) return 'Saving configuration…';
+    if (!state.config) return 'Loading configuration…';
+    if (state.configDirty) return `Unsaved changes for ${state.configPath}.`;
+    return `Editing ${state.configPath}.`;
   }
 
-  for (const status of statuses) {
-    const item = document.createElement('article');
-    item.className = 'mcp-item';
-    item.innerHTML = `
-      <div class="mcp-head">
-        <div>
-          <div class="mcp-name">${escHtml(status.name)}</div>
-          <div class="mcp-state">${status.enabled ? 'Enabled for this conversation' : 'Filtered out for this conversation'}${status.tool_count === undefined ? '' : ` • ${status.tool_count} tools`}</div>
-        </div>
-        <button class="${status.enabled ? 'ghost-btn' : 'secondary-btn'}">${status.enabled ? 'Disable' : 'Enable'}</button>
-      </div>
+  function setConfigStatus(message) {
+    configSaveStatusEl.textContent = message;
+  }
+
+  function renderConfigErrors(errors) {
+    if (!errors || !errors.length) {
+      configValidationErrorsEl.classList.add('hidden');
+      configValidationErrorsEl.innerHTML = '';
+      return;
+    }
+    configValidationErrorsEl.classList.remove('hidden');
+    configValidationErrorsEl.innerHTML = `
+      <strong>Configuration validation failed.</strong>
+      <ul>${errors.map((error) => `<li>${escapeHtml(error.path || '(root)')}: ${escapeHtml(error.message || 'Invalid value')}</li>`).join('')}</ul>
     `;
-    item.querySelector('button').onclick = () => setMcpServerEnabled(status.name, !status.enabled, statuses);
-    list.appendChild(item);
   }
-}
 
-async function setMcpServerEnabled(serverName, enabled, statuses) {
-  try {
-    const next = statuses
-      .map(status => status.name)
-      .filter(name => {
-        if (name === serverName) return enabled;
-        return statuses.find(status => status.name === name)?.enabled;
+  function renderRestartNotice(message) {
+    if (!message) {
+      configRestartNoticeEl.classList.add('hidden');
+      configRestartNoticeEl.textContent = '';
+      return;
+    }
+    configRestartNoticeEl.classList.remove('hidden');
+    configRestartNoticeEl.textContent = message;
+  }
+
+  function renderConfigForm() {
+    const config = state.configDraft;
+    if (!config) {
+      configFormEl.innerHTML = '<p class="empty-state">Configuration is unavailable.</p>';
+      setConfigStatus(configStatusMessage());
+      return;
+    }
+    configFormEl.innerHTML = `
+      <section class="config-section">
+        <label class="config-field config-field-full">
+          <span>Prompt</span>
+          <textarea data-config-path="prompt" rows="4">${escapeHtml(config.prompt || '')}</textarea>
+        </label>
+      </section>
+      <section class="config-section">
+        <h4>Agent</h4>
+        <div class="config-grid">
+          <label class="config-field"><span>Max Turns</span><input type="number" min="1" max="100" step="1" data-config-path="agent.max_turns" value="${escapeAttribute(String(config.agent.max_turns ?? 20))}" /></label>
+        </div>
+      </section>
+      <section class="config-section">
+        <h4>Azure OpenAI</h4>
+        <div class="config-grid">
+          <label class="config-field"><span>API Key</span><input type="password" data-config-path="azure_openai.api_key" value="${escapeAttribute(config.azure_openai.api_key || '')}" /></label>
+          <label class="config-field"><span>API Version</span><input type="text" data-config-path="azure_openai.api_version" value="${escapeAttribute(config.azure_openai.api_version || '')}" /></label>
+          <label class="config-field"><span>Endpoint</span><input type="url" data-config-path="azure_openai.endpoint" value="${escapeAttribute(config.azure_openai.endpoint || '')}" /></label>
+          <label class="config-field"><span>Deployment</span><input type="text" data-config-path="azure_openai.deployment" value="${escapeAttribute(config.azure_openai.deployment || '')}" /></label>
+          <label class="config-field"><span>Temperature</span><input type="number" min="0" max="2" step="0.1" data-config-path="azure_openai.temperature" value="${escapeAttribute(String(config.azure_openai.temperature ?? 0))}" /></label>
+          <label class="config-field"><span>Top P</span><input type="number" min="0" max="1" step="0.1" data-config-path="azure_openai.top_p" value="${escapeAttribute(String(config.azure_openai.top_p ?? 1))}" /></label>
+          <label class="config-field"><span>Max Output Tokens</span><input type="number" min="64" step="1" data-config-path="azure_openai.max_output_tokens" value="${escapeAttribute(String(config.azure_openai.max_output_tokens ?? 4096))}" /></label>
+        </div>
+      </section>
+      <section class="config-section">
+        <h4>Tracing</h4>
+        <div class="config-grid">
+          <label class="config-field">
+            <span>Provider</span>
+            <select data-config-path="tracing.provider">
+              <option value="none" ${config.tracing.provider === 'none' ? 'selected' : ''}>none</option>
+              <option value="console" ${config.tracing.provider === 'console' ? 'selected' : ''}>console</option>
+              <option value="phoenix" ${config.tracing.provider === 'phoenix' ? 'selected' : ''}>phoenix</option>
+            </select>
+          </label>
+          <label class="config-field"><span>Phoenix Endpoint</span><input type="text" data-config-path="tracing.phoenix_endpoint" value="${escapeAttribute(config.tracing.phoenix_endpoint || '')}" /></label>
+          <label class="config-field"><span>Phoenix Project</span><input type="text" data-config-path="tracing.phoenix_project" value="${escapeAttribute(config.tracing.phoenix_project || '')}" /></label>
+        </div>
+      </section>
+      <section class="config-section">
+        <h4>MCP Runtime</h4>
+        <div class="config-grid">
+          <label class="config-field"><span>Connect Timeout</span><input type="number" min="0" step="1" data-config-path="mcp_runtime.connect_timeout_seconds" value="${escapeAttribute(String(config.mcp_runtime.connect_timeout_seconds ?? 120))}" /></label>
+          <label class="config-field"><span>Cleanup Timeout</span><input type="number" min="0" step="1" data-config-path="mcp_runtime.cleanup_timeout_seconds" value="${escapeAttribute(String(config.mcp_runtime.cleanup_timeout_seconds ?? 10))}" /></label>
+          <label class="config-field config-checkbox"><input type="checkbox" data-config-path="mcp_runtime.connect_in_parallel" ${config.mcp_runtime.connect_in_parallel ? 'checked' : ''} /><span>Connect in parallel</span></label>
+        </div>
+      </section>
+      <section class="config-section">
+        <div class="config-section-header">
+          <h4>MCP Servers</h4>
+          <button type="button" data-action="add-server">Add Server</button>
+        </div>
+        <div class="config-server-list">
+          ${config.mcp_servers.map((server, index) => renderConfigServer(server, index)).join('')}
+        </div>
+      </section>
+    `;
+    setConfigStatus(configStatusMessage());
+    saveConfigButtonEl.disabled = state.configSaving || !state.configDirty;
+    reloadConfigButtonEl.disabled = state.configSaving || !state.configDirty;
+  }
+
+  function renderConfigServer(server, index) {
+    const auth = server.auth || defaultAuthConfig();
+    const headers = Object.entries(server.headers || {})
+      .map(([key, value]) => `${key}: ${value}`)
+      .join('\n');
+    const scopes = Array.isArray(auth.scopes) ? auth.scopes.join('\n') : '';
+    const isOauth = auth.type === 'oauth_public';
+    return `
+      <article class="config-server-card">
+        <div class="config-section-header">
+          <h5>${escapeHtml(server.name || `Server ${index + 1}`)}</h5>
+          <button type="button" data-action="remove-server" data-index="${index}">Remove</button>
+        </div>
+        <div class="config-grid">
+          <label class="config-field"><span>Name</span><input type="text" data-config-path="mcp_servers.${index}.name" value="${escapeAttribute(server.name || '')}" /></label>
+          <label class="config-field">
+            <span>Transport</span>
+            <select data-config-path="mcp_servers.${index}.transport">
+              <option value="streamable_http" ${server.transport === 'streamable_http' ? 'selected' : ''}>streamable_http</option>
+              <option value="sse" ${server.transport === 'sse' ? 'selected' : ''}>sse</option>
+              <option value="stdio" ${server.transport === 'stdio' ? 'selected' : ''}>stdio</option>
+            </select>
+          </label>
+          <label class="config-field config-field-full"><span>URL</span><input type="url" data-config-path="mcp_servers.${index}.url" value="${escapeAttribute(server.url || '')}" /></label>
+          <label class="config-field"><span>Timeout</span><input type="number" min="0" step="1" data-config-path="mcp_servers.${index}.timeout" value="${escapeAttribute(String(server.timeout ?? 600))}" /></label>
+          <label class="config-field"><span>SSE Read Timeout</span><input type="number" min="0" step="1" data-config-path="mcp_servers.${index}.sse_read_timeout" value="${escapeAttribute(String(server.sse_read_timeout ?? 300))}" /></label>
+          <label class="config-field"><span>Client Session Timeout</span><input type="number" min="0" step="1" data-config-path="mcp_servers.${index}.client_session_timeout_seconds" value="${escapeAttribute(String(server.client_session_timeout_seconds ?? 600))}" /></label>
+          <label class="config-field config-field-full"><span>Headers</span><textarea rows="3" data-config-path="mcp_servers.${index}.headers">${escapeHtml(headers)}</textarea></label>
+          <label class="config-field">
+            <span>Auth Type</span>
+            <select data-config-path="mcp_servers.${index}.auth.type">
+              <option value="static_headers" ${auth.type === 'static_headers' ? 'selected' : ''}>static_headers</option>
+              <option value="oauth_public" ${auth.type === 'oauth_public' ? 'selected' : ''}>oauth_public</option>
+            </select>
+          </label>
+        </div>
+        <div class="config-grid oauth-auth-fields ${isOauth ? '' : 'hidden'}" data-auth-fields="${index}">
+          <label class="config-field config-field-full"><span>Scopes</span><textarea rows="3" data-config-path="mcp_servers.${index}.auth.scopes">${escapeHtml(scopes)}</textarea></label>
+          <label class="config-field"><span>Client ID</span><input type="text" data-config-path="mcp_servers.${index}.auth.client_id" value="${escapeAttribute(auth.client_id || '')}" /></label>
+          <label class="config-field"><span>Client Secret</span><input type="password" data-config-path="mcp_servers.${index}.auth.client_secret" value="${escapeAttribute(auth.client_secret || '')}" /></label>
+          <label class="config-field">
+            <span>Token Auth Method</span>
+            <select data-config-path="mcp_servers.${index}.auth.token_endpoint_auth_method">
+              <option value="" ${!auth.token_endpoint_auth_method ? 'selected' : ''}>default</option>
+              <option value="none" ${auth.token_endpoint_auth_method === 'none' ? 'selected' : ''}>none</option>
+              <option value="client_secret_post" ${auth.token_endpoint_auth_method === 'client_secret_post' ? 'selected' : ''}>client_secret_post</option>
+              <option value="client_secret_basic" ${auth.token_endpoint_auth_method === 'client_secret_basic' ? 'selected' : ''}>client_secret_basic</option>
+            </select>
+          </label>
+          <label class="config-field"><span>Authorization Endpoint</span><input type="url" data-config-path="mcp_servers.${index}.auth.authorization_endpoint" value="${escapeAttribute(auth.authorization_endpoint || '')}" /></label>
+          <label class="config-field"><span>Token Endpoint</span><input type="url" data-config-path="mcp_servers.${index}.auth.token_endpoint" value="${escapeAttribute(auth.token_endpoint || '')}" /></label>
+          <label class="config-field"><span>Registration Endpoint</span><input type="url" data-config-path="mcp_servers.${index}.auth.registration_endpoint" value="${escapeAttribute(auth.registration_endpoint || '')}" /></label>
+          <label class="config-field"><span>Resource</span><input type="url" data-config-path="mcp_servers.${index}.auth.resource" value="${escapeAttribute(auth.resource || '')}" /></label>
+          <label class="config-field"><span>Redirect URI</span><input type="text" data-config-path="mcp_servers.${index}.auth.redirect_uri" value="${escapeAttribute(auth.redirect_uri || '')}" /></label>
+          <label class="config-field"><span>Redirect Host</span><input type="text" data-config-path="mcp_servers.${index}.auth.redirect_host" value="${escapeAttribute(auth.redirect_host || '')}" /></label>
+          <label class="config-field"><span>Redirect Port</span><input type="number" min="0" max="65535" step="1" data-config-path="mcp_servers.${index}.auth.redirect_port" value="${escapeAttribute(String(auth.redirect_port ?? 8765))}" /></label>
+          <label class="config-field"><span>Redirect Path</span><input type="text" data-config-path="mcp_servers.${index}.auth.redirect_path" value="${escapeAttribute(auth.redirect_path || '')}" /></label>
+          <label class="config-field"><span>Callback Timeout</span><input type="number" min="1" step="1" data-config-path="mcp_servers.${index}.auth.callback_timeout_seconds" value="${escapeAttribute(String(auth.callback_timeout_seconds ?? 300))}" /></label>
+          <label class="config-field"><span>Client Name</span><input type="text" data-config-path="mcp_servers.${index}.auth.client_name" value="${escapeAttribute(auth.client_name || '')}" /></label>
+          <label class="config-field config-checkbox"><input type="checkbox" data-config-path="mcp_servers.${index}.auth.open_browser" ${auth.open_browser ? 'checked' : ''} /><span>Open browser</span></label>
+          <label class="config-field config-checkbox"><input type="checkbox" data-config-path="mcp_servers.${index}.auth.use_dynamic_client_registration" ${auth.use_dynamic_client_registration ? 'checked' : ''} /><span>Use dynamic client registration</span></label>
+        </div>
+      </article>
+    `;
+  }
+
+  function assignConfigPath(target, path, value) {
+    const segments = path.split('.');
+    let current = target;
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const key = /^\d+$/.test(segments[index]) ? Number(segments[index]) : segments[index];
+      current = current[key];
+    }
+    const finalKey = /^\d+$/.test(segments[segments.length - 1]) ? Number(segments[segments.length - 1]) : segments[segments.length - 1];
+    current[finalKey] = value;
+  }
+
+  function normalizeEmpty(value) {
+    return value === '' ? null : value;
+  }
+
+  function parseHeaderLines(value) {
+    return value
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .reduce((headers, line) => {
+        const separator = line.indexOf(':');
+        if (separator === -1) return headers;
+        const key = line.slice(0, separator).trim();
+        const headerValue = line.slice(separator + 1).trim();
+        if (key) headers[key] = headerValue;
+        return headers;
+      }, {});
+  }
+
+  function parseScopeLines(value) {
+    return value
+      .split(/[\n,]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function coerceConfigValue(path, element) {
+    if (element.type === 'checkbox') return element.checked;
+    if (path.endsWith('.headers')) return parseHeaderLines(element.value);
+    if (path.endsWith('.scopes')) return parseScopeLines(element.value);
+    if (element.type === 'number') {
+      return element.value === '' ? null : Number(element.value);
+    }
+    if (path.endsWith('token_endpoint_auth_method')) return normalizeEmpty(element.value);
+    if (path.includes('.auth.') && !path.endsWith('.type') && !path.endsWith('.redirect_host') && !path.endsWith('.redirect_path') && !path.endsWith('.client_name')) {
+      return normalizeEmpty(element.value);
+    }
+    return element.value;
+  }
+
+  function handleConfigFormInput(event) {
+    const path = event.target.dataset.configPath;
+    if (!path || !state.configDraft) return;
+    const value = coerceConfigValue(path, event.target);
+    assignConfigPath(state.configDraft, path, value);
+    if (path.endsWith('.auth.type')) {
+      const serverPath = path.replace(/\.auth\.type$/, '');
+      const auth = getConfigPath(state.configDraft, `${serverPath}.auth`);
+      if (value === 'static_headers') {
+        auth.type = 'static_headers';
+      } else {
+        Object.assign(auth, defaultAuthConfig(), auth, { type: 'oauth_public' });
+      }
+    }
+    state.configDirty = true;
+    renderConfigErrors([]);
+    setConfigStatus(configStatusMessage());
+    if (path.endsWith('.name') || path.endsWith('.auth.type')) {
+      renderConfigForm();
+      return;
+    }
+    saveConfigButtonEl.disabled = false;
+    reloadConfigButtonEl.disabled = false;
+  }
+
+  function getConfigPath(target, path) {
+    return path.split('.').reduce((current, segment) => {
+      const key = /^\d+$/.test(segment) ? Number(segment) : segment;
+      return current[key];
+    }, target);
+  }
+
+  function addConfigServer() {
+    if (!state.configDraft) return;
+    state.configDraft.mcp_servers.push(defaultServerConfig());
+    state.configDirty = true;
+    renderConfigForm();
+  }
+
+  function removeConfigServer(index) {
+    if (!state.configDraft) return;
+    state.configDraft.mcp_servers.splice(index, 1);
+    state.configDirty = true;
+    renderConfigForm();
+  }
+
+  async function readResponseJson(response) {
+    const text = await response.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      return { description: text };
+    }
+  }
+
+  function prepareConfigForSave() {
+    const draft = cloneData(state.configDraft || {});
+    delete draft.agent;
+    if (draft.azure_openai) {
+      const required = ['api_key', 'api_version', 'endpoint', 'deployment'];
+      const isBlank = required.every((key) => !String(draft.azure_openai[key] || '').trim());
+      if (isBlank) draft.azure_openai = null;
+    }
+    if (Array.isArray(draft.mcp_servers)) {
+      draft.mcp_servers = draft.mcp_servers.map((server) => {
+        const next = { ...server };
+        if (next.transport === 'http') next.transport = 'streamable_http';
+        if (next.auth && next.auth.type === 'oauth_public') {
+          next.auth.redirect_uri = next.auth.redirect_uri || '';
+          if (!next.auth.token_endpoint_auth_method) {
+            delete next.auth.token_endpoint_auth_method;
+          }
+        }
+        return next;
       });
-    const allEnabled = next.length === statuses.length;
-    if (allEnabled) {
-      await api('DELETE', `/conversations/${currentConvoId}/mcp-servers`);
-    } else {
-      await api('PUT', `/conversations/${currentConvoId}/mcp-servers`, { enabled: next });
     }
-    await Promise.all([loadMcpStatuses(), loadConversations()]);
-    setStatus(`MCP server ${enabled ? 'enabled' : 'disabled'}: ${serverName}`);
-  } catch (e) {
-    setStatus('Error updating MCP server filter: ' + e.message);
-  }
-}
-
-async function resetMcpServers() {
-  if (!currentConvoId) return;
-  try {
-    await api('DELETE', `/conversations/${currentConvoId}/mcp-servers`);
-    await Promise.all([loadMcpStatuses(), loadConversations()]);
-    setStatus('All MCP servers enabled');
-  } catch (e) {
-    setStatus('Error resetting MCP servers: ' + e.message);
-  }
-}
-
-async function loadConfig() {
-  try {
-    const config = await api('GET', '/config');
-    currentConfig = JSON.stringify(config, null, 2);
-    document.getElementById('config-editor').value = currentConfig;
-    document.getElementById('config-status-chip').textContent = 'loaded';
-  } catch (e) {
-    document.getElementById('config-status-chip').textContent = 'error';
-    setStatus('Error loading config: ' + e.message);
-  }
-}
-
-async function saveConfig() {
-  try {
-    const parsed = JSON.parse(document.getElementById('config-editor').value);
-    const result = await api('PUT', '/config', { config: parsed });
-    document.getElementById('config-status-chip').textContent = result.reload_required ? 'saved / reload' : 'saved';
-    setStatus(`Config saved to ${result.saved_to}`);
-  } catch (e) {
-    document.getElementById('config-status-chip').textContent = 'error';
-    setStatus('Error saving config: ' + e.message);
-  }
-}
-
-async function loadOAuthServers() {
-  try {
-    currentOAuthServers = await api('GET', '/mcp/oauth-servers');
-    renderOAuthServers(currentOAuthServers);
-    document.getElementById('oauth-status-chip').textContent = currentOAuthServers.length ? `${currentOAuthServers.length} servers` : 'none';
-  } catch (e) {
-    currentOAuthServers = [];
-    renderOAuthServers([]);
-    document.getElementById('oauth-status-chip').textContent = 'error';
-    setStatus('Error loading OAuth servers: ' + e.message);
-  }
-}
-
-function renderOAuthServers(servers) {
-  const list = document.getElementById('oauth-list');
-  list.innerHTML = '';
-  if (!servers.length) {
-    list.appendChild(createCollectionEmptyState('No OAuth-enabled MCP servers configured.'));
-    return;
+    return draft;
   }
 
-  for (const server of servers) {
-    const item = document.createElement('article');
-    item.className = 'oauth-item';
-    item.innerHTML = `
-      <div class="oauth-head">
-        <div>
-          <div class="oauth-name">${escHtml(server.name)}</div>
-          <div class="oauth-url">${escHtml(server.url)}</div>
+  async function refreshConfig() {
+    setConfigStatus('Loading configuration…');
+    renderConfigErrors([]);
+    const response = await fetch('/api/config');
+    const payload = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setConfigStatus(payload.description || payload.error || 'Failed to load configuration.');
+      return;
+    }
+    const config = payload.config || payload;
+    state.config = config;
+    state.configDraft = normalizeConfigDraft(config);
+    state.configPath = payload.config_path || 'config/config.local.yaml';
+    state.configDirty = false;
+    state.configSaving = false;
+    renderRestartNotice(payload.message || '');
+    renderConfigForm();
+  }
+
+  async function saveConfig() {
+    if (!state.configDraft || state.configSaving || !state.configDirty) return;
+    state.configSaving = true;
+    setConfigStatus(configStatusMessage());
+    saveConfigButtonEl.disabled = true;
+    reloadConfigButtonEl.disabled = true;
+    const config = prepareConfigForSave();
+    const response = await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config }),
+    });
+    const payload = await readResponseJson(response) || {};
+    state.configSaving = false;
+    if (!response.ok) {
+      renderConfigErrors(payload.validation_errors || []);
+      setConfigStatus(payload.description || payload.error || 'Failed to save configuration.');
+      saveConfigButtonEl.disabled = false;
+      reloadConfigButtonEl.disabled = false;
+      return;
+    }
+    state.config = payload.config || config;
+    state.configDraft = normalizeConfigDraft(state.config);
+    state.configPath = payload.config_path || state.configPath;
+    state.configDirty = false;
+    renderConfigErrors([]);
+    renderRestartNotice(payload.message || '');
+    renderConfigForm();
+    setRunStatus('config', 'Configuration saved to disk. Restart the app to fully apply it.');
+  }
+
+  function setPanelCollapsed(name, collapsed) {
+    const panel = sidebarPanels[name];
+    if (!panel || !panel.section || !panel.toggle) return;
+    panel.section.classList.toggle('is-collapsed', collapsed);
+    panel.toggle.setAttribute('aria-expanded', String(!collapsed));
+    try {
+      window.localStorage.setItem(`agent-console.sidebar.${name}.collapsed`, collapsed ? '1' : '0');
+    } catch (error) {
+      // Ignore storage failures and keep the in-memory UI state.
+    }
+  }
+
+  function setSettingsPanelOpen(isOpen) {
+    settingsPanel.classList.toggle('hidden', !isOpen);
+    settingsPanel.setAttribute('aria-hidden', String(!isOpen));
+    openSettingsButton.setAttribute('aria-expanded', String(isOpen));
+    if (isOpen && !state.config) {
+      refreshConfig();
+    }
+  }
+
+  function setToolsPanelOpen(isOpen) {
+    toolsPanel.classList.toggle('hidden', !isOpen);
+    toolsPanel.setAttribute('aria-hidden', String(!isOpen));
+    openToolsButton.setAttribute('aria-expanded', String(isOpen));
+  }
+
+  function initializeSidebarPanels() {
+    const defaultCollapsed = window.matchMedia('(max-width: 1200px)').matches;
+    Object.entries(sidebarPanels).forEach(([name, panel]) => {
+      if (!panel.toggle) return;
+      let collapsed = defaultCollapsed;
+      try {
+        const stored = window.localStorage.getItem(`agent-console.sidebar.${name}.collapsed`);
+        if (stored === '1') collapsed = true;
+        if (stored === '0') collapsed = false;
+      } catch (error) {
+        // Ignore storage failures and use the responsive default.
+      }
+      setPanelCollapsed(name, collapsed);
+      panel.toggle.addEventListener('click', () => {
+        const isCollapsed = panel.section.classList.contains('is-collapsed');
+        setPanelCollapsed(name, !isCollapsed);
+      });
+    });
+  }
+
+  async function refreshConversations() {
+    const response = await fetch('/api/conversations?include_archived=true');
+    if (!response.ok) return;
+    const data = await response.json();
+    state.conversations = data;
+    renderConversationList();
+    if (!state.activeConversationId && data.length) {
+      await selectConversation(data[0].conversation_id, { scroll: false });
+      return;
+    }
+    if (state.activeConversationId && !state.activeConversation) {
+      await selectConversation(state.activeConversationId, { scroll: false });
+      return;
+    }
+    if (state.activeConversationId) {
+      const activeSummary = data.find((item) => item.conversation_id === state.activeConversationId);
+      if (!activeSummary) {
+        return;
+      }
+      if (activeSummary.updated_at) {
+        document.getElementById('active-updated').textContent = new Date(activeSummary.updated_at).toLocaleString();
+      }
+      syncConversationRunState(activeSummary.active_run || null);
+    }
+  }
+
+  function renderConversationList() {
+    listEl.innerHTML = '';
+    state.conversations.forEach((item) => {
+      const li = document.createElement('li');
+      li.className = item.conversation_id === state.activeConversationId ? 'active' : '';
+      const badges = [];
+      if (item.archived_at) badges.push('<span class="conversation-badge">Archived</span>');
+      if (item.has_pending_recipe || item.pending_recipe) badges.push('<span class="conversation-badge">Recipe</span>');
+      if (item.has_active_compaction || item.active_compaction) badges.push('<span class="conversation-badge">Ctx</span>');
+      if (item.has_custom_mcp_selection || item.enabled_mcp_servers !== null && item.enabled_mcp_servers !== undefined) {
+        badges.push('<span class="conversation-badge">MCP</span>');
+      }
+      if (item.active_run && item.active_run.status) {
+        const status = String(item.active_run.status);
+        const badgeClass = status === 'running'
+          ? 'conversation-badge conversation-badge-running'
+          : status === 'failed'
+            ? 'conversation-badge conversation-badge-error'
+            : 'conversation-badge conversation-badge-success';
+        badges.push(`<span class="${badgeClass}">${escapeHtml(status)}</span>`);
+      }
+      li.innerHTML = `
+        <div class="conversation-card-main">
+          <div class="conversation-card-top">
+            <strong>${escapeHtml(item.title || item.conversation_id)}</strong>
+            <span class="conversation-updated">${escapeHtml(formatRelativeTime(item.updated_at))}</span>
+          </div>
+          ${badges.length ? `<div class="conversation-badges">${badges.join('')}</div>` : ''}
+          <p>${escapeHtml(item.preview || 'No messages yet')}</p>
         </div>
-        <button class="secondary-btn">Sign In</button>
-      </div>
+      `;
+      li.addEventListener('click', () => selectConversation(item.conversation_id));
+      listEl.appendChild(li);
+    });
+  }
+
+  async function selectConversation(conversationId, options = {}) {
+    const { scroll = true } = options;
+    state.activeConversationId = conversationId;
+    const response = await fetch(`/api/conversations/${conversationId}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    state.activeConversation = data;
+    document.getElementById('active-convo-title').textContent = data.title || conversationId;
+    document.getElementById('active-updated').textContent = new Date(data.updated_at).toLocaleString();
+    renderMessages(data.messages || []);
+    renderHistory(data.messages || []);
+    renderPendingRecipe(data.pending_recipe);
+    await refreshActiveMcpServers();
+    syncConversationRunState(data.active_run || null);
+    renderConversationList();
+    updateActionState();
+    await refreshJobs();
+    await refreshSchedules();
+    if (scroll) {
+      scrollConversationToBottom();
+    }
+  }
+
+  function syncConversationRunState(activeRun) {
+    state.activeConversation = state.activeConversation || {};
+    state.activeConversation.active_run = activeRun;
+    if (!activeRun || !activeRun.status) {
+      activeRunIndicatorEl.className = 'conversation-badge hidden';
+      activeRunIndicatorEl.textContent = 'Idle';
+      if (!state.activeJobId) {
+        setRunStatus('idle', 'No request in progress.');
+        renderRunEvents([]);
+      }
+      return;
+    }
+    const status = String(activeRun.status);
+    const events = Array.isArray(activeRun.events)
+      ? activeRun.events
+      : activeRun.last_event
+        ? [activeRun.last_event]
+        : [];
+    const className = status === 'running'
+      ? 'conversation-badge conversation-badge-running'
+      : status === 'failed'
+        ? 'conversation-badge conversation-badge-error'
+        : 'conversation-badge conversation-badge-success';
+    activeRunIndicatorEl.className = className;
+    activeRunIndicatorEl.textContent = `${activeRun.operation || 'request'} ${status}`;
+    renderRunEvents(events);
+    setRunStatus(
+      status,
+      phaseMessage(status, events, status === 'running' ? 'Processing request...' : `Request ${status}.`)
+    );
+    if (status === 'running' && activeRun.job_id) {
+      state.activeJobId = activeRun.job_id;
+      if (!state.jobPollTimer) {
+        pollJob();
+      }
+      return;
+    }
+    state.activeJobId = null;
+  }
+
+  async function refreshRecipes() {
+    const response = await fetch('/api/recipes');
+    if (!response.ok) return;
+    state.recipes = await response.json();
+    renderRecipeOptions();
+    renderScheduleFormState();
+  }
+
+  function renderRecipeOptions() {
+    recipeSelectEl.innerHTML = '<option value="">No recipe</option>';
+    scheduleRecipeSelectEl.innerHTML = '<option value="">Select recipe</option>';
+    state.recipes.forEach((recipe) => {
+      const option = document.createElement('option');
+      option.value = recipe.name;
+      option.textContent = recipe.title || recipe.name;
+      recipeSelectEl.appendChild(option);
+      scheduleRecipeSelectEl.appendChild(option.cloneNode(true));
+    });
+    renderRecipeSelection();
+  }
+
+  function renderScheduleFormState() {
+    if (state.schedulesUnavailable) {
+      scheduleRecipeSelectEl.classList.add('hidden');
+      schedulePromptEl.classList.add('hidden');
+      scheduleHintEl.textContent = 'Scheduled runs are not available in this Rust web API yet.';
+      createScheduleButtonEl.disabled = true;
+      return;
+    }
+    const isPrompt = scheduleRunTypeEl.value === 'prompt';
+    scheduleRecipeSelectEl.classList.toggle('hidden', isPrompt);
+    schedulePromptEl.classList.toggle('hidden', !isPrompt);
+    createScheduleButtonEl.disabled = false;
+    scheduleCadenceValueEl.placeholder = scheduleCadenceKindEl.value === 'every' ? '15m or 2h' : '07:30';
+    scheduleHintEl.textContent = isPrompt
+      ? 'Create a scheduled prompt run. Results stay in a dedicated conversation.'
+      : 'Create a scheduled recipe run. Results stay in a dedicated conversation.';
+  }
+
+  function renderRecipeSelection() {
+    const selected = state.recipes.find((recipe) => recipe.name === recipeSelectEl.value);
+    if (!selected) {
+      recipeDescriptionEl.textContent = 'Select a recipe to prefill the next prompt.';
+      updateActionState();
+      return;
+    }
+    const config = selected.config || {};
+    const hints = [];
+    if (config.mcp_servers && config.mcp_servers.length) {
+      hints.push(`MCP: ${config.mcp_servers.join(', ')}`);
+    }
+    if (config.local_tools && config.local_tools.length) {
+      hints.push(`Local tools: ${config.local_tools.join(', ')}`);
+    }
+    recipeDescriptionEl.textContent = [selected.description, ...hints].filter(Boolean).join(' · ');
+    updateActionState();
+  }
+
+  function renderPendingRecipe(recipe) {
+    if (!recipe) {
+      pendingRecipeEl.textContent = 'No recipe queued for the next message.';
+      pendingRecipeEl.className = 'pending-recipe empty-state';
+      updateActionState();
+      return;
+    }
+    const resolved = typeof recipe === 'string'
+      ? state.recipes.find((item) => item.name === recipe) || { name: recipe }
+      : recipe;
+    pendingRecipeEl.textContent = `Next message will use: ${resolved.title || resolved.name}`;
+    pendingRecipeEl.className = 'pending-recipe';
+    updateActionState();
+  }
+
+  async function refreshActiveMcpServers() {
+    if (!state.activeConversationId) {
+      renderMcpServers([]);
+      return;
+    }
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/mcp-statuses?include_counts=1`);
+    if (!response.ok) {
+      renderMcpServers([]);
+      return;
+    }
+    renderMcpServers(await response.json());
+  }
+
+  function renderMcpServers(servers) {
+    mcpServerListEl.innerHTML = '';
+    if (!state.activeConversationId) {
+      mcpServerSummaryEl.textContent = 'No conversation selected.';
+      mcpServerListEl.innerHTML = '<p class="empty-state">Select a conversation to manage MCP servers.</p>';
+      return;
+    }
+    if (!servers.length) {
+      mcpServerSummaryEl.textContent = 'No MCP servers configured.';
+      mcpServerListEl.innerHTML = '<p class="empty-state">This configuration does not define any MCP servers.</p>';
+      return;
+    }
+    const enabledCount = servers.filter((server) => server.enabled).length;
+    const hasOverride = servers.some((server) => server.override_active)
+      || Boolean(state.activeConversation && Array.isArray(state.activeConversation.enabled_mcp_servers));
+    const hasConnectionError = servers.some((server) => server.connection_error);
+    const readyCount = servers.filter((server) => server.connection_state === 'ready').length;
+    const baseSummary = hasOverride
+      ? `${enabledCount} of ${servers.length} MCP servers enabled for this conversation.`
+      : `${enabledCount} of ${servers.length} MCP servers enabled (default configuration).`;
+    if (hasConnectionError) {
+      const error = servers.find((server) => server.connection_error)?.connection_error || 'Unknown MCP connection error.';
+      mcpServerSummaryEl.textContent = `${baseSummary} Last connection attempt failed: ${error}`;
+    } else if (readyCount) {
+      mcpServerSummaryEl.textContent = `${baseSummary} ${readyCount} server connection${readyCount === 1 ? '' : 's'} ready.`;
+    } else {
+      mcpServerSummaryEl.textContent = `${baseSummary} MCP servers will connect on demand when a request starts.`;
+    }
+    servers.forEach((server) => {
+      const row = document.createElement('label');
+      row.className = 'mcp-server-toggle';
+      row.innerHTML = `
+        <input type="checkbox" value="${escapeAttribute(server.name)}" ${server.enabled ? 'checked' : ''} />
+        <span class="mcp-server-details">
+          <strong>${escapeHtml(server.name)}</strong>
+          <span>${escapeHtml(server.transport || 'configured')} · ${escapeHtml(server.auth_type || 'default auth')} · ${escapeHtml(server.connection_state || (server.enabled ? 'enabled' : 'disabled'))}${Number.isFinite(server.tool_count) ? ` · ${escapeHtml(String(server.tool_count))} tools` : ''}</span>
+          ${server.connection_error ? `<span class="status-error">${escapeHtml(server.connection_error)}</span>` : ''}
+        </span>
+      `;
+      row.querySelector('input').addEventListener('change', updateMcpServerSelection);
+      mcpServerListEl.appendChild(row);
+    });
+  }
+
+  async function updateMcpServerSelection() {
+    if (!state.activeConversationId) return;
+    const enabled = Array.from(
+      mcpServerListEl.querySelectorAll('input[type="checkbox"]:checked')
+    ).map((checkbox) => checkbox.value);
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/mcp-servers`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    const payload = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setRunStatus('error', payload.description || payload.error || 'Failed to update MCP servers.');
+      await refreshConversations();
+      return;
+    }
+    if (state.activeConversation) {
+      state.activeConversation.enabled_mcp_servers = payload.enabled;
+    }
+    await refreshActiveMcpServers();
+    setRunStatus('mcp', 'Updated MCP server selection for this conversation.');
+    await refreshConversations();
+  }
+
+  async function resetMcpServers() {
+    if (!state.activeConversationId) return;
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/mcp-servers`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      setRunStatus('error', 'Failed to reset MCP server selection.');
+      return;
+    }
+    if (state.activeConversation) {
+      state.activeConversation.enabled_mcp_servers = null;
+    }
+    await refreshActiveMcpServers();
+    setRunStatus('mcp', 'Restored the default MCP server set for this conversation.');
+    await refreshConversations();
+  }
+
+  async function compactConversation(conversationId = state.activeConversationId) {
+    if (!conversationId) return;
+    sendButtonEl.disabled = true;
+    setRunStatus('running', 'Creating context compaction checkpoint...');
+    renderRunEvents([]);
+    const response = await fetch(`/api/conversations/${conversationId}/compact`, {
+      method: 'POST',
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      updateActionState();
+      setRunStatus('error', payload.description || 'Compaction failed to start.');
+      return;
+    }
+    state.activeJobId = payload.job_id;
+    updateActionState();
+    pollJob();
+  }
+
+  async function refreshOAuthServers() {
+    const response = await fetch('/api/mcp/oauth-servers');
+    if (!response.ok) return;
+    state.oauthServers = await response.json();
+    renderOAuthServers();
+  }
+
+  function renderOAuthServers() {
+    oauthServersEl.innerHTML = '';
+    if (!state.oauthServers.length) {
+      oauthServersEl.innerHTML = '<p class="empty-state">No OAuth-backed MCP servers configured.</p>';
+      return;
+    }
+    state.oauthServers.forEach((server) => {
+      const block = document.createElement('div');
+      block.className = 'oauth-server';
+      block.innerHTML = `
+        <div>
+          <strong>${server.name}</strong>
+          <p>${server.authenticated ? 'Authenticated' : 'Sign-in required'}</p>
+        </div>
+      `;
+      const button = document.createElement('button');
+      button.textContent = server.authenticated ? 'Re-authenticate' : 'Sign in';
+      button.addEventListener('click', () => startOAuth(server.name));
+      block.appendChild(button);
+      oauthServersEl.appendChild(block);
+    });
+  }
+
+  async function refreshJobs() {
+    if (!state.activeConversationId) {
+      renderJobs([]);
+      return;
+    }
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/jobs`);
+    if (!response.ok) return;
+    const jobs = await response.json();
+    // Detect status changes vs last snapshot and show toasts.
+    jobs.forEach((job) => {
+      const alias = job.alias || '';
+      const newStatus = job.status || '';
+      if (alias in state.jobSnapshot) {
+        const oldStatus = state.jobSnapshot[alias];
+        if (oldStatus !== newStatus) {
+          showToast(`Job <strong>${escapeHtml(alias)}</strong>: ${escapeHtml(oldStatus || '(none)')} → ${escapeHtml(newStatus || '(none)')}`, 'job-change');
+        }
+      } else {
+        showToast(`Job <strong>${escapeHtml(alias)}</strong> added${newStatus ? ': ' + escapeHtml(newStatus) : ''}`, 'job-new');
+      }
+    });
+    // Update snapshot.
+    state.jobSnapshot = {};
+    jobs.forEach((job) => { state.jobSnapshot[job.alias || ''] = job.status || ''; });
+    renderJobs(jobs);
+  }
+
+  async function refreshSchedules() {
+    let response;
+    try {
+      response = await fetch('/api/schedules');
+    } catch (error) {
+      state.schedulesUnavailable = true;
+      renderScheduleFormState();
+      renderSchedules([]);
+      return;
+    }
+    if (!response.ok) {
+      state.schedulesUnavailable = true;
+      renderScheduleFormState();
+      renderSchedules([]);
+      return;
+    }
+    state.schedulesUnavailable = false;
+    const schedules = await response.json();
+    schedules.forEach((schedule) => {
+      const previous = state.scheduleSnapshot[schedule.id];
+      const newStatus = String(schedule.last_status || '');
+      if (previous && previous !== newStatus && newStatus && !['never', 'running'].includes(newStatus)) {
+        showToast(
+          `Schedule <strong>${escapeHtml(schedule.name || schedule.id)}</strong>: ${escapeHtml(newStatus)}`,
+          newStatus === 'failed' ? 'error' : 'schedule'
+        );
+      }
+    });
+    state.schedules = schedules;
+    state.scheduleSnapshot = {};
+    schedules.forEach((schedule) => {
+      state.scheduleSnapshot[schedule.id] = String(schedule.last_status || '');
+    });
+    renderSchedules(schedules);
+  }
+
+  function renderJobs(jobs) {
+    const runningStatuses = ['running', 'pending', 'submitted', 'in_progress'];
+    const runningJobs = jobs.filter((job) => runningStatuses.includes(String(job.status || '').toLowerCase()));
+    jobsPanelEl.classList.toggle('hidden', jobs.length === 0);
+    jobsListEl.innerHTML = '';
+    jobsBadgeEl.textContent = jobs.length;
+    if (jobs.length === 0) {
+      jobsBadgeEl.classList.add('hidden');
+      jobsRunningIndicatorEl.classList.add('hidden');
+      jobsRunningCountEl.textContent = '0 running';
+      return;
+    }
+    jobsBadgeEl.classList.remove('hidden');
+    jobsRunningIndicatorEl.classList.toggle('hidden', runningJobs.length === 0);
+    jobsRunningCountEl.textContent = `${runningJobs.length} running`;
+    const table = document.createElement('table');
+    table.className = 'jobs-table';
+    table.innerHTML = '<thead><tr><th>Alias</th><th>Status</th><th>Retrieval</th><th>Source</th><th>Transaction ID</th><th>Artifacts</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    jobs.forEach((job) => {
+      const tr = document.createElement('tr');
+      const status = job.status || '';
+      const statusLower = status.toLowerCase();
+      const isRunning = runningStatuses.includes(statusLower);
+      let badgeClass = 'job-badge-default';
+      if (['completed', 'done', 'success', 'finished'].includes(statusLower)) badgeClass = 'job-badge-success';
+      else if (['failed', 'error', 'cancelled', 'canceled'].includes(statusLower)) badgeClass = 'job-badge-error';
+      else if (['running', 'pending', 'submitted', 'in_progress'].includes(statusLower)) badgeClass = 'job-badge-running';
+      tr.classList.toggle('job-row-running', isRunning);
+      const txId = job.transaction_id || '';
+      const txShort = txId.length > 20 ? txId.slice(0, 18) + '…' : txId;
+      const retrievalState = job.retrieval_state || '—';
+      const artifacts = Array.isArray(job.result_artifacts) ? job.result_artifacts : [];
+      const artifactLabel = artifacts.length ? `${artifacts.length} saved` : '—';
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(job.alias || '')}</strong></td>
+        <td>
+          <span class="job-badge ${badgeClass}" title="${escapeHtml(status)}">
+            ${isRunning ? '<span class="job-badge-pulse" aria-hidden="true"></span>' : ''}
+            ${escapeHtml(status || '—')}
+          </span>
+        </td>
+        <td>${escapeHtml(retrievalState)}</td>
+        <td>${escapeHtml(job.source_tool || '—')}</td>
+        <td title="${escapeHtml(txId)}">${escapeHtml(txShort)}</td>
+        <td title="${escapeHtml(artifacts.map((item) => item.path || item.name || '').join(', '))}">${escapeHtml(artifactLabel)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    jobsListEl.appendChild(table);
+  }
+
+  function renderSchedules(schedules) {
+    schedulesListEl.innerHTML = '';
+    schedulesBadgeEl.textContent = schedules.length;
+    schedulesBadgeEl.classList.toggle('hidden', schedules.length === 0);
+    const running = schedules.filter((schedule) => String(schedule.last_status || '') === 'running');
+    schedulesRunningIndicatorEl.classList.toggle('hidden', running.length === 0);
+    schedulesRunningCountEl.textContent = `${running.length} running`;
+    if (state.schedulesUnavailable) {
+      schedulesListEl.innerHTML = '<p class="empty-state">Schedules are not available in the Rust web API yet.</p>';
+      return;
+    }
+    if (!schedules.length) {
+      schedulesListEl.innerHTML = '<p class="empty-state">No schedules configured.</p>';
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'jobs-table';
+    table.innerHTML = '<thead><tr><th>Name</th><th>Type</th><th>Cadence</th><th>Next run</th><th>Status</th><th>Actions</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    schedules.forEach((schedule) => {
+      const tr = document.createElement('tr');
+      const status = String(schedule.last_status || 'never');
+      const lower = status.toLowerCase();
+      let badgeClass = 'job-badge-default';
+      if (['completed', 'done', 'success', 'finished'].includes(lower)) badgeClass = 'job-badge-success';
+      else if (['failed', 'error'].includes(lower)) badgeClass = 'job-badge-error';
+      else if (lower === 'running') badgeClass = 'job-badge-running';
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(schedule.name || schedule.id)}</strong><div class="schedule-subline">${escapeHtml(schedule.conversation_id || '')}</div></td>
+        <td>${escapeHtml(schedule.run_type || '')}</td>
+        <td>${escapeHtml(formatCadence(schedule.cadence || {}))}</td>
+        <td>${escapeHtml(formatRelativeTime(schedule.next_run_at))}</td>
+        <td><span class="job-badge ${badgeClass}">${escapeHtml(status)}</span>${schedule.last_error ? `<div class="schedule-error">${escapeHtml(schedule.last_error)}</div>` : ''}</td>
+        <td class="schedule-actions-cell">
+          <button type="button" data-action="open" data-id="${escapeAttribute(schedule.conversation_id || '')}">Open</button>
+          <button type="button" data-action="run" data-id="${escapeAttribute(schedule.id)}">Run</button>
+          <button type="button" data-action="${schedule.enabled ? 'pause' : 'resume'}" data-id="${escapeAttribute(schedule.id)}">${schedule.enabled ? 'Pause' : 'Resume'}</button>
+          <button type="button" data-action="delete" data-id="${escapeAttribute(schedule.id)}">Delete</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    schedulesListEl.appendChild(table);
+    schedulesListEl.querySelectorAll('button[data-action]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const action = button.dataset.action;
+        const id = button.dataset.id;
+        if (action === 'open') {
+          if (id) await selectConversation(id);
+          return;
+        }
+        if (!id) return;
+        if (action === 'run') await runSchedule(id);
+        if (action === 'pause') await updateScheduleState(id, 'pause');
+        if (action === 'resume') await updateScheduleState(id, 'resume');
+        if (action === 'delete') {
+          if (!confirm('Delete this schedule?')) return;
+          await deleteSchedule(id);
+        }
+      });
+    });
+  }
+
+  async function createSchedule() {
+    if (state.schedulesUnavailable) {
+      setRunStatus('error', 'Scheduled runs are not available in this Rust web API yet.');
+      return;
+    }
+    const payload = {
+      name: scheduleNameEl.value.trim(),
+      title: scheduleNameEl.value.trim(),
+      run_type: scheduleRunTypeEl.value,
+      cadence_kind: scheduleCadenceKindEl.value,
+      cadence_value: scheduleCadenceValueEl.value.trim(),
+    };
+    if (!payload.name || !payload.cadence_value) {
+      setRunStatus('error', 'Schedule name and cadence are required.');
+      return;
+    }
+    if (payload.run_type === 'recipe') {
+      payload.recipe_name = scheduleRecipeSelectEl.value;
+      if (!payload.recipe_name) {
+        setRunStatus('error', 'Select a recipe for the schedule.');
+        return;
+      }
+    } else {
+      payload.prompt = schedulePromptEl.value.trim();
+      if (!payload.prompt) {
+        setRunStatus('error', 'Prompt is required for prompt schedules.');
+        return;
+      }
+    }
+    const response = await fetch('/api/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setRunStatus('error', body.description || body.error || 'Failed to create schedule.');
+      return;
+    }
+    scheduleNameEl.value = '';
+    scheduleCadenceValueEl.value = '';
+    schedulePromptEl.value = '';
+    setRunStatus('schedule', `Created schedule '${body.name || body.id}'.`);
+    await refreshConversations();
+    await refreshSchedules();
+  }
+
+  async function updateScheduleState(scheduleId, action) {
+    const response = await fetch(`/api/schedules/${scheduleId}/${action}`, { method: 'POST' });
+    const body = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setRunStatus('error', body.description || body.error || `Failed to ${action} schedule.`);
+      return;
+    }
+    setRunStatus('schedule', `${action === 'pause' ? 'Paused' : 'Resumed'} schedule '${body.name || body.id}'.`);
+    await refreshSchedules();
+  }
+
+  async function runSchedule(scheduleId) {
+    const response = await fetch(`/api/schedules/${scheduleId}/run`, { method: 'POST' });
+    const body = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setRunStatus('error', body.description || body.error || 'Failed to run schedule.');
+      return;
+    }
+    setRunStatus('schedule', `Schedule '${body.schedule.name || body.schedule.id}' ${body.status}.`);
+    await refreshConversations();
+    await refreshSchedules();
+    if (body.schedule.conversation_id === state.activeConversationId) {
+      await selectConversation(state.activeConversationId, { scroll: true });
+    }
+  }
+
+  async function deleteSchedule(scheduleId) {
+    const response = await fetch(`/api/schedules/${scheduleId}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const body = await readResponseJson(response) || {};
+      setRunStatus('error', body.description || body.error || 'Failed to delete schedule.');
+      return;
+    }
+    setRunStatus('schedule', `Deleted schedule '${scheduleId}'.`);
+    await refreshSchedules();
+  }
+
+  function showToast(htmlMessage, type) {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.innerHTML = `<span>${htmlMessage}</span><button class="toast-close" aria-label="Dismiss">×</button>`;
+    toast.querySelector('.toast-close').addEventListener('click', () => toast.remove());
+    toastContainerEl.appendChild(toast);
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 8000);
+  }
+
+  async function startOAuth(serverName) {
+    setRunStatus('oauth', `Preparing sign-in for ${serverName}...`);
+    const response = await fetch(`/api/mcp/oauth-servers/${encodeURIComponent(serverName)}/start`, {
+      method: 'POST',
+    });
+    const payload = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setRunStatus('error', payload.description || payload.error || 'Failed to start sign-in.');
+      return;
+    }
+    if (payload.authorization_url) {
+      setRunStatus('oauth', `Opened sign-in for ${serverName}. Complete it in the new window and then refresh if needed.`);
+      window.open(payload.authorization_url, '_blank', 'noopener,noreferrer');
+    } else {
+      setRunStatus('oauth', `OAuth completed for ${payload.server || serverName}.`);
+    }
+  }
+
+  function setRunStatus(kind, message) {
+    state.runStatus.kind = kind;
+    state.runStatus.message = message;
+    renderConversationStatus();
+  }
+
+  function setConversationActionsMenuOpen(isOpen) {
+    conversationActionsMenuEl.classList.toggle('hidden', !isOpen);
+    conversationActionsToggleEl.setAttribute('aria-expanded', String(isOpen));
+  }
+
+  function renderRunEvents(events) {
+    state.runStatus.events = Array.isArray(events) ? events : [];
+    renderConversationStatus();
+  }
+
+  function phaseStateFromRunStatus(kind, events) {
+    const phases = ['thinking', 'tool', 'skill', 'done'];
+    const seen = new Set();
+    let active = kind === 'completed' || kind === 'done' || kind === 'failed' || kind === 'error' ? 'done' : 'thinking';
+    (events || []).forEach((event) => {
+      if (!event || typeof event !== 'object') return;
+      if (event.type === 'turn_started' || event.type === 'llm_start') {
+        seen.add('thinking');
+        active = 'thinking';
+      } else if (event.type === 'tool_start' || event.type === 'tool_end') {
+        seen.add('tool');
+        active = 'tool';
+      } else if (event.type === 'skill_start' || event.type === 'skill_end') {
+        seen.add('skill');
+        active = 'skill';
+      } else if (event.type === 'turn_finished') {
+        seen.add('done');
+        active = 'done';
+      }
+    });
+    if (kind === 'running' && !seen.size) {
+      seen.add('thinking');
+    }
+    if (kind === 'completed' || kind === 'done' || kind === 'failed' || kind === 'error') {
+      seen.add('done');
+      active = 'done';
+    }
+    return phases.map((phase) => {
+      let status = 'pending';
+      if (phase === active) {
+        status = 'active';
+      } else if (seen.has(phase)) {
+        status = 'complete';
+      }
+      return { phase, status };
+    });
+  }
+
+  function phaseMessage(kind, events, fallbackMessage) {
+    const last = events && events.length ? events[events.length - 1] : null;
+    if (last && last.message) {
+      return last.message;
+    }
+    if (kind === 'completed' || kind === 'done') return 'Response ready.';
+    if (kind === 'failed' || kind === 'error') return fallbackMessage || 'Request failed.';
+    if (kind === 'running') return fallbackMessage || 'Processing request...';
+    return fallbackMessage || '';
+  }
+
+  function renderConversationStatus() {
+    const existing = streamEl.querySelector('.inline-run-status');
+    if (existing) {
+      existing.remove();
+    }
+    const kind = state.runStatus.kind || 'idle';
+    const events = Array.isArray(state.runStatus.events) ? state.runStatus.events : [];
+    const message = phaseMessage(kind, events, state.runStatus.message || '');
+    const shouldRender = kind !== 'idle' || events.length > 0;
+    if (!shouldRender) {
+      return;
+    }
+    const phaseIcons = {
+      thinking: { emoji: '🧠', label: 'Thinking' },
+      tool: { emoji: '🛠️', label: 'Tool' },
+      skill: { emoji: '📚', label: 'Skill' },
+      done: { emoji: '✅', label: 'Done' },
+    };
+    const phaseBar = phaseStateFromRunStatus(kind, events)
+      .map(({ phase, status }) => `
+        <span class="phase-step is-${status}" title="${escapeAttribute(phaseIcons[phase].label)}">
+          <span aria-hidden="true">${phaseIcons[phase].emoji}</span>
+        </span>
+      `)
+      .join('');
+    const block = document.createElement('article');
+    const tone = kind === 'failed' || kind === 'error'
+      ? 'is-error'
+      : kind === 'completed' || kind === 'done'
+        ? 'is-success'
+        : 'is-running';
+    block.className = `inline-run-status ${tone}`;
+    block.innerHTML = `
+      <div class="phase-bar" aria-label="Request progress">${phaseBar}</div>
+      <p class="phase-text">${escapeHtml(message)}</p>
     `;
-    item.querySelector('button').onclick = async () => startOAuth(server.name);
-    list.appendChild(item);
+    streamEl.appendChild(block);
   }
-}
 
-async function startOAuth(serverName) {
-  const popup = window.open('', `oauth-${serverName}`, 'width=760,height=820,resizable=yes,scrollbars=yes');
-  if (popup) {
-    popup.document.write(`<title>OAuth</title><body style="background:#05070c;color:#d7fff7;font-family:IBM Plex Mono,monospace;padding:24px">Authorizing ${escHtml(serverName)}...</body>`);
+  function renderMessages(messages) {
+    streamEl.innerHTML = '';
+    const template = document.getElementById('message-template');
+    messages.forEach((message) => {
+      const node = template.content.cloneNode(true);
+      node.querySelector('.role').textContent = formatMessageRole(message);
+      node.querySelector('.message-badges').innerHTML = renderAssistantBadges(message);
+      node.querySelector('.timestamp').textContent = new Date(message.timestamp).toLocaleString();
+      const contentEl = node.querySelector('.content');
+      if (message.role === 'assistant') {
+        const display = getAssistantDisplay(message);
+        contentEl.className = 'content markdown-body';
+        contentEl.innerHTML = renderMarkdown(display.body || '');
+        enhanceScrollableTables(contentEl);
+        const foldedSectionsHtml = renderAssistantSections(message);
+        if (foldedSectionsHtml) {
+          const sectionsEl = document.createElement('div');
+          sectionsEl.className = 'message-folded-sections';
+          sectionsEl.innerHTML = foldedSectionsHtml;
+          node.querySelector('.message').appendChild(sectionsEl);
+          enhanceScrollableTables(sectionsEl);
+        }
+      } else {
+        contentEl.className = 'content';
+        contentEl.innerHTML = renderUserText(message.content);
+      }
+      node.querySelector('.message').classList.add(message.role === 'user' ? 'user' : 'assistant');
+      streamEl.appendChild(node);
+    });
+    renderConversationStatus();
+    scrollConversationToBottom();
   }
-  try {
-    document.getElementById('oauth-status-chip').textContent = 'authorizing';
-    const result = await api('POST', `/mcp/oauth-servers/${encodeURIComponent(serverName)}/start`);
-    document.getElementById('oauth-status-chip').textContent = 'authorized';
-    setStatus(`OAuth completed for ${result.server}`);
-    if (popup && !popup.closed) {
-      popup.location.href = `/oauth/callback/${encodeURIComponent(serverName)}`;
-    }
-  } catch (e) {
-    document.getElementById('oauth-status-chip').textContent = 'error';
-    if (popup && !popup.closed) {
-      popup.document.body.innerHTML = `<div style="padding:24px;color:#ff6b8b">OAuth failed: ${escHtml(e.message)}</div>`;
-    }
-    setStatus('Error starting OAuth: ' + e.message);
-  }
-}
 
-function parseInlineMarkdown(text) {
-  const codes = [];
-  let html = escHtml(text).replace(/`([^`]+)`/g, (_, code) => {
-    const token = `@@CODE${codes.length}@@`;
-    codes.push(`<code>${code}</code>`);
-    return token;
+  function renderHistory(messages) {
+    historyContent.innerHTML = '';
+    if (!messages.length) {
+      historyContent.innerHTML = '<p>No history yet.</p>';
+      return;
+    }
+    messages.forEach((message) => {
+      const block = document.createElement('div');
+      block.className = `history-entry ${message.role === 'assistant' ? 'assistant' : 'user'}`;
+      const isAssistant = message.role === 'assistant';
+      const display = getAssistantDisplay(message);
+      const contentHtml = isAssistant
+        ? `<div class="markdown-body">${renderMarkdown(display.body || '')}</div>${renderAssistantSections(message)}`
+        : renderUserText(message.content);
+      block.innerHTML = `
+        <div class="history-entry-header">
+          <div class="message-heading">
+            <strong class="history-entry-role">${escapeHtml(formatMessageRole(message))}</strong>
+            <div class="message-badges">${renderAssistantBadges(message)}</div>
+          </div>
+          <span>${new Date(message.timestamp).toLocaleString()}</span>
+        </div>
+        ${contentHtml}
+      `;
+      if (isAssistant) {
+        enhanceScrollableTables(block);
+      }
+      historyContent.appendChild(block);
+    });
+  }
+
+  function scrollConversationToBottom() {
+    window.requestAnimationFrame(() => {
+      streamEl.scrollTop = streamEl.scrollHeight;
+      const composer = document.querySelector('.composer');
+      if (composer) {
+        composer.scrollIntoView({ block: 'end' });
+      }
+    });
+  }
+
+  async function sendMessage() {
+    if (!state.activeConversationId) return;
+    const content = messageInputEl.value.trim();
+    if (!content) return;
+    sendButtonEl.disabled = true;
+    sendButtonEl.textContent = 'Sending…';
+    setRunStatus('running', 'Submitting message...');
+    renderRunEvents([]);
+    // Snapshot current job statuses so we can detect changes when the turn finishes.
+    state.jobSnapshot = {};
+    document.querySelectorAll('#jobs-list tbody tr').forEach((tr) => {
+      const alias = tr.cells[0]?.textContent?.trim() || '';
+      const status = tr.cells[1]?.querySelector('.job-badge')?.title || '';
+      if (alias) state.jobSnapshot[alias] = status;
+    });
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      updateActionState();
+      setRunStatus('error', payload.description || 'Message submission failed.');
+      return;
+    }
+    messageInputEl.value = '';
+    state.activeJobId = payload.job_id;
+    updateActionState();
+    scrollConversationToBottom();
+    pollJob();
+  }
+
+  async function applyRecipe() {
+    if (!state.activeConversationId || !recipeSelectEl.value) return;
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/recipe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: recipeSelectEl.value }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      setRunStatus('error', payload.description || 'Recipe selection failed.');
+      return;
+    }
+    const selected = state.recipes.find((recipe) => recipe.name === recipeSelectEl.value) || { name: recipeSelectEl.value };
+    state.activeConversation = payload;
+    renderPendingRecipe(selected);
+    if (selected.initial_prompt) {
+      messageInputEl.value = selected.initial_prompt;
+      messageInputEl.focus();
+      messageInputEl.setSelectionRange(messageInputEl.value.length, messageInputEl.value.length);
+      scrollConversationToBottom();
+    }
+    setRunStatus('recipe', `Recipe '${selected.title || selected.name}' will be applied to the next message.`);
+    updateActionState();
+  }
+
+  async function clearRecipe() {
+    if (!state.activeConversationId) return;
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/recipe`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) return;
+    if (state.activeConversation) {
+      state.activeConversation.pending_recipe = null;
+    }
+    renderPendingRecipe(null);
+    updateActionState();
+  }
+
+  async function pollJob() {
+    if (!state.activeJobId) return;
+    state.jobPollTimer = null;
+    const response = await fetch(`/api/jobs/${state.activeJobId}`);
+    if (!response.ok) return;
+    const payload = await response.json();
+    renderRunEvents(payload.events || []);
+    if (payload.events && payload.events.length) {
+      const last = payload.events[payload.events.length - 1];
+      setRunStatus(payload.status, last.message || payload.status);
+    } else {
+      setRunStatus(payload.status, `Job ${payload.status}...`);
+    }
+    if (payload.status === 'completed' || payload.status === 'done') {
+      if (payload.record) {
+        state.activeConversation = payload.record;
+        renderMessages(payload.record.messages);
+        renderHistory(payload.record.messages);
+        renderPendingRecipe(payload.record.pending_recipe);
+        renderMcpServers(payload.record.mcp_servers || []);
+        document.getElementById('active-updated').textContent = new Date(payload.record.updated_at).toLocaleString();
+        syncConversationRunState(payload.record.active_run || null);
+      }
+      const conversationId = state.activeConversationId;
+      state.activeJobId = null;
+      updateActionState();
+      if (conversationId && !payload.record) {
+        await selectConversation(conversationId, { scroll: true });
+      } else {
+        await refreshConversations();
+      }
+      await refreshOAuthServers();
+      await refreshJobs();
+      await refreshSchedules();
+      return;
+    }
+    if (payload.status === 'failed') {
+      if (payload.record) {
+        state.activeConversation = payload.record;
+        renderMessages(payload.record.messages);
+        renderHistory(payload.record.messages);
+        renderPendingRecipe(payload.record.pending_recipe);
+        renderMcpServers(payload.record.mcp_servers || []);
+        document.getElementById('active-updated').textContent = new Date(payload.record.updated_at).toLocaleString();
+      }
+      setRunStatus('error', payload.error || 'Request failed.');
+      state.activeJobId = null;
+      syncConversationRunState({
+        job_id: payload.job_id,
+        operation: payload.operation,
+        status: 'failed',
+      });
+      updateActionState();
+      return;
+    }
+    state.jobPollTimer = setTimeout(pollJob, 500);
+  }
+
+  function updateActionState() {
+    const hasConversation = Boolean(state.activeConversationId);
+    const jobRunning = Boolean(state.activeJobId);
+    const hasRecipeSelection = Boolean(recipeSelectEl.value);
+    const hasPendingRecipe = Boolean(state.activeConversation && state.activeConversation.pending_recipe);
+    const canSend = hasConversation && !jobRunning && messageInputEl.value.trim().length > 0;
+
+    deleteButtonEl.disabled = !hasConversation || jobRunning;
+    historyButtonEl.disabled = !hasConversation;
+    compactConversationButtonEl.disabled = !hasConversation || jobRunning;
+    applyRecipeButtonEl.disabled = !hasConversation || !hasRecipeSelection || jobRunning;
+    clearRecipeButtonEl.disabled = !hasConversation || !hasPendingRecipe || jobRunning;
+    resetMcpButtonEl.disabled = !hasConversation || jobRunning;
+    sendButtonEl.disabled = !canSend;
+    sendButtonEl.textContent = jobRunning ? 'Working…' : 'Send';
+    conversationActionsToggleEl.disabled = !hasConversation;
+    if (!hasConversation) {
+      setConversationActionsMenuOpen(false);
+    }
+
+    messageInputEl.disabled = !hasConversation || jobRunning;
+    if (!hasConversation) {
+      messageInputEl.placeholder = 'Select or start a conversation to begin.';
+      composerHintEl.textContent = 'Select a conversation, then type a request. Use Ctrl/Cmd+Enter to send.';
+    } else if (jobRunning) {
+      messageInputEl.placeholder = 'Wait for the current request to finish.';
+      composerHintEl.textContent = 'A request is in progress. Review the status panel while you wait.';
+    } else {
+      messageInputEl.placeholder = 'Type instructions for the agent...';
+      composerHintEl.textContent = 'Press Ctrl/Cmd+Enter to send. Full transcript history remains available in Show History.';
+    }
+  }
+
+  function escapeHtml(text) {
+    return String(text ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function escapeAttribute(text) {
+    return escapeHtml(text).replace(/'/g, '&#39;');
+  }
+
+  refreshConversations();
+  refreshConfig();
+  refreshOAuthServers();
+  refreshRecipes();
+  refreshSchedules();
+  initializeSidebarPanels();
+  renderScheduleFormState();
+  updateActionState();
+  window.setInterval(async () => {
+    await refreshConversations();
+    await refreshSchedules();
+  }, 5000);
+  window.addEventListener('resize', () => {
+    document.querySelectorAll('.table-scroll').forEach(updateTableScrollCue);
+    scrollConversationToBottom();
   });
-  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  html = html.replace(/@@CODE(\d+)@@/g, (_, index) => codes[Number(index)] || '');
-  return html;
-}
-
-function renderTable(lines) {
-  const headers = lines[0].split('|').map(part => part.trim()).filter(Boolean);
-  const rows = lines.slice(2).map(line => line.split('|').map(part => part.trim()).filter((_, index, array) => index < headers.length && array.length >= headers.length));
-  const headHtml = headers.map(cell => `<th>${parseInlineMarkdown(cell)}</th>`).join('');
-  const bodyHtml = rows.map(row => `<tr>${row.map(cell => `<td>${parseInlineMarkdown(cell)}</td>`).join('')}</tr>`).join('');
-  return `<div class="table-scroll"><table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
-}
-
-function renderMarkdown(source) {
-  const normalized = String(source || '').replace(/\r\n/g, '\n');
-  const fenceParts = [];
-  const withFences = normalized.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    const token = `@@FENCE${fenceParts.length}@@`;
-    fenceParts.push(`<pre><code class="language-${escHtml(lang || 'plain')}">${escHtml(code.trimEnd())}</code></pre>`);
-    return token;
-  });
-
-  const lines = withFences.split('\n');
-  const blocks = [];
-
-  function flushParagraph(buffer) {
-    if (!buffer.length) return;
-    blocks.push(`<p>${parseInlineMarkdown(buffer.join(' '))}</p>`);
-    buffer.length = 0;
-  }
-
-  let paragraph = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    if (!trimmed) {
-      flushParagraph(paragraph);
-      continue;
-    }
-
-    if (/^@@FENCE\d+@@$/.test(trimmed)) {
-      flushParagraph(paragraph);
-      blocks.push(trimmed);
-      continue;
-    }
-
-    if (/^\|.+\|$/.test(trimmed) && i + 1 < lines.length && /^\|?[\s:-]+\|[\s|:-]*$/.test(lines[i + 1].trim())) {
-      flushParagraph(paragraph);
-      const tableLines = [trimmed, lines[i + 1].trim()];
-      i += 2;
-      while (i < lines.length && /^\|.+\|$/.test(lines[i].trim())) {
-        tableLines.push(lines[i].trim());
-        i += 1;
-      }
-      i -= 1;
-      blocks.push(renderTable(tableLines));
-      continue;
-    }
-
-    const heading = trimmed.match(/^(#{1,4})\s+(.*)$/);
-    if (heading) {
-      flushParagraph(paragraph);
-      const level = heading[1].length;
-      blocks.push(`<h${level}>${parseInlineMarkdown(heading[2])}</h${level}>`);
-      continue;
-    }
-
-    if (/^>\s+/.test(trimmed)) {
-      flushParagraph(paragraph);
-      blocks.push(`<blockquote>${parseInlineMarkdown(trimmed.replace(/^>\s+/, ''))}</blockquote>`);
-      continue;
-    }
-
-    if (/^[-*]\s+/.test(trimmed)) {
-      flushParagraph(paragraph);
-      const items = [trimmed.replace(/^[-*]\s+/, '')];
-      while (i + 1 < lines.length && /^[-*]\s+/.test(lines[i + 1].trim())) {
-        items.push(lines[i + 1].trim().replace(/^[-*]\s+/, ''));
-        i += 1;
-      }
-      blocks.push(`<ul>${items.map(item => `<li>${parseInlineMarkdown(item)}</li>`).join('')}</ul>`);
-      continue;
-    }
-
-    if (/^\d+\.\s+/.test(trimmed)) {
-      flushParagraph(paragraph);
-      const items = [trimmed.replace(/^\d+\.\s+/, '')];
-      while (i + 1 < lines.length && /^\d+\.\s+/.test(lines[i + 1].trim())) {
-        items.push(lines[i + 1].trim().replace(/^\d+\.\s+/, ''));
-        i += 1;
-      }
-      blocks.push(`<ol>${items.map(item => `<li>${parseInlineMarkdown(item)}</li>`).join('')}</ol>`);
-      continue;
-    }
-
-    paragraph.push(trimmed);
-  }
-  flushParagraph(paragraph);
-
-  return blocks.join('')
-    .replace(/@@FENCE(\d+)@@/g, (_, index) => fenceParts[Number(index)] || '');
-}
-
-updateConversationContext();
-updateComposerState();
-renderRequestStatus();
-renderJobs([]);
-renderRecipes([]);
-renderMcpStatuses([]);
-renderHistory();
-Promise.all([loadConversations(), loadRecipes()]).then(() => setStatus('Ready'));
-</script>
+  </script>
 </body>
 </html>

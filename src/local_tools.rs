@@ -16,7 +16,7 @@ use crate::{
     conversation_store::ConversationStore,
     llm::LlmTool,
     skills::{SkillRegistry, SkillTool},
-    types::{AgentPermissions, FilesystemAccess, RememberedJob},
+    types::{AgentPermissions, FilesystemAccess, InvestigationMemory, RememberedJob},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,20 +147,11 @@ impl LocalToolExecutor {
     }
 
     pub fn is_local_tool(&self, name: &str) -> bool {
-        let advertised = matches!(
-            name,
-            "local__sleep"
-                | "local__remember_job"
-                | "local__update_job"
-                | "local__get_job"
-                | "local__list_jobs"
-                | "local__forget_job"
-                | "local__time"
-                | "local__configure_mcp_servers"
-                | "local__exec_cli"
-                | "local__run_skill"
-        );
-        advertised && self.is_tool_enabled(name)
+        is_advertised_local_tool_name(name) && self.is_tool_enabled(name)
+    }
+
+    pub fn is_known_local_tool(&self, name: &str) -> bool {
+        is_advertised_local_tool_name(name)
     }
 
     pub async fn execute(&self, name: &str, arguments: Value) -> Result<String> {
@@ -171,6 +162,14 @@ impl LocalToolExecutor {
             "local__get_job" => self.exec_get_job(arguments),
             "local__list_jobs" => self.exec_list_jobs(),
             "local__forget_job" => self.exec_forget_job(arguments),
+            "local__get_investigation_memory" => self.exec_get_investigation_memory(),
+            "local__update_investigation_memory" => {
+                self.exec_update_investigation_memory(arguments)
+            }
+            "local__clear_investigation_memory" => self.exec_clear_investigation_memory(),
+            "local__search_conversation_memories" => {
+                self.exec_search_conversation_memories(arguments)
+            }
             "local__time" => self.exec_time(arguments),
             "local__configure_mcp_servers" => self.exec_configure_mcp_servers(arguments),
             "local__exec_cli" => self.exec_cli(arguments).await,
@@ -391,6 +390,117 @@ impl LocalToolExecutor {
         Ok(format!("Job '{alias}' removed."))
     }
 
+    fn exec_get_investigation_memory(&self) -> Result<String> {
+        self.require_filesystem_read("local__get_investigation_memory")?;
+        let memory = self
+            .store
+            .load_investigation_memory(&self.conversation_id)?;
+        Ok(serde_json::to_string_pretty(&memory)?)
+    }
+
+    fn exec_update_investigation_memory(&self, arguments: Value) -> Result<String> {
+        self.require_filesystem_write("local__update_investigation_memory")?;
+        let mode = arguments
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("merge");
+        let replace = match mode {
+            "merge" => false,
+            "replace" => true,
+            other => bail!("update_investigation_memory: unsupported mode '{other}'"),
+        };
+
+        let mut memory = if replace {
+            InvestigationMemory::default()
+        } else {
+            self.store
+                .load_investigation_memory(&self.conversation_id)?
+        };
+        let mut changed = false;
+
+        if let Some(summary) = memory_patch_value(&arguments, "summary") {
+            let summary = summary
+                .as_str()
+                .ok_or_else(|| anyhow!("update_investigation_memory: summary must be a string"))?;
+            memory.summary = summary.trim().to_string();
+            changed = true;
+        }
+
+        changed |= update_memory_array(
+            &mut memory.entities,
+            memory_patch_value(&arguments, "entities"),
+            replace,
+            "entities",
+        )?;
+        changed |= update_memory_array(
+            &mut memory.timeline,
+            memory_patch_value(&arguments, "timeline"),
+            replace,
+            "timeline",
+        )?;
+        changed |= update_memory_array(
+            &mut memory.decisions,
+            memory_patch_value(&arguments, "decisions"),
+            replace,
+            "decisions",
+        )?;
+        changed |= update_memory_array(
+            &mut memory.hypotheses,
+            memory_patch_value(&arguments, "hypotheses"),
+            replace,
+            "hypotheses",
+        )?;
+        changed |= update_memory_array(
+            &mut memory.trusted_sources,
+            memory_patch_value(&arguments, "trusted_sources"),
+            replace,
+            "trusted_sources",
+        )?;
+        changed |= update_memory_array(
+            &mut memory.unresolved_questions,
+            memory_patch_value(&arguments, "unresolved_questions"),
+            replace,
+            "unresolved_questions",
+        )?;
+
+        if !changed {
+            bail!(
+                "update_investigation_memory: provide summary, entities, timeline, decisions, hypotheses, trusted_sources, unresolved_questions, or a memory object. Use local__clear_investigation_memory to clear memory intentionally."
+            );
+        }
+
+        memory.updated_at = Some(Utc::now());
+        memory.updated_by = Some("local__update_investigation_memory".to_string());
+        self.store
+            .save_investigation_memory(&self.conversation_id, &memory)?;
+        Ok(serde_json::to_string_pretty(&json!({
+            "status": "updated",
+            "conversation_id": self.conversation_id,
+            "memory": memory
+        }))?)
+    }
+
+    fn exec_clear_investigation_memory(&self) -> Result<String> {
+        self.require_filesystem_write("local__clear_investigation_memory")?;
+        let removed = self
+            .store
+            .clear_investigation_memory(&self.conversation_id)?;
+        Ok(serde_json::to_string_pretty(&json!({
+            "status": if removed { "cleared" } else { "already_empty" },
+            "conversation_id": self.conversation_id
+        }))?)
+    }
+
+    fn exec_search_conversation_memories(&self, arguments: Value) -> Result<String> {
+        self.require_filesystem_read("local__search_conversation_memories")?;
+        let query = arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("search_conversation_memories: missing 'query'"))?;
+        let results = self.store.search_investigation_memories(query)?;
+        Ok(serde_json::to_string_pretty(&results)?)
+    }
+
     fn exec_time(&self, arguments: Value) -> Result<String> {
         let now_utc = Utc::now();
         let now_local = Local::now();
@@ -587,17 +697,43 @@ impl LocalToolExecutor {
             .get("parameters")
             .and_then(Value::as_str)
             .unwrap_or("{}");
-        let params: Value = serde_json::from_str(parameters_str).unwrap_or_else(|_| json!({}));
+        let (params, parameters_warning) = match serde_json::from_str(parameters_str) {
+            Ok(params) => (params, None),
+            Err(err) => {
+                let warning = format!(
+                    "run_skill: parameters was not valid JSON; using an empty object. error={err}"
+                );
+                tracing::warn!(
+                    conversation_id = %self.conversation_id,
+                    skill_name,
+                    tool_slug = ?tool_slug,
+                    error = %err,
+                    "local__run_skill parameters parse failed; using empty object"
+                );
+                if let Err(log_err) = self.store.append_log(&self.conversation_id, &warning) {
+                    tracing::warn!(
+                        conversation_id = %self.conversation_id,
+                        error = %log_err,
+                        "failed to append local__run_skill parameters warning to conversation log"
+                    );
+                }
+                (json!({}), Some(warning))
+            }
+        };
         let timeout_seconds = arguments
             .get("timeout_seconds")
             .and_then(Value::as_u64)
-            .unwrap_or(self.execution_timeout.as_secs());
+            .unwrap_or(self.execution_timeout.as_secs())
+            .min(self.execution_timeout.as_secs());
 
         let (skill, tools) = registry
             .find_tools(skill_name, tool_slug)
             .ok_or_else(|| anyhow!("skill '{skill_name}' / tool '{tool_slug:?}' not found"))?;
 
         let mut outputs = Vec::new();
+        if let Some(warning) = parameters_warning {
+            outputs.push(format!("[warning]\n{warning}"));
+        }
         for tool in tools {
             self.require_skill_permissions(&skill.name, tool)?;
             if tool.server.is_some() && tool.script.is_none() {
@@ -860,6 +996,72 @@ fn parse_optional_datetime(value: Option<&Value>) -> Result<Option<chrono::DateT
     Ok(Some(parsed.with_timezone(&chrono::Utc)))
 }
 
+fn memory_patch_value<'a>(arguments: &'a Value, field: &str) -> Option<&'a Value> {
+    arguments
+        .get(field)
+        .or_else(|| arguments.get("memory").and_then(|memory| memory.get(field)))
+}
+
+fn update_memory_array(
+    target: &mut Vec<Value>,
+    value: Option<&Value>,
+    replace: bool,
+    field: &str,
+) -> Result<bool> {
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    let items = memory_array_items(value, field)?;
+    if replace {
+        *target = dedupe_memory_items(items);
+    } else {
+        for item in items {
+            if !target.contains(&item) {
+                target.push(item);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn dedupe_memory_items(items: Vec<Value>) -> Vec<Value> {
+    let mut unique = Vec::new();
+    for item in items {
+        if !unique.contains(&item) {
+            unique.push(item);
+        }
+    }
+    unique
+}
+
+fn memory_array_items(value: &Value, field: &str) -> Result<Vec<Value>> {
+    match value {
+        Value::Array(items) => Ok(items.clone()),
+        Value::Null => Ok(Vec::new()),
+        other => bail!("update_investigation_memory: {field} must be an array, got {other}"),
+    }
+}
+
+fn is_advertised_local_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "local__sleep"
+            | "local__remember_job"
+            | "local__update_job"
+            | "local__get_job"
+            | "local__list_jobs"
+            | "local__forget_job"
+            | "local__get_investigation_memory"
+            | "local__update_investigation_memory"
+            | "local__clear_investigation_memory"
+            | "local__search_conversation_memories"
+            | "local__time"
+            | "local__configure_mcp_servers"
+            | "local__exec_cli"
+            | "local__run_skill"
+    )
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct SkillEnvelope {
     status: String,
@@ -1033,6 +1235,27 @@ mod tests {
         assert!(err.to_string().contains("filesystem write access"));
     }
 
+    #[test]
+    fn known_local_tool_can_be_disabled_by_filter() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            AgentPermissions::default(),
+            Some(vec!["local__time".to_string()]),
+            Duration::from_secs(5),
+            Vec::new(),
+        );
+
+        assert!(executor.is_known_local_tool("local__run_skill"));
+        assert!(!executor.is_local_tool("local__run_skill"));
+        assert!(executor.is_local_tool("local__time"));
+        assert!(!executor.is_known_local_tool("mcp__demo_tool"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn networked_skill_requires_network_permission() {
         let dir = tempdir().unwrap();
@@ -1162,6 +1385,69 @@ Tools:
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn run_skill_warns_and_soft_fails_invalid_parameters_json() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("echo-skill");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::write(
+            skill_dir.join("scripts/echo.py"),
+            "import json\nimport sys\nprint(json.dumps({'argv': sys.argv[1:]}))\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: echo-skill
+description: Echo script arguments
+---
+
+Tools:
+  - name: Echo
+    slug: echo
+    script: scripts/echo.py
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let executor = LocalToolExecutor::new(
+            store.clone(),
+            &conversation.conversation_id,
+            Some(skills),
+            AgentPermissions::default(),
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        );
+
+        let output = executor
+            .execute(
+                "local__run_skill",
+                json!({
+                    "skill_name": "echo-skill",
+                    "tool_slug": "echo",
+                    "parameters": "{not-json"
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("[warning]"));
+        assert!(output.contains("parameters was not valid JSON"));
+        assert!(output.contains("\"argv\": []"));
+
+        let log_path = store
+            .conversation_dir(&conversation.conversation_id)
+            .unwrap()
+            .join("logs/conversation.log");
+        let log = fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("parameters was not valid JSON"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn run_skill_enforces_timeout() {
         let dir = tempdir().unwrap();
         let store = ConversationStore::new(dir.path(), AgentPermissions::default());
@@ -1203,7 +1489,7 @@ Tools:
         let err = executor
             .execute(
                 "local__run_skill",
-                json!({"skill_name": "slow-skill", "tool_slug": "slow"}),
+                json!({"skill_name": "slow-skill", "tool_slug": "slow", "timeout_seconds": 10}),
             )
             .await
             .unwrap_err();
@@ -1272,6 +1558,134 @@ Tools:
 
         assert!(output.contains("Command: `echo`"));
         assert!(output.contains("hello world"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn investigation_memory_tools_update_get_search_and_clear() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store.clone(),
+            &conversation.conversation_id,
+            None,
+            AgentPermissions {
+                allow_network: false,
+                filesystem: FilesystemAccess::ReadWrite,
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        );
+
+        executor
+            .execute(
+                "local__update_investigation_memory",
+                json!({
+                    "summary": "Investigating suspicious admin login",
+                    "entities": [{"type": "user", "value": "alice@example.com"}],
+                    "unresolved_questions": ["Confirm whether MFA challenge succeeded"]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let output = executor
+            .execute("local__get_investigation_memory", json!({}))
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["summary"], "Investigating suspicious admin login");
+        assert_eq!(parsed["entities"][0]["value"], "alice@example.com");
+        assert_eq!(parsed["updated_by"], "local__update_investigation_memory");
+        assert!(parsed["updated_at"].as_str().is_some());
+
+        executor
+            .execute(
+                "local__update_investigation_memory",
+                json!({
+                    "entities": [{"type": "user", "value": "alice@example.com"}]
+                }),
+            )
+            .await
+            .unwrap();
+        let memory = store
+            .load_investigation_memory(&conversation.conversation_id)
+            .unwrap();
+        assert_eq!(memory.entities.len(), 1);
+
+        let search = executor
+            .execute(
+                "local__search_conversation_memories",
+                json!({"query": "alice@example.com"}),
+            )
+            .await
+            .unwrap();
+        let results: Value = serde_json::from_str(&search).unwrap();
+        assert_eq!(results.as_array().unwrap().len(), 1);
+
+        executor
+            .execute("local__clear_investigation_memory", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .load_investigation_memory(&conversation.conversation_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn replace_investigation_memory_requires_explicit_fields() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store.clone(),
+            &conversation.conversation_id,
+            None,
+            AgentPermissions {
+                allow_network: false,
+                filesystem: FilesystemAccess::ReadWrite,
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        );
+
+        executor
+            .execute(
+                "local__update_investigation_memory",
+                json!({
+                    "summary": "Existing case context",
+                    "entities": [{"type": "host", "value": "server-1"}]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let err = executor
+            .execute(
+                "local__update_investigation_memory",
+                json!({"mode": "replace"}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("provide summary"));
+        assert!(
+            err.to_string()
+                .contains("local__clear_investigation_memory")
+        );
+
+        let memory = store
+            .load_investigation_memory(&conversation.conversation_id)
+            .unwrap();
+        assert_eq!(memory.summary, "Existing case context");
+        assert_eq!(memory.entities[0]["value"], "server-1");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1420,6 +1834,54 @@ pub fn local_tool_definitions(
                     "alias": {"type": "string", "description": "The alias of the stored job to remove"}
                 },
                 "required": ["alias"]
+            }),
+        },
+        LlmTool {
+            name: "local__get_investigation_memory".to_string(),
+            description: "Return the durable investigation memory for this conversation. Use before resuming an ongoing case or writing handover context. Requires filesystem read permission.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        LlmTool {
+            name: "local__update_investigation_memory".to_string(),
+            description: "Merge or replace durable investigation memory for this conversation. Use to preserve case summary, entities, timeline, decisions, hypotheses, trusted sources, and unresolved questions. Requires filesystem write permission.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["merge", "replace"], "description": "merge appends array fields and replaces summary; replace rewrites the memory from provided fields"},
+                    "summary": {"type": "string"},
+                    "entities": {"type": "array", "items": {}},
+                    "timeline": {"type": "array", "items": {}},
+                    "decisions": {"type": "array", "items": {}},
+                    "hypotheses": {"type": "array", "items": {}},
+                    "trusted_sources": {"type": "array", "items": {}},
+                    "unresolved_questions": {"type": "array", "items": {}},
+                    "memory": {
+                        "type": "object",
+                        "description": "Optional object containing any of the stable memory fields"
+                    }
+                }
+            }),
+        },
+        LlmTool {
+            name: "local__clear_investigation_memory".to_string(),
+            description: "Clear the durable investigation memory for this conversation. Requires filesystem write permission.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        LlmTool {
+            name: "local__search_conversation_memories".to_string(),
+            description: "Search durable investigation memories across all conversations. Use to find prior case context, related entities, prior decisions, or unresolved questions. Requires filesystem read permission.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Case term, entity, source, or decision text to search for"}
+                },
+                "required": ["query"]
             }),
         },
         LlmTool {

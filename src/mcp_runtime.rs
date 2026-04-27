@@ -910,7 +910,7 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{
-            Arc,
+            Arc, Mutex, MutexGuard, OnceLock,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -926,7 +926,10 @@ mod tests {
     use reqwest::header::ACCEPT;
     use serde_json::json;
     use tempfile::tempdir;
-    use tokio::{io::BufReader as TokioBufReader, net::TcpListener};
+    use tokio::{
+        io::BufReader as TokioBufReader,
+        net::{TcpListener, TcpStream},
+    };
 
     use crate::config::{McpRuntimeConfig, McpServerConfig};
 
@@ -934,6 +937,18 @@ mod tests {
         McpManager, PREFERRED_PROTOCOL_VERSION, ServerState, Transport, build_headers,
         normalize_tool_result, parse_mcp_response_body, read_stdio_frame,
     };
+
+    fn mock_mcp_server_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn acquire_mock_mcp_server_test_lock() -> MutexGuard<'static, ()> {
+        match mock_mcp_server_test_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 
     #[test]
     fn normalizes_text_content_arrays() {
@@ -1035,6 +1050,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rejects_unsupported_negotiated_protocol_version() {
+        let _guard = acquire_mock_mcp_server_test_lock();
         let dir = tempdir().unwrap();
         let state = Arc::new(MockServerState {
             initialize_count: AtomicUsize::new(0),
@@ -1049,11 +1065,16 @@ mod tests {
 
         let err = manager.list_tools().await.unwrap_err();
 
-        assert!(format!("{err:#}").contains("unsupported MCP protocol version"));
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("unsupported MCP protocol version"),
+            "{message}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn retries_after_streamable_http_session_expiry() {
+        let _guard = acquire_mock_mcp_server_test_lock();
         let dir = tempdir().unwrap();
         let state = Arc::new(MockServerState {
             initialize_count: AtomicUsize::new(0),
@@ -1079,6 +1100,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn sends_cancelled_notification_when_request_times_out() {
+        let _guard = acquire_mock_mcp_server_test_lock();
         let dir = tempdir().unwrap();
         let state = Arc::new(MockServerState {
             initialize_count: AtomicUsize::new(0),
@@ -1230,7 +1252,29 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        wait_for_mock_mcp_server(addr).await;
         addr
+    }
+
+    async fn wait_for_mock_mcp_server(addr: std::net::SocketAddr) {
+        let mut last_error = None;
+        for _ in 0..100 {
+            match TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    drop(stream);
+                    return;
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+        panic!(
+            "mock MCP server did not start at {addr}: {}",
+            last_error
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "unknown error".to_string())
+        );
     }
 }

@@ -1886,8 +1886,8 @@
     if (kind === 'running' && !seen.size) {
       seen.add('thinking');
     }
-    if (kind === 'completed' || kind === 'done' || kind === 'failed' || kind === 'error') {
-      seen.add('done');
+    if (kind === 'completed' || kind === 'done' || kind === 'failed' || kind === 'error' || (kind !== 'running' && kind !== 'idle')) {
+      phases.forEach((phase) => seen.add(phase));
       active = 'done';
     }
     return phases.map((phase) => {
@@ -1899,6 +1899,21 @@
       }
       return { phase, status };
     });
+  }
+
+  function progressPercentFromPhaseState(kind, phases) {
+    if (kind === 'completed' || kind === 'done') return 100;
+    if (kind === 'failed' || kind === 'error') return 100;
+    if (kind !== 'running' && kind !== 'idle') return 100;
+    const activeIndex = phases.findIndex((item) => item.status === 'active');
+    const completeCount = phases.filter((item) => item.status === 'complete').length;
+    if (activeIndex >= 0) {
+      return Math.min(96, Math.max(18, activeIndex * 24 + 18));
+    }
+    if (completeCount > 0) {
+      return Math.min(96, completeCount * 24);
+    }
+    return kind === 'idle' ? 0 : 18;
   }
 
   function phaseMessage(kind, events, fallbackMessage) {
@@ -1924,16 +1939,27 @@
     if (!shouldRender) {
       return;
     }
-    const phaseIcons = {
-      thinking: { emoji: '🧠', label: 'Thinking' },
-      tool: { emoji: '🛠️', label: 'Tool' },
-      skill: { emoji: '📚', label: 'Skill' },
-      done: { emoji: '✅', label: 'Done' },
+    const phaseMeta = {
+      thinking: { label: 'LLM', description: 'Thinking' },
+      tool: { label: 'Tool', description: 'Tool calls' },
+      skill: { label: 'Skill', description: 'Skill work' },
+      done: { label: 'Done', description: 'Completion' },
     };
-    const phaseBar = phaseStateFromRunStatus(kind, events)
+    const phases = phaseStateFromRunStatus(kind, events);
+    const progress = progressPercentFromPhaseState(kind, phases);
+    const statusLabel = kind === 'failed' || kind === 'error'
+      ? 'Error'
+      : kind === 'completed' || kind === 'done'
+        ? 'Complete'
+        : kind === 'running'
+          ? 'Running'
+          : 'Status';
+    const phaseBar = phases
       .map(({ phase, status }) => `
-        <span class="phase-step is-${status}" title="${escapeAttribute(phaseIcons[phase].label)}">
-          <span aria-hidden="true">${phaseIcons[phase].emoji}</span>
+        <span class="phase-step is-${status}" title="${escapeAttribute(phaseMeta[phase].description)}">
+          <span class="phase-name">${escapeHtml(phaseMeta[phase].label)}</span>
+          <span class="phase-fill" aria-hidden="true"></span>
+          <span class="phase-state">${escapeHtml(status === 'complete' ? 'done' : status)}</span>
         </span>
       `)
       .join('');
@@ -1945,8 +1971,30 @@
         : 'is-running';
     block.className = `inline-run-status ${tone}`;
     block.innerHTML = `
-      <div class="phase-bar" aria-label="Request progress">${phaseBar}</div>
-      <p class="phase-text">${escapeHtml(message)}</p>
+      <div class="phase-panel-header">
+        <span class="phase-panel-title">Run Telemetry</span>
+        <span class="phase-panel-status">${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="phase-dashboard">
+        <div
+          class="phase-gauge"
+          role="progressbar"
+          aria-label="Request progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="${progress}"
+          style="--progress: ${progress};"
+        >
+          <div class="phase-gauge-core">
+            <span class="phase-gauge-value">${progress}</span>
+            <span class="phase-gauge-unit">%</span>
+          </div>
+        </div>
+        <div class="phase-readout">
+          <div class="phase-bar" aria-label="Request phases">${phaseBar}</div>
+          <p class="phase-text">${escapeHtml(message)}</p>
+        </div>
+      </div>
     `;
     streamEl.appendChild(block);
   }

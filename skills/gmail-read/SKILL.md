@@ -1,8 +1,9 @@
 ---
 name: gmail-read
 description: Reads Gmail messages from a saved read-only OAuth token. Use when the user asks to inspect inbox messages, unread mail, recent emails matching a search query, or email body text.
-keywords: gmail, email, inbox, unread, messages, mail
 compatibility: Requires a Google Cloud Desktop OAuth client JSON plus HTTPS access to googleapis.com.
+metadata:
+  keywords: gmail, email, inbox, unread, messages, mail
 ---
 
 # Gmail Read
@@ -33,13 +34,13 @@ Tools:
 4. Run:
 
 ```bash
-python3 skills/gmail-read/scripts/gmail_auth.py login
+python3 scripts/gmail_auth.py login
 ```
 
 Optional explicit credentials file:
 
 ```bash
-python3 skills/gmail-read/scripts/gmail_auth.py login \
+python3 scripts/gmail_auth.py login \
   --credentials-file /path/to/google-oauth-client.json
 ```
 
@@ -51,14 +52,14 @@ Override it with `GMAIL_TOKEN_FILE=/path/to/token.json`.
 Unread mail from the last week:
 
 ```bash
-python3 skills/gmail-read/scripts/gmail_read_messages.py \
+python3 scripts/gmail_read_messages.py \
   --query "is:unread newer_than:7d"
 ```
 
 Read with body text included:
 
 ```bash
-python3 skills/gmail-read/scripts/gmail_read_messages.py \
+python3 scripts/gmail_read_messages.py \
   --query "from:alerts@example.com" \
   --include-body \
   --max-results 5

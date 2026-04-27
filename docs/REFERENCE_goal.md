@@ -73,7 +73,7 @@ The runtime is centered on `AgentOrchestrator` in [bidule2/agent/orchestrator.py
 Main components:
 
 - `ConversationStore`: persists conversations, logs, compactions, and remembered jobs.
-- `SkillRepository`: loads `skills/*/SKILL.md`.
+- `SkillRepository`: loads Agent Skills from `.agents/skills/` plus the legacy bundled `skills/*/SKILL.md`.
 - `RecipeRepository`: loads `recipes/*/RECIPE.md`.
 - `MCPAuthManager`: resolves static headers or OAuth-derived headers for MCP servers.
 - OpenAI Agents SDK agent: drives tool calling and response generation.
@@ -321,7 +321,9 @@ This is how bidule2 can continue polling a remote system after the original user
 
 ## Skills
 
-Skills are loaded from `skills/<name>/SKILL.md`.
+Skills use the Agent Skills `SKILL.md` format. Rusty Bidule scans the
+cross-client `.agents/skills/` convention at both user and project scope while
+keeping `skills/<name>/SKILL.md` as the bundled legacy repo location.
 
 The skill repository supports three practical modes:
 
@@ -347,8 +349,9 @@ Important frontmatter keys:
 
 - `name`
 - `description`
-- `keywords`
 - `compatibility`
+- `metadata`
+- `allowed-tools`
 
 Recognized body sections include:
 
@@ -361,6 +364,10 @@ A `Tools:` block can define executable tools in three styles:
 - full YAML object list
 - shorthand `slug: path`
 - shorthand path list
+
+The agent sees a compact skill catalog first. `local__activate_skill` loads the
+full `SKILL.md` body and resource listing when a skill matches the task, while
+`local__run_skill` remains the execution path for script-backed tools.
 
 ### Script execution contract
 

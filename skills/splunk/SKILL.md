@@ -1,7 +1,8 @@
 ---
 name: splunk
 description: Uses advertised MCP tools for Splunk search, job submission, and result retrieval. Use when the user wants to search Splunk, enumerate indexes or sourcetypes, inspect events, run SPL, or follow up on long-running Splunk jobs.
-keywords: splunk, spl, search, index, sourcetype, events, sid, job, logs, siem
+metadata:
+  keywords: splunk, spl, search, index, sourcetype, events, sid, job, logs, siem
 ---
 
 # Splunk Investigation Via MCP

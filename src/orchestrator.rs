@@ -31,6 +31,7 @@ const MAX_AGENT_ITERATIONS: usize = 10;
 const MAX_AZURE_TOOL_COUNT: usize = 128;
 const PINNED_LOCAL_TOOL_NAMES: &[&str] = &[
     "local__configure_mcp_servers",
+    "local__activate_skill",
     "local__run_skill",
     "local__get_investigation_memory",
     "local__update_investigation_memory",
@@ -111,21 +112,19 @@ impl Orchestrator {
             config.mcp_servers.clone(),
         )?;
 
-        // Load skills from {project_root}/skills/
-        let skills_dir = discover_project_root()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("skills");
-        let skills = match SkillRegistry::load(&skills_dir) {
+        // Load Agent Skills from project/user locations, including .agents/skills.
+        let project_root = discover_project_root().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let skills = match SkillRegistry::load_all(&project_root) {
             Ok(skills) => skills,
             Err(err) => {
                 warn!(
-                    path = %skills_dir.display(),
+                    project_root = %project_root.display(),
                     error = %err,
                     "failed to load skills registry; continuing with no skills"
                 );
                 eprintln!(
                     "Warning: failed to load skills from {}: {err}. Continuing with no skills.",
-                    skills_dir.display()
+                    project_root.display()
                 );
                 SkillRegistry::default()
             }
@@ -373,8 +372,11 @@ impl Orchestrator {
         }
 
         // Build local tool definitions and rank the advertised subset for the current turn.
-        let local_defs =
-            local_tool_definitions(local_tool_filter.as_deref(), &self.inner.config.local_tools);
+        let local_defs = local_tool_definitions(
+            local_tool_filter.as_deref(),
+            &self.inner.config.local_tools,
+            Some(&self.inner.skills),
+        );
         let tool_selection_query =
             build_tool_selection_query(user_message.as_deref(), &history, recipe.as_ref());
         let (llm_tools, omitted_tool_count) =
@@ -906,6 +908,7 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
     system_prompt.push_str(
         "\n\nTool execution rules:\n\
         - Prefer local skill execution when an appropriate listed skill exists.\n\
+        - When a listed skill matches the task, use `local__activate_skill` when available to load its full `SKILL.md` instructions before acting.\n\
         - A listed skill with a local script must be executed via `local__run_skill`.\n\
         - Use `local__time` before making claims about relative windows like last 12 hours, last 2 days, today, or yesterday.\n\
         - Use investigation memory to preserve durable case context: read it when resuming a case, update it when durable conclusions, entities, decisions, or unresolved questions change.\n\

@@ -19,6 +19,7 @@ const BARE_SECTION_HEADINGS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct ParsedMarkdownDoc {
     pub frontmatter: Option<serde_yaml::Value>,
+    pub body: String,
     sections: HashMap<String, String>,
 }
 
@@ -26,14 +27,12 @@ impl ParsedMarkdownDoc {
     pub fn parse(raw: &str, path_label: &str) -> Result<Self> {
         let (frontmatter_raw, body) = split_frontmatter(raw);
         let frontmatter = frontmatter_raw
-            .map(|fm| {
-                serde_yaml::from_str(fm)
-                    .with_context(|| format!("failed to parse frontmatter in {path_label}"))
-            })
+            .map(|fm| parse_frontmatter_yaml(fm, path_label))
             .transpose()?;
 
         Ok(Self {
             frontmatter,
+            body: body.trim().to_string(),
             sections: parse_sections(&body),
         })
     }
@@ -50,16 +49,90 @@ impl ParsedMarkdownDoc {
 }
 
 fn split_frontmatter(raw: &str) -> (Option<&str>, String) {
-    if !raw.starts_with("---\n") {
-        return (None, raw.to_string());
-    }
-    if let Some(end_pos) = raw[4..].find("\n---\n") {
-        let fm = &raw[4..4 + end_pos];
-        let body = raw[4 + end_pos + 5..].to_string();
-        (Some(fm), body)
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let start = if raw.starts_with("---\n") {
+        4
+    } else if raw.starts_with("---\r\n") {
+        5
     } else {
-        (None, raw.to_string())
+        return (None, raw.to_string());
+    };
+
+    let mut offset = start;
+    for line in raw[start..].split_inclusive('\n') {
+        let without_lf = line.strip_suffix('\n').unwrap_or(line);
+        let without_eol = without_lf.strip_suffix('\r').unwrap_or(without_lf);
+        if without_eol == "---" {
+            let fm = raw[start..offset].trim_end_matches(['\r', '\n']);
+            let body = raw[offset + line.len()..].to_string();
+            return (Some(fm), body);
+        }
+        offset += line.len();
     }
+
+    if raw[offset..].trim_end_matches('\r') == "---" {
+        let fm = raw[start..offset].trim_end_matches(['\r', '\n']);
+        return (Some(fm), String::new());
+    }
+
+    (None, raw.to_string())
+}
+
+fn parse_frontmatter_yaml(raw: &str, path_label: &str) -> Result<serde_yaml::Value> {
+    match serde_yaml::from_str(raw) {
+        Ok(value) => Ok(value),
+        Err(first_err) => {
+            let repaired = repair_unquoted_colon_scalars(raw);
+            if repaired == raw {
+                return Err(first_err)
+                    .with_context(|| format!("failed to parse frontmatter in {path_label}"));
+            }
+            serde_yaml::from_str(&repaired).with_context(|| {
+                format!(
+                    "failed to parse frontmatter in {path_label}; also failed after repairing unquoted colon scalars"
+                )
+            })
+        }
+    }
+}
+
+fn repair_unquoted_colon_scalars(raw: &str) -> String {
+    raw.lines()
+        .map(|line| {
+            let trimmed_start = line.trim_start();
+            if trimmed_start.len() != line.len() {
+                return line.to_string();
+            }
+            let Some((key, value)) = line.split_once(": ") else {
+                return line.to_string();
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if key.is_empty()
+                || value.is_empty()
+                || !is_plain_yaml_key(key)
+                || !value.contains(": ")
+                || starts_as_structured_yaml_value(value)
+            {
+                return line.to_string();
+            }
+            format!("{key}: |-\n  {value}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_plain_yaml_key(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn starts_as_structured_yaml_value(value: &str) -> bool {
+    matches!(
+        value.chars().next(),
+        Some('"') | Some('\'') | Some('[') | Some('{') | Some('|') | Some('>')
+    )
 }
 
 fn parse_sections(body: &str) -> HashMap<String, String> {
@@ -230,6 +303,53 @@ Response Template:
         assert_eq!(doc.section("Instructions"), Some("Do the work."));
         assert_eq!(doc.section("workflow"), Some("type: guided"));
         assert_eq!(doc.section("Response Template"), Some("{{ response }}"));
+        assert_eq!(
+            doc.body,
+            "Instructions:\nDo the work.\n\nWorkflow:\ntype: guided\n\nResponse Template:\n{{ response }}"
+        );
+    }
+
+    #[test]
+    fn repairs_frontmatter_scalars_with_unquoted_colons() {
+        let doc = ParsedMarkdownDoc::parse(
+            r#"---
+name: demo
+description: Use this skill when: the user asks about PDFs
+---
+
+## When to use
+
+PDF work.
+"#,
+            "demo",
+        )
+        .unwrap();
+
+        assert_eq!(
+            doc.frontmatter
+                .as_ref()
+                .and_then(|value| value.get("description"))
+                .and_then(|value| value.as_str()),
+            Some("Use this skill when: the user asks about PDFs")
+        );
+    }
+
+    #[test]
+    fn parses_crlf_frontmatter() {
+        let doc = ParsedMarkdownDoc::parse(
+            "---\r\nname: demo\r\ndescription: Demo skill.\r\n---\r\n\r\n# Demo\r\n",
+            "demo",
+        )
+        .unwrap();
+
+        assert_eq!(
+            doc.frontmatter
+                .as_ref()
+                .and_then(|value| value.get("name"))
+                .and_then(|value| value.as_str()),
+            Some("demo")
+        );
+        assert_eq!(doc.body, "# Demo");
     }
 
     #[test]

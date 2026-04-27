@@ -398,9 +398,17 @@ the TUI, the web UI/API message submission path, and `--once`.
 
 ## Skills And Recipes
 
-Skills are loaded from `skills/<skill-name>/SKILL.md`. On the current
-chat-completions transport they are exposed as capability metadata plus
-optional script-backed tools executed through `local__run_skill`.
+Skills use the Agent Skills `SKILL.md` format. The loader scans project and
+user locations, with later paths shadowing earlier skills of the same `name`:
+
+- `~/.claude/skills/`, `~/.rusty-bidule/skills/`, `~/.agents/skills/`
+- `skills/` for bundled legacy repo skills
+- `.claude/skills/`, `.rusty-bidule/skills/`, `.agents/skills/` in the project
+
+The `.agents/skills/` paths are the preferred cross-client location. Skills are
+exposed as a compact catalog, `local__activate_skill` loads the full `SKILL.md`
+body when needed, and script-backed tools still execute through
+`local__run_skill`.
 
 Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`. They let you preload
 instructions, an initial prompt, workflow guidance, and local-tool/MCP filters

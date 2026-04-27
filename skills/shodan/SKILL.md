@@ -1,7 +1,8 @@
 ---
 name: shodan
 description: Uses the Shodan CLI to investigate public exposure for an IP address or host. Use when the user wants internet-facing service intelligence, recent scan data, exposed ports, banners, or CVE context from Shodan.
-keywords: shodan, exposure, intel, services, ip, host, banner, cve, vulnerability
+metadata:
+  keywords: shodan, exposure, intel, services, ip, host, banner, cve, vulnerability
 ---
 
 # Shodan Exposure Investigation

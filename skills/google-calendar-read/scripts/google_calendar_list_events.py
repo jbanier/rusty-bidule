@@ -236,7 +236,7 @@ def main() -> int:
             json.dumps(
                 {
                     "error": (
-                        f"{exc} Run `python3 skills/google-calendar-read/scripts/google_calendar_auth.py login` "
+                        f"{exc} Run `python3 scripts/google_calendar_auth.py login` "
                         "if you have not authenticated yet."
                     )
                 }

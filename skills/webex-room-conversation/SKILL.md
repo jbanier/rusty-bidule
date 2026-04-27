@@ -1,8 +1,9 @@
 ---
 name: webex-room-conversation
 description: Fetches Webex room messages for a named room within a date interval using EU dates (DD/MM/YYYY). Use when investigating incident room timelines, reconstructing conversation context, or exporting room evidence for a specific period.
-keywords: webex, room, messages, conversation, chat, incident, timeline, history
 compatibility: Requires a Webex access token (WEBEX_ACCESS_TOKEN env var or saved via webex_auth.py login) and HTTPS access to webexapis.com.
+metadata:
+  keywords: webex, room, messages, conversation, chat, incident, timeline, history
 ---
 
 # Webex Room Conversation Fetch
@@ -47,7 +48,7 @@ Personal access tokens expire after 12 hours.
 2. Authorize and save the token:
 
 ```bash
-python3 skills/webex-room-conversation/scripts/webex_auth.py login \
+python3 scripts/webex_auth.py login \
   --client-id <your-client-id> \
   --client-secret <your-client-secret>
 ```
@@ -58,14 +59,14 @@ The fetch script loads it automatically — no env var needed.
 3. Refresh when expired (uses the stored refresh token):
 
 ```bash
-python3 skills/webex-room-conversation/scripts/webex_auth.py refresh \
+python3 scripts/webex_auth.py refresh \
   --client-id <id> --client-secret <secret>
 ```
 
 4. Inspect saved token metadata (no secrets printed):
 
 ```bash
-python3 skills/webex-room-conversation/scripts/webex_auth.py show
+python3 scripts/webex_auth.py show
 ```
 
 Override token file path with `WEBEX_TOKEN_FILE=/path/to/token.json`.
@@ -73,7 +74,7 @@ Override token file path with `WEBEX_TOKEN_FILE=/path/to/token.json`.
 ## Fetch messages command
 
 ```bash
-python3 skills/webex-room-conversation/scripts/webex_room_message_fetch.py \
+python3 scripts/webex_room_message_fetch.py \
   --room "Incident room 123456" \
   --since 26/03/2026
 ```
@@ -81,7 +82,7 @@ python3 skills/webex-room-conversation/scripts/webex_room_message_fetch.py \
 Optional explicit end date and timezone:
 
 ```bash
-python3 skills/webex-room-conversation/scripts/webex_room_message_fetch.py \
+python3 scripts/webex_room_message_fetch.py \
   --room "Incident room 123456" \
   --since 26/03/2026 \
   --until 27/03/2026 \

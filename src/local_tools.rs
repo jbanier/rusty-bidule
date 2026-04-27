@@ -173,6 +173,7 @@ impl LocalToolExecutor {
             "local__time" => self.exec_time(arguments),
             "local__configure_mcp_servers" => self.exec_configure_mcp_servers(arguments),
             "local__exec_cli" => self.exec_cli(arguments).await,
+            "local__activate_skill" => self.exec_activate_skill(arguments),
             "local__run_skill" => self.exec_run_skill(arguments).await,
             _ => Err(anyhow!("unknown local tool: {name}")),
         }
@@ -772,6 +773,20 @@ impl LocalToolExecutor {
         Ok(outputs.join("\n\n"))
     }
 
+    fn exec_activate_skill(&self, arguments: Value) -> Result<String> {
+        let registry = self
+            .skills
+            .as_ref()
+            .ok_or_else(|| anyhow!("skills registry not available"))?;
+        let skill_name = arguments
+            .get("name")
+            .or_else(|| arguments.get("skill_name"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("activate_skill: missing 'name'"))?;
+
+        registry.activate_skill(skill_name)
+    }
+
     async fn run_skill_process(
         &self,
         launch: &SkillLaunchSpec,
@@ -1058,6 +1073,7 @@ fn is_advertised_local_tool_name(name: &str) -> bool {
             | "local__time"
             | "local__configure_mcp_servers"
             | "local__exec_cli"
+            | "local__activate_skill"
             | "local__run_skill"
     )
 }
@@ -1306,6 +1322,51 @@ Tools:
             .unwrap_err();
 
         assert!(err.to_string().contains("network access"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn activate_skill_loads_skill_body_and_resources() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("demo");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::write(skill_dir.join("scripts/run.py"), "print('ok')\n").unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: demo
+description: Demo activation skill.
+---
+
+# Demo Skill
+
+Use `scripts/run.py`.
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            Some(skills),
+            AgentPermissions::default(),
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        );
+
+        let output = executor
+            .execute("local__activate_skill", json!({"name": "demo"}))
+            .await
+            .unwrap();
+
+        assert!(output.contains("<skill_content name=\"demo\">"));
+        assert!(output.contains("# Demo Skill"));
+        assert!(output.contains("<file>scripts/run.py</file>"));
+        assert!(!output.contains("description: Demo activation skill"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1744,6 +1805,7 @@ Tools:
 pub fn local_tool_definitions(
     enabled_local_tools: Option<&[String]>,
     local_tools_config: &LocalToolsConfig,
+    skills: Option<&SkillRegistry>,
 ) -> Vec<LlmTool> {
     let mut defs = vec![
         LlmTool {
@@ -1926,6 +1988,32 @@ pub fn local_tool_definitions(
                     "timeout_seconds": {"type": "integer", "description": "Optional timeout override capped by local_tools.execution_timeout_seconds"}
                 },
                 "required": ["command"]
+            }),
+        });
+    }
+
+    if let Some(skills) = skills
+        && !skills.is_empty()
+    {
+        let skill_names = skills.skill_names();
+        let name_schema = if skill_names.is_empty() {
+            json!({"type": "string", "description": "Agent Skills name to activate"})
+        } else {
+            json!({
+                "type": "string",
+                "enum": skill_names,
+                "description": "Agent Skills name to activate"
+            })
+        };
+        defs.push(LlmTool {
+            name: "local__activate_skill".to_string(),
+            description: "Load the full instructions for a discovered Agent Skills SKILL.md by name. Returns the Markdown body wrapped in skill_content tags plus the skill directory and bundled resource paths. Use before relying on a skill's detailed workflow.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": name_schema
+                },
+                "required": ["name"]
             }),
         });
     }

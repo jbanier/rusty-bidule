@@ -1,7 +1,8 @@
 ---
 name: evidence-bundle
 description: Builds a local evidence bundle from an existing conversation directory into a timestamped export folder with a JSON summary and SHA256 manifest. This is an analyst convenience workflow, not a signed chain-of-custody mechanism.
-keywords: evidence, bundle, manifest, sha256, export, conversation
+metadata:
+  keywords: evidence, bundle, manifest, sha256, export, conversation
 ---
 
 # Evidence Bundle Writer

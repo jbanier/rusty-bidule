@@ -274,7 +274,7 @@ def main() -> int:
             json.dumps(
                 {
                     "error": (
-                        f"{exc} Run `python3 skills/gmail-read/scripts/gmail_auth.py login` "
+                        f"{exc} Run `python3 scripts/gmail_auth.py login` "
                         "if you have not authenticated yet."
                     )
                 }

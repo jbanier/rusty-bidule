@@ -26,8 +26,10 @@ src/
   ui.rs                   terminal UI and slash commands
 config/
   config.example.yaml     example runtime config
+.agents/skills/
+  */SKILL.md              preferred cross-client skill location
 skills/
-  */SKILL.md              skill metadata plus optional local scripts
+  */SKILL.md              bundled legacy repo skills
 recipes/
   */RECIPE.md             prompt/config recipes
 data/
@@ -128,6 +130,7 @@ Built-in local tools are advertised as model tools when enabled by the current c
 | `local__time` | Return UTC/local time and relative windows. |
 | `local__configure_mcp_servers` | Update the conversation-scoped MCP server filter. |
 | `local__exec_cli` | Execute an explicitly allowlisted bare CLI command with direct argv. |
+| `local__activate_skill` | Load full Agent Skills instructions and list bundled resources. |
 | `local__run_skill` | Execute script-backed skill tools. |
 | `local__remember_job` | Store a long-running job or transaction alias. |
 | `local__update_job` | Update stored job metadata. |
@@ -148,13 +151,31 @@ Permission checks are enforced before local tools run:
 
 ## Skills
 
-Skills are loaded from `skills/<skill-name>/SKILL.md`. A skill file uses YAML frontmatter plus Markdown sections. Canonical Rust-native shape:
+Skills use the Agent Skills `SKILL.md` format: a skill is a directory with a
+required `SKILL.md`, optional `scripts/`, optional `references/`, and optional
+`assets/`. Discovery scans user-level locations first and project-level
+locations second, so project skills shadow user skills with the same `name`.
+Within each scope the cross-client `.agents/skills/` path has the highest
+precedence.
+
+Search order:
+
+1. `~/.claude/skills/`
+2. `~/.rusty-bidule/skills/`
+3. `~/.agents/skills/`
+4. `<project>/skills/` legacy bundled skills
+5. `<project>/.claude/skills/`
+6. `<project>/.rusty-bidule/skills/`
+7. `<project>/.agents/skills/`
+
+Canonical skill shape:
 
 ```markdown
 ---
 name: gmail-read
 description: Reads Gmail messages from a saved read-only OAuth token.
-keywords: gmail, email, inbox
+metadata:
+  keywords: gmail, email, inbox
 ---
 
 # Gmail Read
@@ -180,6 +201,13 @@ The shared document parser supports frontmatter plus labeled sections such as:
 - `## Authentication setup`
 - `## Output`
 - `## Edge cases`
+
+Agent-facing skill tools:
+
+| Tool | Notes |
+| --- | --- |
+| `local__activate_skill` | Loads the matched skill's `SKILL.md` body and lists bundled resources without eagerly reading them. |
+| `local__run_skill` | Executes script-backed skill tools. |
 
 Tool metadata fields:
 

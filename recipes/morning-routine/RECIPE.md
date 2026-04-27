@@ -30,6 +30,7 @@ Update investigation memory with `local__update_investigation_memory` when the h
 Config:
   local_tools:
     - local__time
+    - local__activate_skill
     - local__run_skill
     - local__get_investigation_memory
     - local__update_investigation_memory

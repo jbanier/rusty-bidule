@@ -1,7 +1,8 @@
 ---
 name: nmap
 description: Performs basic non-root network reconnaissance with nmap. Use when the user asks to scan a host, check whether a TCP port is open, identify exposed services, map open ports on an IP or CIDR range, or determine what is running on a server with nmap.
-keywords: nmap, scan, port, network, host, reconnaissance, service, tcp, cidr
+metadata:
+  keywords: nmap, scan, port, network, host, reconnaissance, service, tcp, cidr
 ---
 
 # Nmap Basic Network Reconnaissance

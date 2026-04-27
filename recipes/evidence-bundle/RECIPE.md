@@ -32,6 +32,7 @@ After the skill completes:
 
 Config:
   local_tools:
+    - local__activate_skill
     - local__run_skill
 
 Initial Prompt:

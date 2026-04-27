@@ -1,7 +1,8 @@
 ---
 name: local-analysis
 description: Performs local-only IOC extraction, defang/refang, hashing, decoding, URL parsing, IP math, timestamp normalization, file reads, and file metadata inspection without sending artifacts to external services.
-keywords: local, ioc, extract, defang, refang, hash, base64, hex, url, cidr, timestamp, file, metadata, entropy
+metadata:
+  keywords: local, ioc, extract, defang, refang, hash, base64, hex, url, cidr, timestamp, file, metadata, entropy
 ---
 
 # Local Analysis Utilities

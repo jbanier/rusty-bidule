@@ -1,8 +1,9 @@
 ---
 name: google-calendar-read
 description: Reads Google Calendar events from a saved read-only OAuth token. Use when the user asks to inspect upcoming meetings, events in a date range, or a specific Google Calendar.
-keywords: google calendar, calendar, events, meetings, schedule, agenda
 compatibility: Requires a Google Cloud Desktop OAuth client JSON plus HTTPS access to googleapis.com.
+metadata:
+  keywords: google calendar, calendar, events, meetings, schedule, agenda
 ---
 
 # Google Calendar Read
@@ -33,13 +34,13 @@ Tools:
 4. Run:
 
 ```bash
-python3 skills/google-calendar-read/scripts/google_calendar_auth.py login
+python3 scripts/google_calendar_auth.py login
 ```
 
 Optional explicit credentials file:
 
 ```bash
-python3 skills/google-calendar-read/scripts/google_calendar_auth.py login \
+python3 scripts/google_calendar_auth.py login \
   --credentials-file /path/to/google-oauth-client.json
 ```
 
@@ -51,14 +52,14 @@ Override it with `GOOGLE_CALENDAR_TOKEN_FILE=/path/to/token.json`.
 Upcoming events over the next 3 days:
 
 ```bash
-python3 skills/google-calendar-read/scripts/google_calendar_list_events.py \
+python3 scripts/google_calendar_list_events.py \
   --days-ahead 3
 ```
 
 Specific date range:
 
 ```bash
-python3 skills/google-calendar-read/scripts/google_calendar_list_events.py \
+python3 scripts/google_calendar_list_events.py \
   --calendar-id primary \
   --time-min 2026-04-16 \
   --time-max 2026-04-18 \

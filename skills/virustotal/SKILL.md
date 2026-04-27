@@ -1,7 +1,8 @@
 ---
 name: virustotal
 description: Uses the VirusTotal CLI (`vt`) to investigate suspicious file hashes, URLs, domains, and IP addresses. Use when the user wants quick threat intelligence, reputation checks, relationship pivots, or VirusTotal context for likely indicators of compromise.
-keywords: virustotal, vt, hash, sha256, sha1, md5, url, domain, ip, indicator, ioc, malware, reputation
+metadata:
+  keywords: virustotal, vt, hash, sha256, sha1, md5, url, domain, ip, indicator, ioc, malware, reputation
 ---
 
 # VirusTotal CLI Investigation

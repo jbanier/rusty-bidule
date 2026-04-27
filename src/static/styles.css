@@ -1223,6 +1223,141 @@ code {
   background: transparent;
 }
 
+.bottom-control-deck {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(252, 238, 10, 0.32);
+  border-radius: 2px;
+  background:
+    linear-gradient(135deg, rgba(252, 238, 10, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(12, 12, 14, 0.94), rgba(17, 16, 14, 0.88));
+  box-shadow: inset 4px 0 0 rgba(0, 240, 255, 0.48), 0 10px 24px rgba(0, 0, 0, 0.22);
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+}
+
+.bottom-control-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.conversation-control-actions {
+  flex-shrink: 0;
+}
+
+.permission-controls {
+  justify-content: flex-end;
+}
+
+.control-label {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.control-button,
+.permission-chip,
+.filesystem-control {
+  min-height: 36px;
+  border: 1px solid rgba(252, 238, 10, 0.26);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.control-button,
+.permission-chip {
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease, transform 0.14s ease;
+}
+
+.control-button:hover,
+.permission-chip:hover,
+.filesystem-control:focus-within {
+  border-color: var(--accent);
+  background: rgba(252, 238, 10, 0.1);
+  transform: translateY(-1px);
+}
+
+.control-button:disabled,
+.permission-chip:disabled,
+.filesystem-control select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.control-button-danger {
+  border-color: rgba(255, 0, 60, 0.4);
+  color: #ff9daf;
+}
+
+.control-button-danger:hover {
+  border-color: var(--accent-alt);
+  background: rgba(255, 0, 60, 0.12);
+  color: #ffdce4;
+}
+
+.control-button-subtle {
+  color: var(--text-secondary);
+}
+
+.permission-chip.is-on {
+  border-color: rgba(252, 238, 10, 0.9);
+  background: var(--accent);
+  color: #11100b;
+  box-shadow: inset 3px 0 0 rgba(255, 0, 60, 0.72);
+}
+
+.permission-chip-danger.is-on {
+  border-color: rgba(255, 0, 60, 0.92);
+  background: var(--accent-alt);
+  color: #fff8da;
+  box-shadow: inset 3px 0 0 rgba(0, 240, 255, 0.8);
+}
+
+.filesystem-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+}
+
+.filesystem-control span {
+  color: var(--text-secondary);
+}
+
+.filesystem-control select {
+  min-width: 96px;
+  border: none;
+  border-left: 1px solid rgba(252, 238, 10, 0.22);
+  background: transparent;
+  color: var(--text-primary);
+  padding: 7px 0 7px 8px;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.filesystem-control select:focus {
+  outline: none;
+}
+
 .composer {
   margin-top: 0;
   display: flex;
@@ -1664,6 +1799,23 @@ code {
   .composer {
     flex-direction: column;
     align-items: stretch;
+  }
+  .bottom-control-deck {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .bottom-control-group,
+  .permission-controls {
+    justify-content: stretch;
+  }
+  .bottom-control-group > * {
+    flex: 1 1 auto;
+  }
+  .control-label {
+    flex-basis: 100%;
+  }
+  .filesystem-control select {
+    width: 100%;
   }
   .config-grid,
   .recipe-controls {

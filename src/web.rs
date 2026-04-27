@@ -20,7 +20,7 @@ use crate::{
     paths::discover_project_root,
     prompt_expansion::expand_prompt_file_references,
     recipes::RecipeRegistry,
-    types::{ConversationSummary, ProgressEvent, RunTurnResult, UiEvent},
+    types::{ConversationSummary, FilesystemAccess, ProgressEvent, RunTurnResult, UiEvent},
 };
 
 static INDEX_HTML: &str = include_str!("static/index.html");
@@ -137,6 +137,14 @@ struct ConversationTitleBody {
     title: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct PermissionsUpdateBody {
+    allow_network: Option<bool>,
+    filesystem: Option<FilesystemAccess>,
+    yolo: Option<bool>,
+    reset: Option<bool>,
+}
+
 #[derive(Serialize)]
 struct ScratchpadResponse {
     body: String,
@@ -245,6 +253,42 @@ async fn get_conversation(
     validate_resource_id(&id, "conversation")?;
     let convo = state.orchestrator.store().load(&id)?;
     Ok(axum::Json(serde_json::to_value(&convo)?))
+}
+
+async fn get_conversation_permissions(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let convo = state.orchestrator.store().load(&id)?;
+    Ok(axum::Json(serde_json::to_value(&convo.agent_permissions)?))
+}
+
+async fn put_conversation_permissions(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<PermissionsUpdateBody>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let store = state.orchestrator.store();
+    let mut convo = store.load(&id)?;
+    let mut permissions = if body.reset.unwrap_or(false) {
+        state.orchestrator.default_agent_permissions()
+    } else {
+        convo.agent_permissions.clone()
+    };
+    if let Some(value) = body.allow_network {
+        permissions.allow_network = value;
+    }
+    if let Some(value) = body.filesystem {
+        permissions.filesystem = value;
+    }
+    if let Some(value) = body.yolo {
+        permissions.yolo = value;
+    }
+    convo.agent_permissions = permissions;
+    store.save(&convo)?;
+    Ok(axum::Json(serde_json::to_value(&convo.agent_permissions)?))
 }
 
 async fn put_conversation_title(
@@ -841,6 +885,10 @@ pub async fn run_web_server(
                 .delete(delete_conversation),
         )
         .route(
+            "/api/conversations/{id}/permissions",
+            get(get_conversation_permissions).put(put_conversation_permissions),
+        )
+        .route(
             "/api/conversations/{id}/archive",
             post(archive_conversation),
         )
@@ -987,15 +1035,16 @@ mod tests {
         config::{AppConfig, LocalToolsConfig, McpRuntimeConfig},
         orchestrator::Orchestrator,
         recipes::RecipeRegistry,
-        types::AgentPermissions,
+        types::{AgentPermissions, FilesystemAccess},
     };
 
     use super::{
         COMPLETED_JOB_TTL, ConversationListQuery, ConversationTitleBody, FindingBody, JobState,
-        McpStatusesQuery, PostMessageBody, ScratchpadBody, SearchQuery, WebAppState,
-        archive_conversation, create_finding, evict_expired_jobs, export_summary,
-        get_export_summary, get_mcp_statuses, get_scratchpad, list_conversations, list_findings,
-        post_message, put_conversation_title, put_scratchpad, search_local, unarchive_conversation,
+        McpStatusesQuery, PermissionsUpdateBody, PostMessageBody, ScratchpadBody, SearchQuery,
+        WebAppState, archive_conversation, create_finding, evict_expired_jobs, export_summary,
+        get_conversation_permissions, get_export_summary, get_mcp_statuses, get_scratchpad,
+        list_conversations, list_findings, post_message, put_conversation_permissions,
+        put_conversation_title, put_scratchpad, search_local, unarchive_conversation,
         update_finding,
     };
 
@@ -1151,6 +1200,43 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(listed[0]["title"], "Phishing review");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn permissions_handler_persists_conversation_permissions() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let updated = put_conversation_permissions(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+            axum::Json(PermissionsUpdateBody {
+                allow_network: Some(true),
+                filesystem: Some(FilesystemAccess::ReadWrite),
+                yolo: Some(true),
+                reset: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(updated["allow_network"], true);
+        assert_eq!(updated["filesystem"], "read_write");
+        assert_eq!(updated["yolo"], true);
+
+        let loaded = get_conversation_permissions(State(state), Path(conversation.conversation_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(loaded["allow_network"], true);
+        assert_eq!(loaded["filesystem"], "read_write");
+        assert_eq!(loaded["yolo"], true);
     }
 
     #[tokio::test(flavor = "current_thread")]

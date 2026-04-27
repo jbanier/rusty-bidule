@@ -80,24 +80,6 @@
         </div>
         <div class="conversation-header-actions">
           <p id="active-updated" class="timestamp">—</p>
-          <div class="menu-shell">
-            <button
-              id="conversation-actions-toggle"
-              class="icon-button icon-button-subtle"
-              type="button"
-              aria-label="Conversation actions"
-              aria-controls="conversation-actions-menu"
-              aria-expanded="false"
-              title="Conversation actions"
-            >
-              <span aria-hidden="true">⋯</span>
-            </button>
-            <div id="conversation-actions-menu" class="action-menu hidden" role="menu">
-              <button id="compact-conversation" type="button" role="menuitem">Compact Context</button>
-              <button id="history-button" type="button" role="menuitem">Show History</button>
-              <button id="delete-convo" type="button" role="menuitem">Delete Conversation</button>
-            </div>
-          </div>
         </div>
       </div>
       <section id="conversation-stream" class="conversation-stream"></section>
@@ -113,6 +95,39 @@
           </div>
         </div>
         <div id="jobs-list" class="jobs-list"></div>
+      </section>
+      <section class="bottom-control-deck" aria-label="Conversation controls">
+        <div class="bottom-control-group conversation-control-actions" aria-label="Conversation actions">
+          <button id="compact-conversation" class="control-button" type="button">Compact</button>
+          <button id="history-button" class="control-button" type="button">History</button>
+          <button id="delete-convo" class="control-button control-button-danger" type="button">Delete</button>
+        </div>
+        <div class="bottom-control-group permission-controls" aria-label="Conversation permissions">
+          <span class="control-label">Permissions</span>
+          <button
+            id="permission-network"
+            class="permission-chip"
+            type="button"
+            aria-pressed="false"
+            title="Toggle network access for this conversation"
+          >Net off</button>
+          <label class="filesystem-control" for="permission-filesystem">
+            <span>FS</span>
+            <select id="permission-filesystem" title="Set filesystem access for this conversation">
+              <option value="none">None</option>
+              <option value="read_only">Read</option>
+              <option value="read_write">Write</option>
+            </select>
+          </label>
+          <button
+            id="permission-yolo"
+            class="permission-chip permission-chip-danger"
+            type="button"
+            aria-pressed="false"
+            title="Toggle all internal permission checks for this conversation"
+          >All off</button>
+          <button id="permission-reset" class="control-button control-button-subtle" type="button">Reset</button>
+        </div>
       </section>
       <div class="composer">
         <textarea id="message-input" placeholder="Select or start a conversation to begin." disabled></textarea>
@@ -453,6 +468,10 @@
   const deleteButtonEl = document.getElementById('delete-convo');
   const historyButtonEl = document.getElementById('history-button');
   const compactConversationButtonEl = document.getElementById('compact-conversation');
+  const permissionNetworkButtonEl = document.getElementById('permission-network');
+  const permissionFilesystemSelectEl = document.getElementById('permission-filesystem');
+  const permissionYoloButtonEl = document.getElementById('permission-yolo');
+  const permissionResetButtonEl = document.getElementById('permission-reset');
   const applyRecipeButtonEl = document.getElementById('apply-recipe');
   const clearRecipeButtonEl = document.getElementById('clear-recipe');
   const resetMcpButtonEl = document.getElementById('reset-mcp-servers');
@@ -524,6 +543,7 @@
     streamEl.innerHTML = '';
     renderPendingRecipe(null);
     renderMcpServers([]);
+    renderPermissionControls(null);
     renderJobs([]);
     updateActionState();
     await refreshConversations();
@@ -539,11 +559,13 @@
   });
   openToolsButton.addEventListener('click', () => setToolsPanelOpen(true));
   openSettingsButton.addEventListener('click', () => setSettingsPanelOpen(true));
-  conversationActionsToggleEl.addEventListener('click', (event) => {
-    event.stopPropagation();
-    setConversationActionsMenuOpen(conversationActionsMenuEl.classList.contains('hidden'));
-  });
-  conversationActionsMenuEl.addEventListener('click', () => setConversationActionsMenuOpen(false));
+  if (conversationActionsToggleEl && conversationActionsMenuEl) {
+    conversationActionsToggleEl.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setConversationActionsMenuOpen(conversationActionsMenuEl.classList.contains('hidden'));
+    });
+    conversationActionsMenuEl.addEventListener('click', () => setConversationActionsMenuOpen(false));
+  }
   closeToolsButton.addEventListener('click', () => setToolsPanelOpen(false));
   closeSettingsButton.addEventListener('click', () => setSettingsPanelOpen(false));
   toolsPanel.addEventListener('click', (event) => {
@@ -557,7 +579,7 @@
     }
   });
   document.addEventListener('click', (event) => {
-    if (!conversationActionsMenuEl.classList.contains('hidden') && !event.target.closest('.menu-shell')) {
+    if (conversationActionsMenuEl && !conversationActionsMenuEl.classList.contains('hidden') && !event.target.closest('.menu-shell')) {
       setConversationActionsMenuOpen(false);
     }
   });
@@ -569,6 +591,20 @@
   scheduleRunTypeEl.addEventListener('change', renderScheduleFormState);
   scheduleCadenceKindEl.addEventListener('change', renderScheduleFormState);
   compactConversationButtonEl.addEventListener('click', compactConversation);
+  permissionNetworkButtonEl.addEventListener('click', () => {
+    const permissions = normalizePermissions(state.activeConversation && state.activeConversation.agent_permissions);
+    setConversationPermissions({ allow_network: !permissions.allow_network });
+  });
+  permissionFilesystemSelectEl.addEventListener('change', () => {
+    setConversationPermissions({ filesystem: permissionFilesystemSelectEl.value });
+  });
+  permissionYoloButtonEl.addEventListener('click', () => {
+    const permissions = normalizePermissions(state.activeConversation && state.activeConversation.agent_permissions);
+    setConversationPermissions({ yolo: !permissions.yolo });
+  });
+  permissionResetButtonEl.addEventListener('click', () => {
+    setConversationPermissions({ reset: true });
+  });
   saveConfigButtonEl.addEventListener('click', saveConfig);
   reloadConfigButtonEl.addEventListener('click', refreshConfig);
   recipeSelectEl.addEventListener('change', renderRecipeSelection);
@@ -593,7 +629,7 @@
       setToolsPanelOpen(false);
       return;
     }
-    if (event.key === 'Escape' && !conversationActionsMenuEl.classList.contains('hidden')) {
+    if (event.key === 'Escape' && conversationActionsMenuEl && !conversationActionsMenuEl.classList.contains('hidden')) {
       setConversationActionsMenuOpen(false);
     }
   });
@@ -1173,6 +1209,7 @@
     renderMessages(data.messages || []);
     renderHistory(data.messages || []);
     renderPendingRecipe(data.pending_recipe);
+    renderPermissionControls(data.agent_permissions);
     await refreshActiveMcpServers();
     syncConversationRunState(data.active_run || null);
     renderConversationList();
@@ -1393,6 +1430,80 @@
     await refreshActiveMcpServers();
     setRunStatus('mcp', 'Restored the default MCP server set for this conversation.');
     await refreshConversations();
+  }
+
+  function normalizePermissions(permissions) {
+    const filesystem = permissions && ['none', 'read_only', 'read_write'].includes(permissions.filesystem)
+      ? permissions.filesystem
+      : 'read_only';
+    return {
+      allow_network: Boolean(permissions && permissions.allow_network),
+      filesystem,
+      yolo: Boolean(permissions && permissions.yolo),
+    };
+  }
+
+  function formatPermissionSummary(permissions) {
+    const normalized = normalizePermissions(permissions);
+    const filesystemLabels = {
+      none: 'fs:none',
+      read_only: 'fs:read',
+      read_write: 'fs:write',
+    };
+    return [
+      normalized.allow_network || normalized.yolo ? 'net:on' : 'net:off',
+      normalized.yolo ? 'fs:all' : filesystemLabels[normalized.filesystem],
+      normalized.yolo ? 'all:on' : 'all:off',
+    ].join(' ');
+  }
+
+  function renderPermissionControls(permissions) {
+    const normalized = normalizePermissions(permissions || (state.activeConversation && state.activeConversation.agent_permissions));
+    const hasConversation = Boolean(state.activeConversationId);
+    const jobRunning = Boolean(state.activeJobId);
+    const disabled = !hasConversation || jobRunning;
+
+    permissionNetworkButtonEl.textContent = normalized.allow_network ? 'Net on' : 'Net off';
+    permissionNetworkButtonEl.setAttribute('aria-pressed', String(normalized.allow_network));
+    permissionNetworkButtonEl.classList.toggle('is-on', normalized.allow_network);
+
+    permissionFilesystemSelectEl.value = normalized.filesystem;
+
+    permissionYoloButtonEl.textContent = normalized.yolo ? 'All on' : 'All off';
+    permissionYoloButtonEl.setAttribute('aria-pressed', String(normalized.yolo));
+    permissionYoloButtonEl.classList.toggle('is-on', normalized.yolo);
+
+    permissionNetworkButtonEl.disabled = disabled;
+    permissionFilesystemSelectEl.disabled = disabled;
+    permissionYoloButtonEl.disabled = disabled;
+    permissionResetButtonEl.disabled = disabled;
+  }
+
+  async function setConversationPermissions(patch) {
+    if (!state.activeConversationId) return;
+    const conversationId = state.activeConversationId;
+    [permissionNetworkButtonEl, permissionFilesystemSelectEl, permissionYoloButtonEl, permissionResetButtonEl]
+      .forEach((control) => { control.disabled = true; });
+    const response = await fetch(`/api/conversations/${conversationId}/permissions`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const payload = await readResponseJson(response) || {};
+    if (state.activeConversationId !== conversationId) {
+      updateActionState();
+      return;
+    }
+    if (!response.ok) {
+      setRunStatus('error', payload.description || payload.error || 'Failed to update permissions.');
+      updateActionState();
+      return;
+    }
+    state.activeConversation = state.activeConversation || {};
+    state.activeConversation.agent_permissions = payload;
+    renderPermissionControls(payload);
+    setRunStatus('permissions', `Permissions updated: ${formatPermissionSummary(payload)}.`);
+    updateActionState();
   }
 
   async function compactConversation(conversationId = state.activeConversationId) {
@@ -1742,6 +1853,7 @@
   }
 
   function setConversationActionsMenuOpen(isOpen) {
+    if (!conversationActionsMenuEl || !conversationActionsToggleEl) return;
     conversationActionsMenuEl.classList.toggle('hidden', !isOpen);
     conversationActionsToggleEl.setAttribute('aria-expanded', String(isOpen));
   }
@@ -1961,6 +2073,7 @@
     const selected = state.recipes.find((recipe) => recipe.name === recipeSelectEl.value) || { name: recipeSelectEl.value };
     state.activeConversation = payload;
     renderPendingRecipe(selected);
+    renderPermissionControls(payload.agent_permissions);
     if (selected.initial_prompt) {
       messageInputEl.value = selected.initial_prompt;
       messageInputEl.focus();
@@ -2003,6 +2116,7 @@
         renderMessages(payload.record.messages);
         renderHistory(payload.record.messages);
         renderPendingRecipe(payload.record.pending_recipe);
+        renderPermissionControls(payload.record.agent_permissions);
         renderMcpServers(payload.record.mcp_servers || []);
         document.getElementById('active-updated').textContent = new Date(payload.record.updated_at).toLocaleString();
         syncConversationRunState(payload.record.active_run || null);
@@ -2026,6 +2140,7 @@
         renderMessages(payload.record.messages);
         renderHistory(payload.record.messages);
         renderPendingRecipe(payload.record.pending_recipe);
+        renderPermissionControls(payload.record.agent_permissions);
         renderMcpServers(payload.record.mcp_servers || []);
         document.getElementById('active-updated').textContent = new Date(payload.record.updated_at).toLocaleString();
       }
@@ -2057,10 +2172,13 @@
     resetMcpButtonEl.disabled = !hasConversation || jobRunning;
     sendButtonEl.disabled = !canSend;
     sendButtonEl.textContent = jobRunning ? 'Working…' : 'Send';
-    conversationActionsToggleEl.disabled = !hasConversation;
+    if (conversationActionsToggleEl) {
+      conversationActionsToggleEl.disabled = !hasConversation;
+    }
     if (!hasConversation) {
       setConversationActionsMenuOpen(false);
     }
+    renderPermissionControls(state.activeConversation && state.activeConversation.agent_permissions);
 
     messageInputEl.disabled = !hasConversation || jobRunning;
     if (!hasConversation) {

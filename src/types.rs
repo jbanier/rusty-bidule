@@ -168,6 +168,16 @@ pub struct MessageTiming {
     pub total_seconds: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivatedSkill {
+    pub name: String,
+    pub skill_dir: String,
+    pub skill_md: String,
+    pub content_hash: String,
+    pub activated_at: DateTime<Utc>,
+    pub content: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConversationSummary {
     pub conversation_id: String,

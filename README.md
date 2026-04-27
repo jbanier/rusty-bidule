@@ -405,10 +405,16 @@ user locations, with later paths shadowing earlier skills of the same `name`:
 - `skills/` for bundled legacy repo skills
 - `.claude/skills/`, `.rusty-bidule/skills/`, `.agents/skills/` in the project
 
-The `.agents/skills/` paths are the preferred cross-client location. Skills are
-exposed as a compact catalog, `local__activate_skill` loads the full `SKILL.md`
-body when needed, and script-backed tools still execute through
-`local__run_skill`.
+The `.agents/skills/` paths are the preferred cross-client location. User-level
+skill directories and bundled `skills/` are enabled by default. Project-local
+`.agents/skills/`, `.claude/skills/`, and `.rusty-bidule/skills/` are loaded
+only when the current project root is trusted through `skills.trusted_project_roots`
+or `skills.project_skills: always`.
+
+Skills are exposed as a compact catalog, `local__activate_skill` loads the full
+`SKILL.md` body when needed, and script-backed tools still execute through
+`local__run_skill`. Activated skill instructions are remembered for the
+conversation and re-injected after compaction.
 
 Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`. They let you preload
 instructions, an initial prompt, workflow guidance, and local-tool/MCP filters

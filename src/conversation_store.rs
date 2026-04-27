@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::types::{
-    AgentPermissions, Conversation, ConversationSummary, FindingRecord, InvestigationMemory,
-    Message, MessageMetadata, RememberedJob, SearchResult,
+    ActivatedSkill, AgentPermissions, Conversation, ConversationSummary, FindingRecord,
+    InvestigationMemory, Message, MessageMetadata, RememberedJob, SearchResult,
 };
 
 #[derive(Debug, Clone)]
@@ -212,6 +212,12 @@ impl ConversationStore {
             .join("investigation_memory.json"))
     }
 
+    fn activated_skills_path(&self, conversation_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .conversation_dir(conversation_id)?
+            .join("activated_skills.json"))
+    }
+
     fn findings_path(&self) -> PathBuf {
         self.data_root.join("findings.json")
     }
@@ -265,6 +271,40 @@ impl ConversationStore {
         }
         fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
         Ok(true)
+    }
+
+    pub fn load_activated_skills(&self, conversation_id: &str) -> Result<Vec<ActivatedSkill>> {
+        self.ensure_layout(conversation_id)?;
+        let path = self.activated_skills_path(conversation_id)?;
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    pub fn save_activated_skills(
+        &self,
+        conversation_id: &str,
+        skills: &[ActivatedSkill],
+    ) -> Result<()> {
+        self.ensure_layout(conversation_id)?;
+        let path = self.activated_skills_path(conversation_id)?;
+        let payload = serde_json::to_string_pretty(skills)?;
+        fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    pub fn upsert_activated_skill(
+        &self,
+        conversation_id: &str,
+        skill: ActivatedSkill,
+    ) -> Result<()> {
+        let mut skills = self.load_activated_skills(conversation_id)?;
+        skills.retain(|existing| existing.name != skill.name);
+        skills.push(skill);
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        self.save_activated_skills(conversation_id, &skills)
     }
 
     pub fn load_findings(&self) -> Result<Vec<FindingRecord>> {
@@ -401,6 +441,7 @@ impl ConversationStore {
         let scratchpad = self.load_scratchpad(conversation_id)?;
         let investigation_memory = self.load_investigation_memory(conversation_id)?;
         let jobs = self.load_job_state(conversation_id)?;
+        let activated_skills = self.load_activated_skills(conversation_id)?;
         let findings = self
             .load_findings()?
             .into_iter()
@@ -435,6 +476,7 @@ impl ConversationStore {
             "scratchpad": scratchpad,
             "investigation_memory": investigation_memory,
             "jobs": jobs,
+            "activated_skills": activated_skills,
             "findings": findings,
             "active_compaction_summary": active_compaction_summary,
             "artifacts": {

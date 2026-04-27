@@ -1032,7 +1032,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::{
-        config::{AppConfig, LocalToolsConfig, McpRuntimeConfig},
+        config::{AppConfig, LocalToolsConfig, McpRuntimeConfig, SkillsConfig},
         orchestrator::Orchestrator,
         recipes::RecipeRegistry,
         types::{AgentPermissions, FilesystemAccess},
@@ -1057,6 +1057,7 @@ mod tests {
             azure_anthropic: None,
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
+            skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: Vec::new(),
             tracing: None,

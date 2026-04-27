@@ -40,6 +40,13 @@ local_tools:
     - whois
     - nslookup
 
+skills:
+  # User-level skill directories and bundled repo skills are enabled by default.
+  # Project-local .agents/.claude/.rusty-bidule skills are only loaded when the
+  # project root is listed here, or when project_skills is set to "always".
+  project_skills: trusted_only # trusted_only | always | disabled
+  trusted_project_roots: []
+
 mcp_runtime:
   connect_timeout_seconds: 180
 

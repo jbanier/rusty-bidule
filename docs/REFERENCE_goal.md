@@ -321,9 +321,11 @@ This is how bidule2 can continue polling a remote system after the original user
 
 ## Skills
 
-Skills use the Agent Skills `SKILL.md` format. Rusty Bidule scans the
-cross-client `.agents/skills/` convention at both user and project scope while
-keeping `skills/<name>/SKILL.md` as the bundled legacy repo location.
+Skills use the Agent Skills `SKILL.md` format. Rusty Bidule scans user-level
+cross-client skill directories and keeps `skills/<name>/SKILL.md` as the
+bundled legacy repo location. Project-level `.agents/.claude/.rusty-bidule`
+skill directories are skipped unless the project root is trusted or the skill
+policy is set to `always`.
 
 The skill repository supports three practical modes:
 
@@ -368,6 +370,8 @@ A `Tools:` block can define executable tools in three styles:
 The agent sees a compact skill catalog first. `local__activate_skill` loads the
 full `SKILL.md` body and resource listing when a skill matches the task, while
 `local__run_skill` remains the execution path for script-backed tools.
+Activated skill content is stored per conversation and restored after
+compaction.
 
 ### Script execution contract
 

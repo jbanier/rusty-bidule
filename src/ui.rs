@@ -2551,7 +2551,7 @@ mod tests {
     use crate::{
         config::{
             AppConfig, AzureOpenAiConfig, LlmProvider, LocalToolsConfig, McpRuntimeConfig,
-            McpServerConfig,
+            McpServerConfig, SkillsConfig,
         },
         orchestrator::Orchestrator,
         prompt_expansion::expand_prompt_file_references,
@@ -2581,6 +2581,7 @@ mod tests {
             azure_anthropic: None,
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
+            skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: mcp_servers
                 .iter()

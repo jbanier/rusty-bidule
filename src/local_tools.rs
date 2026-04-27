@@ -784,7 +784,10 @@ impl LocalToolExecutor {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("activate_skill: missing 'name'"))?;
 
-        registry.activate_skill(skill_name)
+        let activation = registry.activate_skill_record(skill_name)?;
+        self.store
+            .upsert_activated_skill(&self.conversation_id, activation.clone())?;
+        Ok(activation.content)
     }
 
     async fn run_skill_process(
@@ -1367,6 +1370,14 @@ Use `scripts/run.py`.
         assert!(output.contains("# Demo Skill"));
         assert!(output.contains("<file>scripts/run.py</file>"));
         assert!(!output.contains("description: Demo activation skill"));
+
+        let activated = executor
+            .store
+            .load_activated_skills(&conversation.conversation_id)
+            .unwrap();
+        assert_eq!(activated.len(), 1);
+        assert_eq!(activated[0].name, "demo");
+        assert!(activated[0].content_hash.len() >= 64);
     }
 
     #[tokio::test(flavor = "current_thread")]

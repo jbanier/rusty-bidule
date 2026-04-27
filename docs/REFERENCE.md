@@ -153,10 +153,10 @@ Permission checks are enforced before local tools run:
 
 Skills use the Agent Skills `SKILL.md` format: a skill is a directory with a
 required `SKILL.md`, optional `scripts/`, optional `references/`, and optional
-`assets/`. Discovery scans user-level locations first and project-level
-locations second, so project skills shadow user skills with the same `name`.
-Within each scope the cross-client `.agents/skills/` path has the highest
-precedence.
+`assets/`. Discovery scans user-level locations first, then bundled legacy
+`skills/`. Project-local interoperable skill directories are skipped by default
+unless the project root is trusted or `skills.project_skills` is set to
+`always`.
 
 Search order:
 
@@ -164,9 +164,22 @@ Search order:
 2. `~/.rusty-bidule/skills/`
 3. `~/.agents/skills/`
 4. `<project>/skills/` legacy bundled skills
-5. `<project>/.claude/skills/`
-6. `<project>/.rusty-bidule/skills/`
-7. `<project>/.agents/skills/`
+5. `<project>/.claude/skills/` when trusted
+6. `<project>/.rusty-bidule/skills/` when trusted
+7. `<project>/.agents/skills/` when trusted
+
+Skill trust config:
+
+```yaml
+skills:
+  project_skills: trusted_only # trusted_only | always | disabled
+  trusted_project_roots:
+    - /absolute/path/to/project
+```
+
+Activated skills are stored in `activated_skills.json` under the conversation
+directory and re-injected after context compaction so the loaded skill
+instructions remain available.
 
 Canonical skill shape:
 

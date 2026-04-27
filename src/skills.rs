@@ -5,9 +5,15 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
+use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
-use crate::{doc_sections::ParsedMarkdownDoc, types::FilesystemAccess};
+use crate::{
+    config::SkillsConfig,
+    doc_sections::ParsedMarkdownDoc,
+    types::{ActivatedSkill, FilesystemAccess},
+};
 
 #[derive(Debug, Clone)]
 pub struct SkillTool {
@@ -45,6 +51,7 @@ const MAX_LISTED_SKILL_RESOURCES: usize = 200;
 const MAX_SKILL_RESOURCE_DEPTH: usize = 6;
 
 impl SkillRegistry {
+    #[cfg(test)]
     pub fn load(skills_dir: &Path) -> Result<Self> {
         Self::load_from_search_dirs(&[SkillSearchDir {
             path: skills_dir.to_path_buf(),
@@ -52,8 +59,8 @@ impl SkillRegistry {
         }])
     }
 
-    pub fn load_all(project_root: &Path) -> Result<Self> {
-        Self::load_from_search_dirs(&default_skill_search_dirs(project_root))
+    pub fn load_all(project_root: &Path, config: &SkillsConfig) -> Result<Self> {
+        Self::load_from_search_dirs(&default_skill_search_dirs(project_root, config))
     }
 
     fn load_from_search_dirs(search_dirs: &[SkillSearchDir]) -> Result<Self> {
@@ -99,7 +106,12 @@ impl SkillRegistry {
         self.skills.iter().map(|skill| skill.name.clone()).collect()
     }
 
+    #[cfg(test)]
     pub fn activate_skill(&self, name: &str) -> Result<String> {
+        Ok(self.activate_skill_record(name)?.content)
+    }
+
+    pub fn activate_skill_record(&self, name: &str) -> Result<ActivatedSkill> {
         let skill = self
             .find_skill(name)
             .or_else(|| self.find_skill_fuzzy(name))
@@ -134,8 +146,21 @@ impl SkillRegistry {
             out.push_str("</skill_resources>\n");
         }
         out.push_str("</skill_content>");
-        Ok(out)
+        let content_hash = sha256_hex(&out);
+        Ok(ActivatedSkill {
+            name: skill.name.clone(),
+            skill_dir: skill.skill_dir.display().to_string(),
+            skill_md: skill.skill_md.display().to_string(),
+            content_hash,
+            activated_at: Utc::now(),
+            content: out,
+        })
     }
+}
+
+fn sha256_hex(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn load_skills_from_dir(skills_dir: &Path) -> Result<Vec<Skill>> {
@@ -182,7 +207,7 @@ fn load_skills_from_dir(skills_dir: &Path) -> Result<Vec<Skill>> {
     Ok(skills)
 }
 
-fn default_skill_search_dirs(project_root: &Path) -> Vec<SkillSearchDir> {
+fn default_skill_search_dirs(project_root: &Path, config: &SkillsConfig) -> Vec<SkillSearchDir> {
     let mut dirs = Vec::new();
     if let Some(home) = home_dir() {
         dirs.push(SkillSearchDir {
@@ -202,18 +227,26 @@ fn default_skill_search_dirs(project_root: &Path) -> Vec<SkillSearchDir> {
         path: project_root.join("skills"),
         label: "project-legacy",
     });
-    dirs.push(SkillSearchDir {
-        path: project_root.join(".claude").join("skills"),
-        label: "project-claude",
-    });
-    dirs.push(SkillSearchDir {
-        path: project_root.join(".rusty-bidule").join("skills"),
-        label: "project-native",
-    });
-    dirs.push(SkillSearchDir {
-        path: project_root.join(".agents").join("skills"),
-        label: "project-agents",
-    });
+    if config.allows_project_skill_dirs(project_root) {
+        dirs.push(SkillSearchDir {
+            path: project_root.join(".claude").join("skills"),
+            label: "project-claude",
+        });
+        dirs.push(SkillSearchDir {
+            path: project_root.join(".rusty-bidule").join("skills"),
+            label: "project-native",
+        });
+        dirs.push(SkillSearchDir {
+            path: project_root.join(".agents").join("skills"),
+            label: "project-agents",
+        });
+    } else {
+        debug!(
+            project_root = %project_root.display(),
+            policy = ?config.project_skills,
+            "project skill directories are not trusted; skipping project-level .agents/.claude/.rusty-bidule skills"
+        );
+    }
     dirs
 }
 
@@ -737,7 +770,10 @@ fn parse_filesystem_access(value: &str) -> Option<FilesystemAccess> {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use crate::types::FilesystemAccess;
+    use crate::{
+        config::{ProjectSkillsPolicy, SkillsConfig},
+        types::FilesystemAccess,
+    };
     use tempfile::tempdir;
 
     use super::{
@@ -981,6 +1017,67 @@ description: Project-level demo skill.
         let skill = registry.find_skill("demo").unwrap();
         assert_eq!(skill.description, "Project-level demo skill.");
         assert!(skill.skill_md.is_absolute());
+    }
+
+    #[test]
+    fn load_all_skips_project_skill_dirs_by_default() {
+        let dir = tempdir().unwrap();
+        let project_root = dir.path();
+        fs::create_dir_all(project_root.join("skills/legacy-demo")).unwrap();
+        fs::create_dir_all(project_root.join(".agents/skills/project-agent-demo")).unwrap();
+        fs::write(
+            project_root.join("skills/legacy-demo/SKILL.md"),
+            r#"---
+name: legacy-demo
+description: Bundled legacy skill.
+---
+
+# Legacy
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project_root.join(".agents/skills/project-agent-demo/SKILL.md"),
+            r#"---
+name: project-agent-demo
+description: Project Agent Skill.
+---
+
+# Project Agent
+"#,
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::load_all(project_root, &SkillsConfig::default()).unwrap();
+
+        assert!(registry.find_skill("legacy-demo").is_some());
+        assert!(registry.find_skill("project-agent-demo").is_none());
+    }
+
+    #[test]
+    fn load_all_includes_trusted_project_skill_dirs() {
+        let dir = tempdir().unwrap();
+        let project_root = dir.path();
+        fs::create_dir_all(project_root.join(".agents/skills/project-agent-demo")).unwrap();
+        fs::write(
+            project_root.join(".agents/skills/project-agent-demo/SKILL.md"),
+            r#"---
+name: project-agent-demo
+description: Project Agent Skill.
+---
+
+# Project Agent
+"#,
+        )
+        .unwrap();
+        let config = SkillsConfig {
+            project_skills: ProjectSkillsPolicy::TrustedOnly,
+            trusted_project_roots: vec![project_root.to_path_buf()],
+        };
+
+        let registry = SkillRegistry::load_all(project_root, &config).unwrap();
+
+        assert!(registry.find_skill("project-agent-demo").is_some());
     }
 
     #[test]

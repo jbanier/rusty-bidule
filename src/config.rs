@@ -21,11 +21,45 @@ pub struct AppConfig {
     #[serde(default)]
     pub local_tools: LocalToolsConfig,
     #[serde(default)]
+    pub skills: SkillsConfig,
+    #[serde(default)]
     pub mcp_runtime: McpRuntimeConfig,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub tracing: Option<TracingConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SkillsConfig {
+    #[serde(default)]
+    pub project_skills: ProjectSkillsPolicy,
+    #[serde(default)]
+    pub trusted_project_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSkillsPolicy {
+    #[default]
+    TrustedOnly,
+    Always,
+    Disabled,
+}
+
+impl SkillsConfig {
+    pub fn allows_project_skill_dirs(&self, project_root: &Path) -> bool {
+        match self.project_skills {
+            ProjectSkillsPolicy::Always => true,
+            ProjectSkillsPolicy::Disabled => false,
+            ProjectSkillsPolicy::TrustedOnly => {
+                let project_root = normalize_path_for_compare(project_root);
+                self.trusted_project_roots
+                    .iter()
+                    .any(|trusted| normalize_path_for_compare(trusted) == project_root)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -420,6 +454,10 @@ fn resolve_value(value: &str) -> Result<String> {
     }
 }
 
+fn normalize_path_for_compare(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn default_allowed_cli_tools() -> Vec<String> {
     ["nmap", "vt", "dig", "whois", "nslookup"]
         .into_iter()
@@ -479,13 +517,13 @@ const fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use tempfile::tempdir;
 
     use crate::types::FilesystemAccess;
 
-    use super::{AppConfig, AzureAnthropicConfig, LlmProvider};
+    use super::{AppConfig, AzureAnthropicConfig, LlmProvider, ProjectSkillsPolicy};
 
     #[test]
     fn resolves_env_backed_secrets() {
@@ -517,6 +555,10 @@ mcp_servers:
             Some("super-secret")
         );
         assert_eq!(config.local_tools.execution_timeout_seconds, 180);
+        assert_eq!(
+            config.skills.project_skills,
+            ProjectSkillsPolicy::TrustedOnly
+        );
     }
 
     #[test]
@@ -730,6 +772,49 @@ local_tools:
         let config = AppConfig::load(&path).unwrap();
         assert_eq!(config.local_tools.execution_timeout_seconds, 180);
         assert_eq!(config.local_tools.allowed_cli_tools, vec!["whois", "dig"]);
+    }
+
+    #[test]
+    fn parses_skill_trust_policy() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+skills:
+  project_skills: always
+  trusted_project_roots:
+    - /tmp/trusted-project
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+
+        assert_eq!(config.skills.project_skills, ProjectSkillsPolicy::Always);
+        assert_eq!(
+            config.skills.trusted_project_roots,
+            vec![PathBuf::from("/tmp/trusted-project")]
+        );
+        assert!(config.skills.allows_project_skill_dirs(dir.path()));
+    }
+
+    #[test]
+    fn trusted_only_skill_policy_requires_matching_project_root() {
+        let dir = tempdir().unwrap();
+        let other = tempdir().unwrap();
+        let config = super::SkillsConfig {
+            project_skills: ProjectSkillsPolicy::TrustedOnly,
+            trusted_project_roots: vec![dir.path().to_path_buf()],
+        };
+
+        assert!(config.allows_project_skill_dirs(dir.path()));
+        assert!(!config.allows_project_skill_dirs(other.path()));
     }
 
     #[test]

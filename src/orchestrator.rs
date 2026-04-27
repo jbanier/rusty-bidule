@@ -114,7 +114,7 @@ impl Orchestrator {
 
         // Load Agent Skills from project/user locations, including .agents/skills.
         let project_root = discover_project_root().unwrap_or_else(|| std::path::PathBuf::from("."));
-        let skills = match SkillRegistry::load_all(&project_root) {
+        let skills = match SkillRegistry::load_all(&project_root, &config.skills) {
             Ok(skills) => skills,
             Err(err) => {
                 warn!(
@@ -966,6 +966,9 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
         messages.push(LlmMessage::System(format!(
             "Previous conversation summary:\n{summary}"
         )));
+        if let Some(active_skills) = activated_skills_context(ctx.store, ctx.conversation_id) {
+            messages.push(LlmMessage::System(active_skills));
+        }
         // Only include the last 10 messages after compaction
         let tail: Vec<_> = ctx.history.iter().rev().take(10).collect();
         for msg in tail.into_iter().rev() {
@@ -982,6 +985,26 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
         messages.push(LlmMessage::UserText(user_message.to_string()));
     }
     messages
+}
+
+fn activated_skills_context(store: &ConversationStore, conversation_id: &str) -> Option<String> {
+    let activated = store.load_activated_skills(conversation_id).ok()?;
+    if activated.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from(
+        "Activated skill instructions preserved across compaction. These skills remain active for this conversation:\n\n",
+    );
+    for skill in activated {
+        out.push_str(&format!(
+            "## Activated Skill: {} (sha256:{})\n\n",
+            skill.name, skill.content_hash
+        ));
+        out.push_str(skill.content.trim());
+        out.push_str("\n\n");
+    }
+    Some(out.trim().to_string())
 }
 
 fn stored_message_to_llm_message(message: &crate::types::Message) -> LlmMessage {
@@ -1311,7 +1334,7 @@ mod tests {
         conversation_store::ConversationStore,
         llm::{LlmAssistantBlock, LlmMessage, LlmTool},
         mcp_runtime::McpTool,
-        types::AgentPermissions,
+        types::{ActivatedSkill, AgentPermissions},
     };
 
     use super::{
@@ -1514,6 +1537,56 @@ mod tests {
         assert!(system_prompt.contains("`csirt-mcp` (2 advertised)"));
         assert!(system_prompt.contains("Active agent permissions"));
         assert!(system_prompt.contains("Recipes provide prompt guidance and configuration"));
+    }
+
+    #[test]
+    fn build_messages_reinjects_activated_skills_after_compaction() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        store
+            .upsert_activated_skill(
+                &conversation.conversation_id,
+                ActivatedSkill {
+                    name: "demo".to_string(),
+                    skill_dir: "/tmp/demo".to_string(),
+                    skill_md: "/tmp/demo/SKILL.md".to_string(),
+                    content_hash: "abc123".to_string(),
+                    activated_at: chrono::Utc::now(),
+                    content: "<skill_content name=\"demo\">\n# Demo\n</skill_content>".to_string(),
+                },
+            )
+            .unwrap();
+        store
+            .save_compaction(
+                &conversation.conversation_id,
+                "checkpoint-1",
+                "Compacted history.",
+            )
+            .unwrap();
+        let permissions = AgentPermissions::default();
+
+        let messages = build_messages(MessageBuildContext {
+            prompt: None,
+            history: &[],
+            mcp_error: None,
+            recipe_instructions: None,
+            capability_summary: None,
+            mcp_capability_summary: None,
+            agent_permissions: &permissions,
+            store: &store,
+            conversation_id: &conversation.conversation_id,
+            user_message_override: None,
+        });
+
+        assert!(messages.iter().any(|message| {
+            matches!(
+                message,
+                LlmMessage::System(text)
+                    if text.contains("Activated skill instructions preserved across compaction")
+                        && text.contains("<skill_content name=\"demo\">")
+            )
+        }));
     }
 
     #[test]

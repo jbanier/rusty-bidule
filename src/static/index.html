@@ -714,6 +714,16 @@
       temperature: 0,
       top_p: 1,
       max_output_tokens: 4096,
+      max_advertised_tools: 128,
+    };
+    draft.openai_compatible = draft.openai_compatible || {
+      api_key: '',
+      base_url: '',
+      model: '',
+      temperature: 0,
+      top_p: 1,
+      max_output_tokens: 4096,
+      max_advertised_tools: 128,
     };
     draft.tracing = draft.tracing || {
       provider: 'none',
@@ -788,6 +798,15 @@
       <section class="config-section">
         <h4>Agent</h4>
         <div class="config-grid">
+          <label class="config-field">
+            <span>LLM Provider</span>
+            <select data-config-path="llm_provider">
+              <option value="" ${!config.llm_provider ? 'selected' : ''}>auto</option>
+              <option value="azure_openai" ${config.llm_provider === 'azure_openai' ? 'selected' : ''}>azure_openai</option>
+              <option value="azure_anthropic" ${config.llm_provider === 'azure_anthropic' ? 'selected' : ''}>azure_anthropic</option>
+              <option value="openai_compatible" ${config.llm_provider === 'openai_compatible' ? 'selected' : ''}>openai_compatible</option>
+            </select>
+          </label>
           <label class="config-field"><span>Max Turns</span><input type="number" min="1" max="100" step="1" data-config-path="agent.max_turns" value="${escapeAttribute(String(config.agent.max_turns ?? 20))}" /></label>
         </div>
       </section>
@@ -801,6 +820,19 @@
           <label class="config-field"><span>Temperature</span><input type="number" min="0" max="2" step="0.1" data-config-path="azure_openai.temperature" value="${escapeAttribute(String(config.azure_openai.temperature ?? 0))}" /></label>
           <label class="config-field"><span>Top P</span><input type="number" min="0" max="1" step="0.1" data-config-path="azure_openai.top_p" value="${escapeAttribute(String(config.azure_openai.top_p ?? 1))}" /></label>
           <label class="config-field"><span>Max Output Tokens</span><input type="number" min="64" step="1" data-config-path="azure_openai.max_output_tokens" value="${escapeAttribute(String(config.azure_openai.max_output_tokens ?? 4096))}" /></label>
+          <label class="config-field"><span>Max Tools</span><input type="number" min="0" step="1" data-config-path="azure_openai.max_advertised_tools" value="${escapeAttribute(String(config.azure_openai.max_advertised_tools ?? 128))}" /></label>
+        </div>
+      </section>
+      <section class="config-section">
+        <h4>OpenAI-Compatible</h4>
+        <div class="config-grid">
+          <label class="config-field"><span>API Key</span><input type="password" data-config-path="openai_compatible.api_key" value="${escapeAttribute(config.openai_compatible.api_key || '')}" /></label>
+          <label class="config-field"><span>Base URL</span><input type="url" data-config-path="openai_compatible.base_url" value="${escapeAttribute(config.openai_compatible.base_url || '')}" /></label>
+          <label class="config-field"><span>Model</span><input type="text" data-config-path="openai_compatible.model" value="${escapeAttribute(config.openai_compatible.model || '')}" /></label>
+          <label class="config-field"><span>Temperature</span><input type="number" min="0" max="2" step="0.1" data-config-path="openai_compatible.temperature" value="${escapeAttribute(String(config.openai_compatible.temperature ?? 0))}" /></label>
+          <label class="config-field"><span>Top P</span><input type="number" min="0" max="1" step="0.1" data-config-path="openai_compatible.top_p" value="${escapeAttribute(String(config.openai_compatible.top_p ?? 1))}" /></label>
+          <label class="config-field"><span>Max Output Tokens</span><input type="number" min="64" step="1" data-config-path="openai_compatible.max_output_tokens" value="${escapeAttribute(String(config.openai_compatible.max_output_tokens ?? 4096))}" /></label>
+          <label class="config-field"><span>Max Tools</span><input type="number" min="0" step="1" data-config-path="openai_compatible.max_advertised_tools" value="${escapeAttribute(String(config.openai_compatible.max_advertised_tools ?? 128))}" /></label>
         </div>
       </section>
       <section class="config-section">
@@ -1017,10 +1049,24 @@
   function prepareConfigForSave() {
     const draft = cloneData(state.configDraft || {});
     delete draft.agent;
+    if (!String(draft.llm_provider || '').trim()) {
+      delete draft.llm_provider;
+    }
     if (draft.azure_openai) {
       const required = ['api_key', 'api_version', 'endpoint', 'deployment'];
       const isBlank = required.every((key) => !String(draft.azure_openai[key] || '').trim());
       if (isBlank) draft.azure_openai = null;
+    }
+    if (draft.openai_compatible) {
+      const required = ['base_url', 'model'];
+      const isBlank =
+        required.every((key) => !String(draft.openai_compatible[key] || '').trim()) &&
+        !String(draft.openai_compatible.api_key || '').trim();
+      if (isBlank) {
+        draft.openai_compatible = null;
+      } else if (!String(draft.openai_compatible.api_key || '').trim()) {
+        delete draft.openai_compatible.api_key;
+      }
     }
     if (Array.isArray(draft.mcp_servers)) {
       draft.mcp_servers = draft.mcp_servers.map((server) => {

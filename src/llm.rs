@@ -11,7 +11,9 @@ use reqwest::{
 use serde_json::{Value, json};
 use tracing::{debug, error, warn};
 
-use crate::config::{AppConfig, AzureAnthropicConfig, AzureOpenAiConfig, LlmProvider};
+use crate::config::{
+    AppConfig, AzureAnthropicConfig, AzureOpenAiConfig, LlmProvider, OpenAiCompatibleConfig,
+};
 
 #[derive(Debug, Clone)]
 pub struct LlmTool {
@@ -67,6 +69,7 @@ pub struct LlmClient {
     selected_provider: Option<LlmProvider>,
     azure_openai: Option<AzureOpenAiClient>,
     azure_anthropic: Option<AzureAnthropicClient>,
+    openai_compatible: Option<OpenAiCompatibleClient>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +94,18 @@ struct AzureAnthropicClient {
     max_output_tokens: u32,
 }
 
+#[derive(Debug, Clone)]
+struct OpenAiCompatibleClient {
+    client: HttpClient,
+    base_url: String,
+    chat_url: String,
+    model: String,
+    api_key: Option<String>,
+    temperature: f32,
+    top_p: f32,
+    max_output_tokens: u32,
+}
+
 impl LlmClient {
     pub fn new(config: &AppConfig) -> Result<Self> {
         Ok(Self {
@@ -101,6 +116,11 @@ impl LlmClient {
                 .as_ref()
                 .map(AzureAnthropicClient::new)
                 .transpose()?,
+            openai_compatible: config
+                .openai_compatible
+                .as_ref()
+                .map(OpenAiCompatibleClient::new)
+                .transpose()?,
         })
     }
 
@@ -108,6 +128,7 @@ impl LlmClient {
         match self.selected_provider {
             Some(LlmProvider::AzureOpenAi) => "Azure OpenAI",
             Some(LlmProvider::AzureAnthropic) => "Azure Anthropic",
+            Some(LlmProvider::OpenAiCompatible) => "OpenAI-compatible",
             None => "LLM",
         }
     }
@@ -134,8 +155,16 @@ impl LlmClient {
                 };
                 client.chat_completion(messages, tools).await
             }
+            Some(LlmProvider::OpenAiCompatible) => {
+                let Some(client) = &self.openai_compatible else {
+                    return Err(anyhow!(
+                        "OpenAI-compatible is selected but not configured. Add an openai_compatible block to enable inference."
+                    ));
+                };
+                client.chat_completion(messages, tools).await
+            }
             None => Err(anyhow!(
-                "No LLM provider is configured. Add an azure_openai or azure_anthropic block to enable inference."
+                "No LLM provider is configured. Add an azure_openai, azure_anthropic, or openai_compatible block to enable inference."
             )),
         }
     }
@@ -378,6 +407,121 @@ impl AzureAnthropicClient {
     }
 }
 
+impl OpenAiCompatibleClient {
+    fn new(config: &OpenAiCompatibleConfig) -> Result<Self> {
+        let base_url = config.base_url.trim_end_matches('/').to_string();
+        let chat_url = openai_compatible_chat_url(&base_url);
+        let api_key = config
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|api_key| !api_key.is_empty())
+            .map(str::to_string);
+        let client = HttpClient::builder().build()?;
+
+        Ok(Self {
+            client,
+            base_url,
+            chat_url,
+            model: config.model.clone(),
+            api_key,
+            temperature: config.temperature,
+            top_p: config.top_p,
+            max_output_tokens: config.max_output_tokens,
+        })
+    }
+
+    async fn chat_completion(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[LlmTool],
+    ) -> Result<LlmCompletion> {
+        let body = build_openai_compatible_chat_request_body(
+            messages,
+            tools,
+            &self.model,
+            self.temperature,
+            self.top_p,
+            self.max_output_tokens,
+        );
+
+        debug!(
+            base_url = %self.base_url,
+            chat_url = %self.chat_url,
+            model = %self.model,
+            message_count = messages.len(),
+            tool_count = tools.len(),
+            "sending OpenAI-compatible chat completion request"
+        );
+
+        let mut request = self.client.post(&self.chat_url).json(&body);
+        if let Some(api_key) = &self.api_key {
+            request = request.bearer_auth(api_key);
+        }
+
+        let response = request.send().await.map_err(|err| {
+            error!(
+                base_url = %self.base_url,
+                chat_url = %self.chat_url,
+                model = %self.model,
+                error = %err,
+                "failed to reach OpenAI-compatible endpoint"
+            );
+            anyhow!("failed to reach OpenAI-compatible endpoint: {err}")
+        })?;
+
+        let status = response.status();
+        let payload = response.text().await.map_err(|err| {
+            error!(
+                base_url = %self.base_url,
+                chat_url = %self.chat_url,
+                model = %self.model,
+                error = %err,
+                "failed to read OpenAI-compatible response body"
+            );
+            anyhow!("failed to read OpenAI-compatible response body: {err}")
+        })?;
+
+        if !status.is_success() {
+            error!(
+                base_url = %self.base_url,
+                chat_url = %self.chat_url,
+                model = %self.model,
+                status = %status,
+                response_body = %truncate_for_log(&payload),
+                "OpenAI-compatible request failed"
+            );
+            return Err(anyhow!(
+                "OpenAI-compatible request failed with status {}: {}",
+                status,
+                truncate_for_log(&payload)
+            ));
+        }
+
+        let payload: Value = serde_json::from_str(&payload).map_err(|err| {
+            error!(
+                base_url = %self.base_url,
+                chat_url = %self.chat_url,
+                model = %self.model,
+                error = %err,
+                "failed to deserialize OpenAI-compatible response"
+            );
+            anyhow!("failed to deserialize OpenAI-compatible response: {err}")
+        })?;
+
+        parse_openai_chat_completion_payload(&payload)
+    }
+}
+
+fn openai_compatible_chat_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/chat/completions") {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/chat/completions")
+    }
+}
+
 fn build_openai_chat_request_body(
     messages: &[LlmMessage],
     tools: &[LlmTool],
@@ -410,6 +554,20 @@ fn build_openai_chat_request_body(
         );
         body["tool_choice"] = Value::String("auto".to_string());
     }
+    body
+}
+
+fn build_openai_compatible_chat_request_body(
+    messages: &[LlmMessage],
+    tools: &[LlmTool],
+    model: &str,
+    temperature: f32,
+    top_p: f32,
+    max_output_tokens: u32,
+) -> Value {
+    let mut body =
+        build_openai_chat_request_body(messages, tools, temperature, top_p, max_output_tokens);
+    body["model"] = Value::String(model.to_string());
     body
 }
 
@@ -480,12 +638,17 @@ fn assistant_blocks_to_openai_tool_calls(blocks: &[LlmAssistantBlock]) -> Vec<Va
 }
 
 fn parse_openai_chat_completion_payload(payload: &Value) -> Result<LlmCompletion> {
+    let choice = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| anyhow!("OpenAI-compatible response did not include a choice"))?;
     let message = payload
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
-        .ok_or_else(|| anyhow!("Azure OpenAI response did not include a choice message"))?;
+        .ok_or_else(|| anyhow!("OpenAI-compatible response did not include a choice message"))?;
 
     let mut assistant_blocks = Vec::new();
     if let Some(text) = message.get("content").and_then(content_to_string)
@@ -518,17 +681,28 @@ fn parse_openai_chat_completion_payload(payload: &Value) -> Result<LlmCompletion
         }
     }
 
+    let stop_reason = if assistant_blocks
+        .iter()
+        .any(|block| matches!(block, LlmAssistantBlock::ToolUse { .. }))
+    {
+        LlmStopReason::ToolUse
+    } else {
+        parse_openai_finish_reason(choice.get("finish_reason"))
+    };
+
     Ok(LlmCompletion {
-        stop_reason: if assistant_blocks
-            .iter()
-            .any(|block| matches!(block, LlmAssistantBlock::ToolUse { .. }))
-        {
-            LlmStopReason::ToolUse
-        } else {
-            LlmStopReason::EndTurn
-        },
+        stop_reason,
         assistant_blocks,
     })
+}
+
+fn parse_openai_finish_reason(finish_reason: Option<&Value>) -> LlmStopReason {
+    match finish_reason.and_then(Value::as_str) {
+        Some("stop") | None => LlmStopReason::EndTurn,
+        Some("tool_calls") | Some("function_call") => LlmStopReason::ToolUse,
+        Some("length") => LlmStopReason::MaxTokens,
+        Some(other) => LlmStopReason::Unknown(other.to_string()),
+    }
 }
 
 fn build_anthropic_chat_request_body(
@@ -804,14 +978,53 @@ fn json_value_len(value: &Value) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::sync::Arc;
+
+    use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+    use serde_json::{Value, json};
+    use tokio::{net::TcpListener, sync::Mutex};
+
+    use crate::config::OpenAiCompatibleConfig;
 
     use super::{
         LlmAssistantBlock, LlmMessage, LlmStopReason, LlmTool, LlmToolResult,
-        build_anthropic_chat_request_body, build_openai_chat_request_body,
+        OpenAiCompatibleClient, build_anthropic_chat_request_body, build_openai_chat_request_body,
+        build_openai_compatible_chat_request_body, openai_compatible_chat_url,
         parse_anthropic_chat_completion_payload, parse_openai_chat_completion_payload,
         truncate_for_log,
     };
+
+    #[derive(Debug, Clone)]
+    struct CapturedOpenAiRequest {
+        authorization: Option<String>,
+        body: Value,
+    }
+
+    type CapturedOpenAiState = Arc<Mutex<Option<CapturedOpenAiRequest>>>;
+
+    async fn capture_openai_request(
+        State(state): State<CapturedOpenAiState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let authorization = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        *state.lock().await = Some(CapturedOpenAiRequest {
+            authorization,
+            body,
+        });
+
+        Json(json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "done"
+                }
+            }]
+        }))
+    }
 
     #[test]
     fn truncates_long_bodies_for_logs() {
@@ -845,6 +1058,82 @@ mod tests {
     }
 
     #[test]
+    fn builds_openai_compatible_request_with_model() {
+        let body = build_openai_compatible_chat_request_body(
+            &[LlmMessage::UserText("hello".to_string())],
+            &[],
+            "openrouter/anthropic/claude-sonnet",
+            0.2,
+            1.0,
+            1200,
+        );
+
+        assert_eq!(body["model"], json!("openrouter/anthropic/claude-sonnet"));
+        assert_eq!(body["messages"][0]["role"], json!("user"));
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn builds_openai_compatible_chat_url() {
+        assert_eq!(
+            openai_compatible_chat_url("http://127.0.0.1:4000/v1/"),
+            "http://127.0.0.1:4000/v1/chat/completions"
+        );
+        assert_eq!(
+            openai_compatible_chat_url("http://127.0.0.1:4000/v1/chat/completions"),
+            "http://127.0.0.1:4000/v1/chat/completions"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_client_posts_chat_completion_request() {
+        let captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route("/v1/chat/completions", post(capture_openai_request))
+            .with_state(captured.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = OpenAiCompatibleClient::new(&OpenAiCompatibleConfig {
+            api_key: Some("test-key".to_string()),
+            base_url: format!("http://{addr}/v1"),
+            model: "test-model".to_string(),
+            temperature: 0.2,
+            top_p: 1.0,
+            max_output_tokens: 1200,
+            max_advertised_tools: 128,
+        })
+        .unwrap();
+
+        let completion = client
+            .chat_completion(
+                &[LlmMessage::UserText("hello".to_string())],
+                &[LlmTool {
+                    name: "demo".to_string(),
+                    description: "Demo tool".to_string(),
+                    parameters: json!({"type": "object"}),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let request = captured.lock().await.clone().unwrap();
+        assert_eq!(request.authorization.as_deref(), Some("Bearer test-key"));
+        assert_eq!(request.body["model"], json!("test-model"));
+        assert_eq!(request.body["tool_choice"], json!("auto"));
+        assert_eq!(request.body["tools"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            completion.assistant_blocks,
+            vec![LlmAssistantBlock::Text {
+                text: "done".to_string()
+            }]
+        );
+    }
+
+    #[test]
     fn parses_openai_chat_completion_payload() {
         let payload = json!({
             "choices": [{
@@ -865,6 +1154,22 @@ mod tests {
 
         assert_eq!(completion.stop_reason, LlmStopReason::ToolUse);
         assert_eq!(completion.assistant_blocks.len(), 2);
+    }
+
+    #[test]
+    fn parses_openai_length_finish_reason() {
+        let payload = json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "partial"
+                }
+            }]
+        });
+
+        let completion = parse_openai_chat_completion_payload(&payload).unwrap();
+
+        assert_eq!(completion.stop_reason, LlmStopReason::MaxTokens);
     }
 
     #[test]

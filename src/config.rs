@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::AgentPermissions;
 
+pub const DEFAULT_MAX_ADVERTISED_TOOLS: usize = 128;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub prompt: Option<String>,
@@ -16,6 +18,7 @@ pub struct AppConfig {
     pub llm_provider: Option<LlmProvider>,
     pub azure_openai: Option<AzureOpenAiConfig>,
     pub azure_anthropic: Option<AzureAnthropicConfig>,
+    pub openai_compatible: Option<OpenAiCompatibleConfig>,
     #[serde(default)]
     pub agent_permissions: AgentPermissions,
     #[serde(default)]
@@ -91,6 +94,8 @@ pub struct AzureOpenAiConfig {
     pub top_p: f32,
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u32,
+    #[serde(default = "default_max_advertised_tools")]
+    pub max_advertised_tools: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -108,13 +113,35 @@ pub struct AzureAnthropicConfig {
     pub top_p: Option<f32>,
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u32,
+    #[serde(default = "default_max_advertised_tools")]
+    pub max_advertised_tools: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenAiCompatibleConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub model: String,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+    #[serde(default = "default_max_advertised_tools")]
+    pub max_advertised_tools: usize,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProvider {
+    #[serde(rename = "azure_openai", alias = "azure_open_ai")]
     AzureOpenAi,
+    #[serde(rename = "azure_anthropic")]
     AzureAnthropic,
+    #[serde(rename = "openai_compatible", alias = "open_ai_compatible")]
+    OpenAiCompatible,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -226,6 +253,14 @@ impl AppConfig {
             azure_anthropic.api_key = resolve_value(&azure_anthropic.api_key)?;
             azure_anthropic.endpoint = resolve_value(&azure_anthropic.endpoint)?;
         }
+        if let Some(openai_compatible) = &mut self.openai_compatible {
+            if let Some(api_key) = &mut openai_compatible.api_key
+                && !api_key.trim().is_empty()
+            {
+                *api_key = resolve_value(api_key)?;
+            }
+            openai_compatible.base_url = resolve_value(&openai_compatible.base_url)?;
+        }
         for server in &mut self.mcp_servers {
             server.url = resolve_value(&server.url)?;
             if let Some(command) = &mut server.command {
@@ -274,6 +309,7 @@ impl AppConfig {
     fn validate(&self) -> Result<()> {
         validate_azure_openai_config("azure_openai", self.azure_openai.as_ref())?;
         validate_azure_anthropic_config("azure_anthropic", self.azure_anthropic.as_ref())?;
+        validate_openai_compatible_config("openai_compatible", self.openai_compatible.as_ref())?;
 
         match self.effective_llm_provider() {
             Some(LlmProvider::AzureOpenAi) if self.azure_openai.is_none() => {
@@ -281,6 +317,11 @@ impl AppConfig {
             }
             Some(LlmProvider::AzureAnthropic) if self.azure_anthropic.is_none() => {
                 bail!("llm_provider selects azure_anthropic but azure_anthropic is not configured");
+            }
+            Some(LlmProvider::OpenAiCompatible) if self.openai_compatible.is_none() => {
+                bail!(
+                    "llm_provider selects openai_compatible but openai_compatible is not configured"
+                );
             }
             _ => {}
         }
@@ -351,7 +392,29 @@ impl AppConfig {
         if self.azure_anthropic.is_some() {
             return Some(LlmProvider::AzureAnthropic);
         }
+        if self.openai_compatible.is_some() {
+            return Some(LlmProvider::OpenAiCompatible);
+        }
         None
+    }
+
+    pub fn effective_max_advertised_tools(&self) -> usize {
+        match self.effective_llm_provider() {
+            Some(LlmProvider::AzureOpenAi) => self
+                .azure_openai
+                .as_ref()
+                .map(|config| config.max_advertised_tools),
+            Some(LlmProvider::AzureAnthropic) => self
+                .azure_anthropic
+                .as_ref()
+                .map(|config| config.max_advertised_tools),
+            Some(LlmProvider::OpenAiCompatible) => self
+                .openai_compatible
+                .as_ref()
+                .map(|config| config.max_advertised_tools),
+            None => None,
+        }
+        .unwrap_or(DEFAULT_MAX_ADVERTISED_TOOLS)
     }
 }
 
@@ -399,6 +462,22 @@ fn validate_azure_anthropic_config(
                 "{label}.anthropic_version must look like an Anthropic API version such as 2023-06-01"
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_openai_compatible_config(
+    label: &str,
+    config: Option<&OpenAiCompatibleConfig>,
+) -> Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    if config.base_url.trim().is_empty() {
+        bail!("{label}.base_url must not be empty");
+    }
+    if config.model.trim().is_empty() {
+        bail!("{label}.model must not be empty");
     }
     Ok(())
 }
@@ -475,6 +554,10 @@ const fn default_top_p() -> f32 {
 
 const fn default_max_output_tokens() -> u32 {
     1200
+}
+
+const fn default_max_advertised_tools() -> usize {
+    DEFAULT_MAX_ADVERTISED_TOOLS
 }
 
 fn default_anthropic_version() -> String {
@@ -555,6 +638,7 @@ mcp_servers:
             Some("super-secret")
         );
         assert_eq!(config.local_tools.execution_timeout_seconds, 180);
+        assert_eq!(config.effective_max_advertised_tools(), 128);
         assert_eq!(
             config.skills.project_skills,
             ProjectSkillsPolicy::TrustedOnly
@@ -603,6 +687,40 @@ azure_anthropic:
     }
 
     #[test]
+    fn resolves_env_backed_openai_compatible_secret() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        unsafe {
+            std::env::set_var("TEST_OAI_COMPAT_KEY", "proxy-secret");
+        }
+        fs::write(
+            &path,
+            r#"
+openai_compatible:
+  api_key: env:TEST_OAI_COMPAT_KEY
+  base_url: http://127.0.0.1:4000/v1
+  model: gpt-5
+  max_advertised_tools: 64
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            config
+                .openai_compatible
+                .as_ref()
+                .and_then(|cfg| cfg.api_key.as_deref()),
+            Some("proxy-secret")
+        );
+        assert_eq!(
+            config.effective_llm_provider(),
+            Some(LlmProvider::OpenAiCompatible)
+        );
+        assert_eq!(config.effective_max_advertised_tools(), 64);
+    }
+
+    #[test]
     fn prefers_explicit_anthropic_version_when_set() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -626,6 +744,30 @@ azure_anthropic:
                 .map(AzureAnthropicConfig::effective_anthropic_version)
                 .as_deref(),
             Some("2023-01-01")
+        );
+    }
+
+    #[test]
+    fn parses_llm_provider_azure_openai_without_extra_underscore() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+llm_provider: azure_openai
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            config.effective_llm_provider(),
+            Some(LlmProvider::AzureOpenAi)
         );
     }
 
@@ -658,6 +800,27 @@ azure_anthropic:
     }
 
     #[test]
+    fn defaults_to_openai_compatible_when_it_is_the_only_configured_provider() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+openai_compatible:
+  base_url: http://127.0.0.1:4000/v1
+  model: gpt-5
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            config.effective_llm_provider(),
+            Some(LlmProvider::OpenAiCompatible)
+        );
+    }
+
+    #[test]
     fn rejects_missing_selected_provider_block() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -677,6 +840,29 @@ azure_openai:
         let err = AppConfig::load(&path).unwrap_err();
         assert!(format!("{err:#}").contains(
             "llm_provider selects azure_anthropic but azure_anthropic is not configured"
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_selected_openai_compatible_block() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+llm_provider: openai_compatible
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+"#,
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+        assert!(format!("{err:#}").contains(
+            "llm_provider selects openai_compatible but openai_compatible is not configured"
         ));
     }
 

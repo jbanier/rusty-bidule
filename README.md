@@ -1,8 +1,8 @@
 # rusty-bidule
 
 `rusty-bidule` is a prototype Rust client for investigation workflows. It pairs
-Azure-hosted LLM reasoning with MCP tools, optional local skill scripts,
-persistent conversation state, and both terminal and browser interfaces.
+LLM reasoning with MCP tools, optional local skill scripts, persistent
+conversation state, and both terminal and browser interfaces.
 
 The project is aimed at operators who want a tool-grounded assistant rather than
 an open-ended chat shell.
@@ -11,7 +11,8 @@ an open-ended chat shell.
 
 - Runs interactive conversations in a Ratatui terminal UI
 - Exposes a lightweight web UI and REST API
-- Calls Azure OpenAI or Azure Anthropic chat completions for reasoning
+- Calls Azure OpenAI, Azure Anthropic, or OpenAI-compatible chat completions
+  for reasoning
 - Discovers and invokes MCP tools from configured servers
 - Executes selected local skill scripts through `local__run_skill`
 - Executes configured allowlisted local CLI tools through `local__exec_cli`
@@ -24,7 +25,7 @@ This repository is intentionally still a working prototype.
 
 - Interfaces and config shape may evolve
 - Operational hardening is incomplete
-- Azure + MCP is the primary path that gets attention
+- MCP-backed investigation workflows are the primary path that gets attention
 - Some provider or schema mismatches are normalized pragmatically rather than
   handled as full protocol parity
 
@@ -33,7 +34,7 @@ Treat it as an operator tool under active iteration, not a finished platform.
 ## Requirements
 
 - Rust toolchain with Cargo
-- Network access to your configured Azure LLM endpoint
+- Network access to your configured LLM endpoint
 - Zero or more reachable MCP servers if you want MCP-backed tools
 - A local browser if you use OAuth-enabled MCP servers
 
@@ -49,10 +50,12 @@ Treat it as an operator tool under active iteration, not a finished platform.
 
    ```bash
    export AZURE_OPENAI_API_KEY='your-key-here'
+   # or, for LiteLLM/OpenAI-compatible gateways:
+   export LITELLM_PROXY_API_KEY='your-key-here'
    ```
 
-3. Edit `config/config.local.yaml` with your selected provider block,
-   endpoint, deployment, and any MCP server settings.
+3. Edit `config/config.local.yaml` with your selected provider block, endpoint,
+   model/deployment, and any MCP server settings.
 
 4. Launch the terminal UI:
 
@@ -148,6 +151,7 @@ azure_openai:
   api_version: 2025-03-01-preview
   endpoint: https://example.cognitiveservices.azure.com/
   deployment: gpt-4.1
+  max_advertised_tools: 128
 
 mcp_servers: []
 ```
@@ -161,8 +165,8 @@ llm_provider: azure_openai
 ```
 
 If `llm_provider` is omitted, the app defaults to `azure_openai` when that
-block is present; otherwise it falls back to `azure_anthropic` when only that
-block is configured.
+block is present, then `azure_anthropic`, then `openai_compatible` when that is
+the only configured provider.
 
 ### Azure OpenAI
 
@@ -175,6 +179,7 @@ azure_openai:
   temperature: 0.2
   top_p: 1.0
   max_output_tokens: 1200
+  max_advertised_tools: 128
 ```
 
 ### Azure Anthropic
@@ -187,17 +192,47 @@ azure_anthropic:
   deployment: claude-opus-4-6
   temperature: 0.2
   max_output_tokens: 1200
+  max_advertised_tools: 128
 ```
 
 Values prefixed with `env:` are resolved from environment variables at startup.
-That resolution is supported for both LLM providers, MCP URLs, MCP header
-values, and OAuth client settings.
+That resolution is supported for LLM providers, MCP URLs, MCP header values,
+and OAuth client settings.
 
 `azure_anthropic` uses Anthropic's version header, not Azure OpenAI preview API
 versions. If you omit `anthropic_version`, the client defaults to `2023-06-01`.
 For Anthropic requests, set either `temperature` or `top_p`, not both. The
 default path uses `temperature`; if you set a non-default `top_p`, it replaces
 `temperature` in the outgoing request.
+
+### OpenAI-Compatible
+
+Use `openai_compatible` for LiteLLM Proxy, OpenRouter, Vercel AI Gateway,
+Ollama/vLLM, or another gateway that accepts OpenAI Chat Completions requests:
+
+```yaml
+llm_provider: openai_compatible
+
+openai_compatible:
+  api_key: env:LITELLM_PROXY_API_KEY
+  base_url: http://127.0.0.1:4000/v1
+  model: gpt-5
+  temperature: 0.2
+  top_p: 1.0
+  max_output_tokens: 1200
+  max_advertised_tools: 128
+```
+
+The client sends requests to `{base_url}/chat/completions`. Include `/v1` in
+`base_url` when your gateway exposes OpenAI-style `/v1` routes. Omit `api_key`
+or leave it blank for local endpoints that do not require bearer auth.
+
+`max_advertised_tools` controls the maximum number of local and MCP tools sent
+to the active model in a turn. When discovery finds more tools than this budget,
+the agent pins critical local controls first, then ranks the remaining local and
+MCP tools by relevance to the current prompt, recent history, and active recipe.
+Tune it downward for providers with smaller function/tool limits, or upward for
+gateways/models that accept larger tool inventories.
 
 ### Agent Permissions
 
@@ -444,8 +479,8 @@ cargo test
 
 - This is not yet a hardened production client
 - MCP filtering and permission checks are application-level controls
-- Azure tool advertising is truncated when inventories exceed provider limits
-- Some MCP schemas need normalization for Azure compatibility
+- Tool advertising is truncated when inventories exceed `max_advertised_tools`
+- Some MCP schemas need normalization for provider tool compatibility
 - The browser UI is intentionally lightweight compared to the TUI
 
 ## More Detail

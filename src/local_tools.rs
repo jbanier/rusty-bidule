@@ -1972,7 +1972,7 @@ pub fn local_tool_definitions(
         },
         LlmTool {
             name: "local__configure_mcp_servers".to_string(),
-            description: "Update the conversation-scoped MCP server selection for subsequent turns. Requires filesystem write permission.".to_string(),
+            description: "Update the conversation-scoped MCP server selection for subsequent turns. Use this to focus tool discovery when the MCP inventory exceeds the current tool budget. Requires filesystem write permission.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

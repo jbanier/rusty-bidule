@@ -28,7 +28,6 @@ use crate::{
 };
 
 const MAX_AGENT_ITERATIONS: usize = 10;
-const MAX_AZURE_TOOL_COUNT: usize = 128;
 const PINNED_LOCAL_TOOL_NAMES: &[&str] = &[
     "local__configure_mcp_servers",
     "local__activate_skill",
@@ -379,11 +378,16 @@ impl Orchestrator {
         );
         let tool_selection_query =
             build_tool_selection_query(user_message.as_deref(), &history, recipe.as_ref());
-        let (llm_tools, omitted_tool_count) =
-            build_ranked_azure_tools_with_local(&local_defs, &mcp_tools, &tool_selection_query);
+        let max_advertised_tools = self.inner.config.effective_max_advertised_tools();
+        let (llm_tools, omitted_tool_count) = build_ranked_llm_tools_with_local(
+            &local_defs,
+            &mcp_tools,
+            &tool_selection_query,
+            max_advertised_tools,
+        );
         let advertised_mcp_tools = advertised_mcp_tools(&llm_tools, &mcp_tools);
         let mcp_capability_summary =
-            summarize_advertised_mcp_tools(&advertised_mcp_tools, mcp_tools.len());
+            summarize_advertised_mcp_tools(&advertised_mcp_tools, &mcp_tools);
 
         if omitted_tool_count > 0 {
             warn!(
@@ -391,15 +395,17 @@ impl Orchestrator {
                 total_tools = mcp_tools.len() + local_defs.len(),
                 advertised_tools = llm_tools.len(),
                 omitted_tool_count,
+                max_advertised_tools,
                 "truncated tools to satisfy LLM tool limit"
             );
             self.emit(
                 &ui_tx,
                 "tool_limit",
                 &format!(
-                    "LLM tool limit reached: advertising {} of {} tools. Reduce enabled MCP servers with /mcp disable <name> or /mcp only <name...>, or narrow local tools in the active recipe/config.",
+                    "LLM tool limit reached: advertising {} of {} tools (max_advertised_tools {}). Reduce enabled MCP servers with /mcp disable <name> or /mcp only <name...>, narrow local tools in the active recipe/config, or adjust the active provider's max_advertised_tools setting.",
                     llm_tools.len(),
                     mcp_tools.len() + local_defs.len(),
+                    max_advertised_tools,
                 ),
                 None,
                 None,
@@ -1076,24 +1082,25 @@ fn fallback_compaction_summary(conversation: &crate::types::Conversation) -> Str
     summary
 }
 
-fn build_ranked_azure_tools_with_local(
+fn build_ranked_llm_tools_with_local(
     local_tools: &[LlmTool],
     mcp_tools: &[McpTool],
     tool_selection_query: &str,
+    max_advertised_tools: usize,
 ) -> (Vec<LlmTool>, usize) {
     let total_tool_count = local_tools.len() + mcp_tools.len();
-    if total_tool_count <= MAX_AZURE_TOOL_COUNT {
+    if total_tool_count <= max_advertised_tools {
         let mut llm_tools = local_tools.to_vec();
-        llm_tools.extend(mcp_tools.iter().map(mcp_tool_to_azure_tool));
+        llm_tools.extend(mcp_tools.iter().map(mcp_tool_to_llm_tool));
         return (llm_tools, 0);
     }
 
     let context_tokens = tokenize_tool_selection_text(tool_selection_query);
-    let mut llm_tools = Vec::with_capacity(MAX_AZURE_TOOL_COUNT);
+    let mut llm_tools = Vec::with_capacity(max_advertised_tools);
     let mut selected_names = HashSet::new();
 
     for pinned_name in PINNED_LOCAL_TOOL_NAMES {
-        if llm_tools.len() >= MAX_AZURE_TOOL_COUNT {
+        if llm_tools.len() >= max_advertised_tools {
             break;
         }
         if let Some(tool) = local_tools.iter().find(|tool| tool.name == *pinned_name)
@@ -1103,19 +1110,19 @@ fn build_ranked_azure_tools_with_local(
         }
     }
 
-    let remaining_capacity = MAX_AZURE_TOOL_COUNT.saturating_sub(llm_tools.len());
+    let remaining_capacity = max_advertised_tools.saturating_sub(llm_tools.len());
     let mut ranked_candidates = local_tools
         .iter()
         .filter(|tool| !selected_names.contains(&tool.name))
-        .map(|tool| RankedAzureTool {
+        .map(|tool| RankedLlmTool {
             score: score_local_tool(tool, &context_tokens),
             local_preferred: true,
             tool: tool.clone(),
         })
-        .chain(mcp_tools.iter().map(|tool| RankedAzureTool {
+        .chain(mcp_tools.iter().map(|tool| RankedLlmTool {
             score: score_mcp_tool(tool, &context_tokens),
             local_preferred: false,
-            tool: mcp_tool_to_azure_tool(tool),
+            tool: mcp_tool_to_llm_tool(tool),
         }))
         .collect::<Vec<_>>();
 
@@ -1138,22 +1145,22 @@ fn build_ranked_azure_tools_with_local(
 }
 
 #[cfg(test)]
-fn build_azure_tools(mcp_tools: &[McpTool]) -> (Vec<LlmTool>, usize) {
-    let azure_tools = mcp_tools
+fn build_llm_tools(mcp_tools: &[McpTool], max_advertised_tools: usize) -> (Vec<LlmTool>, usize) {
+    let llm_tools = mcp_tools
         .iter()
-        .take(MAX_AZURE_TOOL_COUNT)
+        .take(max_advertised_tools)
         .map(|tool| LlmTool {
             name: tool.external_name.clone(),
             description: format!("{} (server: {})", tool.description, tool.server_name),
-            parameters: sanitize_azure_tool_schema(tool.input_schema.clone()),
+            parameters: sanitize_tool_schema(tool.input_schema.clone()),
         })
         .collect::<Vec<_>>();
-    let omitted_tool_count = mcp_tools.len().saturating_sub(azure_tools.len());
-    (azure_tools, omitted_tool_count)
+    let omitted_tool_count = mcp_tools.len().saturating_sub(llm_tools.len());
+    (llm_tools, omitted_tool_count)
 }
 
 #[derive(Debug, Clone)]
-struct RankedAzureTool {
+struct RankedLlmTool {
     score: i64,
     local_preferred: bool,
     tool: LlmTool,
@@ -1184,8 +1191,8 @@ fn build_tool_selection_query(
     parts.join("\n")
 }
 
-fn advertised_mcp_tools<'a>(azure_tools: &[LlmTool], mcp_tools: &'a [McpTool]) -> Vec<&'a McpTool> {
-    let advertised_names = azure_tools
+fn advertised_mcp_tools<'a>(llm_tools: &[LlmTool], mcp_tools: &'a [McpTool]) -> Vec<&'a McpTool> {
+    let advertised_names = llm_tools
         .iter()
         .map(|tool| tool.name.as_str())
         .collect::<HashSet<_>>();
@@ -1197,9 +1204,9 @@ fn advertised_mcp_tools<'a>(azure_tools: &[LlmTool], mcp_tools: &'a [McpTool]) -
 
 fn summarize_advertised_mcp_tools(
     advertised_mcp_tools: &[&McpTool],
-    discovered_count: usize,
+    discovered_mcp_tools: &[McpTool],
 ) -> String {
-    if discovered_count == 0 {
+    if discovered_mcp_tools.is_empty() {
         return String::new();
     }
 
@@ -1243,11 +1250,34 @@ fn summarize_advertised_mcp_tools(
         }
     }
 
-    let omitted = discovered_count.saturating_sub(advertised_mcp_tools.len());
+    let advertised_names = advertised_mcp_tools
+        .iter()
+        .map(|tool| tool.external_name.as_str())
+        .collect::<HashSet<_>>();
+    let mut omitted_grouped = HashMap::<&str, usize>::new();
+    for tool in discovered_mcp_tools {
+        if !advertised_names.contains(tool.external_name.as_str()) {
+            *omitted_grouped
+                .entry(tool.server_name.as_str())
+                .or_default() += 1;
+        }
+    }
+
+    let omitted = omitted_grouped.values().copied().sum::<usize>();
     if omitted > 0 {
         out.push_str(&format!(
             "\n{} additional discovered MCP tools were omitted from this turn because of the tool budget.\n",
             omitted
+        ));
+        let mut omitted_servers = omitted_grouped.into_iter().collect::<Vec<_>>();
+        omitted_servers.sort_by(|left, right| left.0.cmp(right.0));
+        let omitted_summary = omitted_servers
+            .into_iter()
+            .map(|(server_name, count)| format!("`{server_name}` ({count})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "Omitted MCP tools by server: {omitted_summary}. Use `local__configure_mcp_servers` to focus subsequent turns on the relevant server when needed.\n",
         ));
     }
 
@@ -1288,27 +1318,27 @@ fn score_text_match(text: &str, context_tokens: &HashSet<String>, weight: i64) -
         * weight
 }
 
-fn mcp_tool_to_azure_tool(tool: &McpTool) -> LlmTool {
+fn mcp_tool_to_llm_tool(tool: &McpTool) -> LlmTool {
     LlmTool {
         name: tool.external_name.clone(),
         description: format!("{} (server: {})", tool.description, tool.server_name),
-        parameters: sanitize_azure_tool_schema(tool.input_schema.clone()),
+        parameters: sanitize_tool_schema(tool.input_schema.clone()),
     }
 }
 
-fn sanitize_azure_tool_schema(value: Value) -> Value {
+fn sanitize_tool_schema(value: Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(
             items
                 .into_iter()
-                .map(sanitize_azure_tool_schema)
+                .map(sanitize_tool_schema)
                 .collect::<Vec<_>>(),
         ),
         Value::Object(mut map) => {
             let keys = map.keys().cloned().collect::<Vec<_>>();
             for key in keys {
                 if let Some(entry) = map.remove(&key) {
-                    map.insert(key, sanitize_azure_tool_schema(entry));
+                    map.insert(key, sanitize_tool_schema(entry));
                 }
             }
 
@@ -1331,6 +1361,7 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use crate::{
+        config::DEFAULT_MAX_ADVERTISED_TOOLS,
         conversation_store::ConversationStore,
         llm::{LlmAssistantBlock, LlmMessage, LlmTool},
         mcp_runtime::McpTool,
@@ -1338,9 +1369,9 @@ mod tests {
     };
 
     use super::{
-        ConversationTurnLocks, MAX_AZURE_TOOL_COUNT, MessageBuildContext, PINNED_LOCAL_TOOL_NAMES,
-        build_azure_tools, build_messages, build_ranked_azure_tools_with_local,
-        estimate_context_chars, sanitize_azure_tool_schema, summarize_advertised_mcp_tools,
+        ConversationTurnLocks, MessageBuildContext, PINNED_LOCAL_TOOL_NAMES, build_llm_tools,
+        build_messages, build_ranked_llm_tools_with_local, estimate_context_chars,
+        sanitize_tool_schema, summarize_advertised_mcp_tools,
     };
 
     #[test]
@@ -1362,8 +1393,8 @@ mod tests {
     }
 
     #[test]
-    fn caps_advertised_tools_to_azure_limit() {
-        let mcp_tools = (0..(MAX_AZURE_TOOL_COUNT + 5))
+    fn caps_advertised_tools_to_default_limit() {
+        let mcp_tools = (0..(DEFAULT_MAX_ADVERTISED_TOOLS + 5))
             .map(|index| McpTool {
                 server_name: "demo".to_string(),
                 original_name: format!("tool_{index}"),
@@ -1373,20 +1404,21 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (azure_tools, omitted_tool_count) = build_azure_tools(&mcp_tools);
+        let (llm_tools, omitted_tool_count) =
+            build_llm_tools(&mcp_tools, DEFAULT_MAX_ADVERTISED_TOOLS);
 
-        assert_eq!(azure_tools.len(), MAX_AZURE_TOOL_COUNT);
+        assert_eq!(llm_tools.len(), DEFAULT_MAX_ADVERTISED_TOOLS);
         assert_eq!(omitted_tool_count, 5);
-        assert_eq!(azure_tools[0].name, "demo__tool_0");
+        assert_eq!(llm_tools[0].name, "demo__tool_0");
         assert_eq!(
-            azure_tools.last().map(|tool| tool.name.as_str()),
+            llm_tools.last().map(|tool| tool.name.as_str()),
             Some("demo__tool_127")
         );
     }
 
     #[test]
-    fn caps_combined_local_and_mcp_tools_to_azure_limit() {
-        let local_tools = (0..MAX_AZURE_TOOL_COUNT)
+    fn caps_combined_local_and_mcp_tools_to_default_limit() {
+        let local_tools = (0..DEFAULT_MAX_ADVERTISED_TOOLS)
             .map(|index| LlmTool {
                 name: format!("local_{index}"),
                 description: format!("local tool {index}"),
@@ -1403,16 +1435,41 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (azure_tools, omitted_tool_count) =
-            build_ranked_azure_tools_with_local(&local_tools, &mcp_tools, "");
-
-        assert_eq!(azure_tools.len(), MAX_AZURE_TOOL_COUNT);
-        assert_eq!(omitted_tool_count, 5);
-        assert!(
-            azure_tools
-                .iter()
-                .all(|tool| tool.name.starts_with("local_"))
+        let (llm_tools, omitted_tool_count) = build_ranked_llm_tools_with_local(
+            &local_tools,
+            &mcp_tools,
+            "",
+            DEFAULT_MAX_ADVERTISED_TOOLS,
         );
+
+        assert_eq!(llm_tools.len(), DEFAULT_MAX_ADVERTISED_TOOLS);
+        assert_eq!(omitted_tool_count, 5);
+        assert!(llm_tools.iter().all(|tool| tool.name.starts_with("local_")));
+    }
+
+    #[test]
+    fn caps_advertised_tools_to_configured_limit() {
+        let local_tools = vec![LlmTool {
+            name: "local__run_skill".to_string(),
+            description: "Execute a skill script".to_string(),
+            parameters: json!({"type": "object"}),
+        }];
+        let mcp_tools = (0..10)
+            .map(|index| McpTool {
+                server_name: "demo".to_string(),
+                original_name: format!("tool_{index}"),
+                external_name: format!("demo__tool_{index}"),
+                description: format!("tool {index}"),
+                input_schema: json!({"type": "object"}),
+            })
+            .collect::<Vec<_>>();
+
+        let (llm_tools, omitted_tool_count) =
+            build_ranked_llm_tools_with_local(&local_tools, &mcp_tools, "tool 9", 3);
+
+        assert_eq!(llm_tools.len(), 3);
+        assert_eq!(omitted_tool_count, 8);
+        assert!(llm_tools.iter().any(|tool| tool.name == "local__run_skill"));
     }
 
     #[test]
@@ -1447,16 +1504,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (azure_tools, omitted_tool_count) = build_ranked_azure_tools_with_local(
+        let (llm_tools, omitted_tool_count) = build_ranked_llm_tools_with_local(
             &local_tools,
             &mcp_tools,
             "query telemetry alerts for failed authentication",
+            DEFAULT_MAX_ADVERTISED_TOOLS,
         );
 
-        assert_eq!(azure_tools.len(), MAX_AZURE_TOOL_COUNT);
+        assert_eq!(llm_tools.len(), DEFAULT_MAX_ADVERTISED_TOOLS);
         assert_eq!(omitted_tool_count, 73);
         assert!(
-            azure_tools
+            llm_tools
                 .iter()
                 .any(|tool| tool.name == "telemetry__query_alerts")
         );
@@ -1478,18 +1536,25 @@ mod tests {
             }))
             .collect::<Vec<_>>();
 
-        let (azure_tools, omitted_tool_count) =
-            build_ranked_azure_tools_with_local(&local_tools, &[], "unrelated prompt");
+        let (llm_tools, omitted_tool_count) = build_ranked_llm_tools_with_local(
+            &local_tools,
+            &[],
+            "unrelated prompt",
+            DEFAULT_MAX_ADVERTISED_TOOLS,
+        );
 
-        assert_eq!(azure_tools.len(), MAX_AZURE_TOOL_COUNT);
-        assert_eq!(omitted_tool_count, local_tools.len() - MAX_AZURE_TOOL_COUNT);
+        assert_eq!(llm_tools.len(), DEFAULT_MAX_ADVERTISED_TOOLS);
+        assert_eq!(
+            omitted_tool_count,
+            local_tools.len() - DEFAULT_MAX_ADVERTISED_TOOLS
+        );
         for name in PINNED_LOCAL_TOOL_NAMES {
-            assert!(azure_tools.iter().any(|tool| tool.name == *name));
+            assert!(llm_tools.iter().any(|tool| tool.name == *name));
         }
     }
 
     #[test]
-    fn fills_missing_object_properties_for_azure_tools() {
+    fn fills_missing_object_properties_for_llm_tools() {
         let schema = json!({
             "type": "object",
             "properties": {
@@ -1499,7 +1564,7 @@ mod tests {
             }
         });
 
-        let sanitized = sanitize_azure_tool_schema(schema);
+        let sanitized = sanitize_tool_schema(schema);
 
         assert_eq!(sanitized["properties"]["nested"]["properties"], json!({}));
     }
@@ -1615,14 +1680,46 @@ mod tests {
             },
         ];
 
-        let summary =
-            summarize_advertised_mcp_tools(&[&tools[0], &tools[1], &tools[2]], tools.len());
+        let summary = summarize_advertised_mcp_tools(&[&tools[0], &tools[1], &tools[2]], &tools);
 
         assert!(summary.contains("## Advertised MCP Tools"));
         assert!(summary.contains(
             "`csirt-mcp` (2 advertised): `csirt_mcp__list_cases`, `csirt_mcp__search_events`"
         ));
         assert!(summary.contains("`wiz` (1 advertised): `wiz__issues_query`"));
+    }
+
+    #[test]
+    fn summarizes_omitted_mcp_tools_by_server() {
+        let tools = vec![
+            McpTool {
+                server_name: "csirt-mcp".to_string(),
+                original_name: "search_events".to_string(),
+                external_name: "csirt_mcp__search_events".to_string(),
+                description: "Search events".to_string(),
+                input_schema: json!({"type": "object"}),
+            },
+            McpTool {
+                server_name: "wiz".to_string(),
+                original_name: "issues_query".to_string(),
+                external_name: "wiz__issues_query".to_string(),
+                description: "Query issues".to_string(),
+                input_schema: json!({"type": "object"}),
+            },
+            McpTool {
+                server_name: "wiz".to_string(),
+                original_name: "projects_list".to_string(),
+                external_name: "wiz__projects_list".to_string(),
+                description: "List projects".to_string(),
+                input_schema: json!({"type": "object"}),
+            },
+        ];
+
+        let summary = summarize_advertised_mcp_tools(&[&tools[0]], &tools);
+
+        assert!(summary.contains("2 additional discovered MCP tools were omitted"));
+        assert!(summary.contains("Omitted MCP tools by server: `wiz` (2)."));
+        assert!(summary.contains("`local__configure_mcp_servers`"));
     }
 
     #[tokio::test]

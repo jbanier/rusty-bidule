@@ -71,9 +71,10 @@ The config model is defined in `src/config.rs`. Main top-level keys:
 | --- | --- |
 | `prompt` | Optional base system prompt text. |
 | `data_dir` | Runtime data root. Defaults to `data`. |
-| `llm_provider` | Provider selector. Supported values are `azure_openai` and `azure_anthropic`. |
-| `azure_openai` | Azure OpenAI endpoint, deployment, API key, and sampling settings. |
-| `azure_anthropic` | Azure Anthropic endpoint, deployment, API key, and sampling settings. |
+| `llm_provider` | Provider selector. Supported values are `azure_openai`, `azure_anthropic`, and `openai_compatible`. |
+| `azure_openai` | Azure OpenAI endpoint, deployment, API key, sampling settings, and tool budget. |
+| `azure_anthropic` | Azure Anthropic endpoint, deployment, API key, sampling settings, and tool budget. |
+| `openai_compatible` | OpenAI Chat Completions compatible endpoint, model, optional API key, sampling settings, and tool budget. |
 | `mcp_servers` | Remote MCP server definitions. |
 | `mcp_runtime` | MCP connection timeout and parallelism settings. |
 | `local_tools` | Local execution timeout and allowed CLI binaries. |
@@ -316,7 +317,7 @@ If a recipe restricts `local_tools`, only those local tools are advertised for t
 
 ## MCP
 
-MCP servers are configured in `mcp_servers`. Network permission must be enabled before MCP discovery or tool calls happen. The orchestrator advertises a ranked subset of local and MCP tools to stay under the provider tool limit.
+MCP servers are configured in `mcp_servers`. Network permission must be enabled before MCP discovery or tool calls happen. The orchestrator advertises a ranked subset of local and MCP tools to stay under the provider tool limit. The active provider block's `max_advertised_tools` setting controls that budget and defaults to 128.
 
 MCP tool names are externalized as `<server>__<tool>`. The original server and tool names are retained internally for execution.
 

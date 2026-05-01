@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 use async_openai::{
-    Client as OpenAiClient,
+    Client as AsyncOpenAiClient,
     config::AzureConfig,
     error::{ApiError, OpenAIError},
 };
@@ -13,6 +13,7 @@ use tracing::{debug, error, warn};
 
 use crate::config::{
     AppConfig, AzureAnthropicConfig, AzureOpenAiConfig, LlmProvider, OpenAiCompatibleConfig,
+    OpenAiConfig,
 };
 
 #[derive(Debug, Clone)]
@@ -68,16 +69,29 @@ pub struct LlmCompletion {
 pub struct LlmClient {
     selected_provider: Option<LlmProvider>,
     azure_openai: Option<AzureOpenAiClient>,
+    openai: Option<OpenAiClient>,
     azure_anthropic: Option<AzureAnthropicClient>,
     openai_compatible: Option<OpenAiCompatibleClient>,
 }
 
 #[derive(Debug, Clone)]
 struct AzureOpenAiClient {
-    client: OpenAiClient<AzureConfig>,
+    client: AsyncOpenAiClient<AzureConfig>,
     endpoint: String,
     deployment: String,
     api_version: String,
+    temperature: f32,
+    top_p: f32,
+    max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAiClient {
+    client: HttpClient,
+    endpoint: String,
+    chat_url: String,
+    model: String,
+    api_key: String,
     temperature: f32,
     top_p: f32,
     max_output_tokens: u32,
@@ -111,6 +125,7 @@ impl LlmClient {
         Ok(Self {
             selected_provider: config.effective_llm_provider(),
             azure_openai: config.azure_openai.as_ref().map(AzureOpenAiClient::new),
+            openai: config.openai.as_ref().map(OpenAiClient::new).transpose()?,
             azure_anthropic: config
                 .azure_anthropic
                 .as_ref()
@@ -127,6 +142,7 @@ impl LlmClient {
     pub fn provider_label(&self) -> &'static str {
         match self.selected_provider {
             Some(LlmProvider::AzureOpenAi) => "Azure OpenAI",
+            Some(LlmProvider::OpenAi) => "OpenAI",
             Some(LlmProvider::AzureAnthropic) => "Azure Anthropic",
             Some(LlmProvider::OpenAiCompatible) => "OpenAI-compatible",
             None => "LLM",
@@ -143,6 +159,14 @@ impl LlmClient {
                 let Some(client) = &self.azure_openai else {
                     return Err(anyhow!(
                         "Azure OpenAI is selected but not configured. Add an azure_openai block to enable inference."
+                    ));
+                };
+                client.chat_completion(messages, tools).await
+            }
+            Some(LlmProvider::OpenAi) => {
+                let Some(client) = &self.openai else {
+                    return Err(anyhow!(
+                        "OpenAI is selected but not configured. Add an openai block to enable inference."
                     ));
                 };
                 client.chat_completion(messages, tools).await
@@ -164,7 +188,7 @@ impl LlmClient {
                 client.chat_completion(messages, tools).await
             }
             None => Err(anyhow!(
-                "No LLM provider is configured. Add an azure_openai, azure_anthropic, or openai_compatible block to enable inference."
+                "No LLM provider is configured. Add an azure_openai, openai, azure_anthropic, or openai_compatible block to enable inference."
             )),
         }
     }
@@ -173,7 +197,7 @@ impl LlmClient {
 impl AzureOpenAiClient {
     fn new(config: &AzureOpenAiConfig) -> Self {
         let endpoint = config.endpoint.trim_end_matches('/').to_string();
-        let client = OpenAiClient::with_config(
+        let client = AsyncOpenAiClient::with_config(
             AzureConfig::new()
                 .with_api_base(endpoint.clone())
                 .with_api_version(config.api_version.clone())
@@ -268,6 +292,108 @@ impl AzureOpenAiClient {
                 anyhow!("Azure OpenAI request failed: {other}")
             }
         }
+    }
+}
+
+impl OpenAiClient {
+    fn new(config: &OpenAiConfig) -> Result<Self> {
+        let endpoint = config.endpoint.trim_end_matches('/').to_string();
+        let chat_url = openai_compatible_chat_url(&endpoint);
+        let client = HttpClient::builder().build()?;
+
+        Ok(Self {
+            client,
+            endpoint,
+            chat_url,
+            model: config.model.clone(),
+            api_key: config.api_key.clone(),
+            temperature: config.temperature,
+            top_p: config.top_p,
+            max_output_tokens: config.max_output_tokens,
+        })
+    }
+
+    async fn chat_completion(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[LlmTool],
+    ) -> Result<LlmCompletion> {
+        let body = build_openai_compatible_chat_request_body(
+            messages,
+            tools,
+            &self.model,
+            self.temperature,
+            self.top_p,
+            self.max_output_tokens,
+        );
+
+        debug!(
+            endpoint = %self.endpoint,
+            chat_url = %self.chat_url,
+            model = %self.model,
+            message_count = messages.len(),
+            tool_count = tools.len(),
+            "sending OpenAI chat completion request"
+        );
+
+        let response = self
+            .client
+            .post(&self.chat_url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                error!(
+                    endpoint = %self.endpoint,
+                    chat_url = %self.chat_url,
+                    model = %self.model,
+                    error = %err,
+                    "failed to reach OpenAI endpoint"
+                );
+                anyhow!("failed to reach OpenAI endpoint: {err}")
+            })?;
+
+        let status = response.status();
+        let payload = response.text().await.map_err(|err| {
+            error!(
+                endpoint = %self.endpoint,
+                chat_url = %self.chat_url,
+                model = %self.model,
+                error = %err,
+                "failed to read OpenAI response body"
+            );
+            anyhow!("failed to read OpenAI response body: {err}")
+        })?;
+
+        if !status.is_success() {
+            error!(
+                endpoint = %self.endpoint,
+                chat_url = %self.chat_url,
+                model = %self.model,
+                status = %status,
+                response_body = %truncate_for_log(&payload),
+                "OpenAI request failed"
+            );
+            return Err(anyhow!(
+                "OpenAI request failed with status {}: {}",
+                status,
+                truncate_for_log(&payload)
+            ));
+        }
+
+        let payload: Value = serde_json::from_str(&payload).map_err(|err| {
+            error!(
+                endpoint = %self.endpoint,
+                chat_url = %self.chat_url,
+                model = %self.model,
+                error = %err,
+                "failed to deserialize OpenAI response"
+            );
+            anyhow!("failed to deserialize OpenAI response: {err}")
+        })?;
+
+        parse_openai_chat_completion_payload(&payload)
     }
 }
 
@@ -984,10 +1110,10 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::{net::TcpListener, sync::Mutex};
 
-    use crate::config::OpenAiCompatibleConfig;
+    use crate::config::{OpenAiCompatibleConfig, OpenAiConfig};
 
     use super::{
-        LlmAssistantBlock, LlmMessage, LlmStopReason, LlmTool, LlmToolResult,
+        LlmAssistantBlock, LlmMessage, LlmStopReason, LlmTool, LlmToolResult, OpenAiClient,
         OpenAiCompatibleClient, build_anthropic_chat_request_body, build_openai_chat_request_body,
         build_openai_compatible_chat_request_body, openai_compatible_chat_url,
         parse_anthropic_chat_completion_payload, parse_openai_chat_completion_payload,
@@ -1125,6 +1251,46 @@ mod tests {
         assert_eq!(request.body["model"], json!("test-model"));
         assert_eq!(request.body["tool_choice"], json!("auto"));
         assert_eq!(request.body["tools"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            completion.assistant_blocks,
+            vec![LlmAssistantBlock::Text {
+                text: "done".to_string()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_client_posts_chat_completion_request() {
+        let captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route("/v1/chat/completions", post(capture_openai_request))
+            .with_state(captured.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = OpenAiClient::new(&OpenAiConfig {
+            api_key: "openai-key".to_string(),
+            endpoint: format!("http://{addr}/v1"),
+            model: "gpt-5".to_string(),
+            temperature: 0.2,
+            top_p: 1.0,
+            max_output_tokens: 1200,
+            max_advertised_tools: 128,
+        })
+        .unwrap();
+
+        let completion = client
+            .chat_completion(&[LlmMessage::UserText("hello".to_string())], &[])
+            .await
+            .unwrap();
+
+        let request = captured.lock().await.clone().unwrap();
+        assert_eq!(request.authorization.as_deref(), Some("Bearer openai-key"));
+        assert_eq!(request.body["model"], json!("gpt-5"));
+        assert!(request.body.get("tools").is_none());
         assert_eq!(
             completion.assistant_blocks,
             vec![LlmAssistantBlock::Text {

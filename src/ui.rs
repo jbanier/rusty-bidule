@@ -2579,6 +2579,7 @@ mod tests {
                 max_output_tokens: 512,
                 max_advertised_tools: 128,
             }),
+            openai: None,
             azure_anthropic: None,
             openai_compatible: None,
             agent_permissions: AgentPermissions::default(),

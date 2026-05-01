@@ -2,7 +2,8 @@
 
 `rusty-bidule` is a Rust CSIRT investigation client. It combines:
 
-- an Azure OpenAI chat-completions agent,
+- an Azure OpenAI, OpenAI, Azure Anthropic, or OpenAI-compatible
+  chat-completions agent,
 - optional MCP servers for remote security tools,
 - local tools for time, job tracking, skills, and investigation memory,
 - Markdown skills and recipes loaded from the repository,
@@ -71,8 +72,9 @@ The config model is defined in `src/config.rs`. Main top-level keys:
 | --- | --- |
 | `prompt` | Optional base system prompt text. |
 | `data_dir` | Runtime data root. Defaults to `data`. |
-| `llm_provider` | Provider selector. Supported values are `azure_openai`, `azure_anthropic`, and `openai_compatible`. |
+| `llm_provider` | Provider selector. Supported values are `azure_openai`, `openai`, `azure_anthropic`, and `openai_compatible`. |
 | `azure_openai` | Azure OpenAI endpoint, deployment, API key, sampling settings, and tool budget. |
+| `openai` | OpenAI API endpoint, model, API key, sampling settings, and tool budget. |
 | `azure_anthropic` | Azure Anthropic endpoint, deployment, API key, sampling settings, and tool budget. |
 | `openai_compatible` | OpenAI Chat Completions compatible endpoint, model, optional API key, sampling settings, and tool budget. |
 | `mcp_servers` | Remote MCP server definitions. |

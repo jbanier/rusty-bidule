@@ -11,8 +11,8 @@ an open-ended chat shell.
 
 - Runs interactive conversations in a Ratatui terminal UI
 - Exposes a lightweight web UI and REST API
-- Calls Azure OpenAI, Azure Anthropic, or OpenAI-compatible chat completions
-  for reasoning
+- Calls Azure OpenAI, OpenAI, Azure Anthropic, or OpenAI-compatible chat
+  completions for reasoning
 - Discovers and invokes MCP tools from configured servers
 - Executes selected local skill scripts through `local__run_skill`
 - Executes configured allowlisted local CLI tools through `local__exec_cli`
@@ -50,6 +50,8 @@ Treat it as an operator tool under active iteration, not a finished platform.
 
    ```bash
    export AZURE_OPENAI_API_KEY='your-key-here'
+   # or, for OpenAI:
+   export OPENAI_API_KEY='your-key-here'
    # or, for LiteLLM/OpenAI-compatible gateways:
    export LITELLM_PROXY_API_KEY='your-key-here'
    ```
@@ -165,8 +167,8 @@ llm_provider: azure_openai
 ```
 
 If `llm_provider` is omitted, the app defaults to `azure_openai` when that
-block is present, then `azure_anthropic`, then `openai_compatible` when that is
-the only configured provider.
+block is present, then `openai`, then `azure_anthropic`, then
+`openai_compatible` when that is the only configured provider.
 
 ### Azure OpenAI
 
@@ -204,6 +206,26 @@ versions. If you omit `anthropic_version`, the client defaults to `2023-06-01`.
 For Anthropic requests, set either `temperature` or `top_p`, not both. The
 default path uses `temperature`; if you set a non-default `top_p`, it replaces
 `temperature` in the outgoing request.
+
+### OpenAI
+
+Use `openai` for the regular OpenAI API:
+
+```yaml
+llm_provider: openai
+
+openai:
+  api_key: env:OPENAI_API_KEY
+  endpoint: https://api.openai.com/v1
+  model: gpt-5
+  temperature: 0.2
+  top_p: 1.0
+  max_output_tokens: 1200
+  max_advertised_tools: 128
+```
+
+`endpoint` is optional and defaults to `https://api.openai.com/v1`. The client
+sends requests to `{endpoint}/chat/completions` with bearer authentication.
 
 ### OpenAI-Compatible
 

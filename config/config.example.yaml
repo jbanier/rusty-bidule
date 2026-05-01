@@ -17,14 +17,25 @@ azure_openai:
   max_output_tokens: 1200
   max_advertised_tools: 128
 
-# Optional alternate backend. If both blocks are present, set llm_provider
-# explicitly to choose between them.
+# Optional alternate backends. If multiple provider blocks are present, set
+# llm_provider explicitly to choose between them.
 # azure_anthropic:
 #   api_key: env:AZURE_ANTHROPIC_API_KEY
 #   anthropic_version: 2023-06-01
 #   endpoint: https://example.services.ai.azure.com/anthropic/
 #   deployment: claude-opus-4-6
 #   temperature: 0.2
+#   max_output_tokens: 1200
+#   max_advertised_tools: 128
+
+# Optional OpenAI API backend.
+# openai:
+#   api_key: env:OPENAI_API_KEY
+#   # endpoint defaults to https://api.openai.com/v1 when omitted.
+#   endpoint: https://api.openai.com/v1
+#   model: gpt-5
+#   temperature: 0.2
+#   top_p: 1.0
 #   max_output_tokens: 1200
 #   max_advertised_tools: 128
 

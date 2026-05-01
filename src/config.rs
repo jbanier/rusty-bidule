@@ -17,6 +17,7 @@ pub struct AppConfig {
     pub data_dir: Option<PathBuf>,
     pub llm_provider: Option<LlmProvider>,
     pub azure_openai: Option<AzureOpenAiConfig>,
+    pub openai: Option<OpenAiConfig>,
     pub azure_anthropic: Option<AzureAnthropicConfig>,
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     #[serde(default)]
@@ -99,6 +100,22 @@ pub struct AzureOpenAiConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenAiConfig {
+    pub api_key: String,
+    #[serde(default = "default_openai_endpoint")]
+    pub endpoint: String,
+    pub model: String,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+    #[serde(default = "default_max_advertised_tools")]
+    pub max_advertised_tools: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AzureAnthropicConfig {
     pub api_key: String,
     #[serde(default)]
@@ -138,6 +155,8 @@ pub struct OpenAiCompatibleConfig {
 pub enum LlmProvider {
     #[serde(rename = "azure_openai", alias = "azure_open_ai")]
     AzureOpenAi,
+    #[serde(rename = "openai", alias = "open_ai")]
+    OpenAi,
     #[serde(rename = "azure_anthropic")]
     AzureAnthropic,
     #[serde(rename = "openai_compatible", alias = "open_ai_compatible")]
@@ -249,6 +268,10 @@ impl AppConfig {
             azure_openai.api_key = resolve_value(&azure_openai.api_key)?;
             azure_openai.endpoint = resolve_value(&azure_openai.endpoint)?;
         }
+        if let Some(openai) = &mut self.openai {
+            openai.api_key = resolve_value(&openai.api_key)?;
+            openai.endpoint = resolve_value(&openai.endpoint)?;
+        }
         if let Some(azure_anthropic) = &mut self.azure_anthropic {
             azure_anthropic.api_key = resolve_value(&azure_anthropic.api_key)?;
             azure_anthropic.endpoint = resolve_value(&azure_anthropic.endpoint)?;
@@ -308,12 +331,16 @@ impl AppConfig {
 
     fn validate(&self) -> Result<()> {
         validate_azure_openai_config("azure_openai", self.azure_openai.as_ref())?;
+        validate_openai_config("openai", self.openai.as_ref())?;
         validate_azure_anthropic_config("azure_anthropic", self.azure_anthropic.as_ref())?;
         validate_openai_compatible_config("openai_compatible", self.openai_compatible.as_ref())?;
 
         match self.effective_llm_provider() {
             Some(LlmProvider::AzureOpenAi) if self.azure_openai.is_none() => {
                 bail!("llm_provider selects azure_openai but azure_openai is not configured");
+            }
+            Some(LlmProvider::OpenAi) if self.openai.is_none() => {
+                bail!("llm_provider selects openai but openai is not configured");
             }
             Some(LlmProvider::AzureAnthropic) if self.azure_anthropic.is_none() => {
                 bail!("llm_provider selects azure_anthropic but azure_anthropic is not configured");
@@ -389,6 +416,9 @@ impl AppConfig {
         if self.azure_openai.is_some() {
             return Some(LlmProvider::AzureOpenAi);
         }
+        if self.openai.is_some() {
+            return Some(LlmProvider::OpenAi);
+        }
         if self.azure_anthropic.is_some() {
             return Some(LlmProvider::AzureAnthropic);
         }
@@ -402,6 +432,10 @@ impl AppConfig {
         match self.effective_llm_provider() {
             Some(LlmProvider::AzureOpenAi) => self
                 .azure_openai
+                .as_ref()
+                .map(|config| config.max_advertised_tools),
+            Some(LlmProvider::OpenAi) => self
+                .openai
                 .as_ref()
                 .map(|config| config.max_advertised_tools),
             Some(LlmProvider::AzureAnthropic) => self
@@ -433,6 +467,22 @@ fn validate_azure_openai_config(label: &str, config: Option<&AzureOpenAiConfig>)
     }
     if config.api_version.trim().is_empty() {
         bail!("{label}.api_version must not be empty");
+    }
+    Ok(())
+}
+
+fn validate_openai_config(label: &str, config: Option<&OpenAiConfig>) -> Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    if config.api_key.trim().is_empty() {
+        bail!("{label}.api_key must not be empty");
+    }
+    if config.endpoint.trim().is_empty() {
+        bail!("{label}.endpoint must not be empty");
+    }
+    if config.model.trim().is_empty() {
+        bail!("{label}.model must not be empty");
     }
     Ok(())
 }
@@ -562,6 +612,10 @@ const fn default_max_advertised_tools() -> usize {
 
 fn default_anthropic_version() -> String {
     "2023-06-01".to_string()
+}
+
+fn default_openai_endpoint() -> String {
+    "https://api.openai.com/v1".to_string()
 }
 
 fn is_anthropic_version(version: &str) -> bool {
@@ -721,6 +775,32 @@ openai_compatible:
     }
 
     #[test]
+    fn resolves_env_backed_openai_secret_and_defaults_endpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        unsafe {
+            std::env::set_var("TEST_OPENAI_KEY", "openai-secret");
+        }
+        fs::write(
+            &path,
+            r#"
+openai:
+  api_key: env:TEST_OPENAI_KEY
+  model: gpt-5
+  max_advertised_tools: 32
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        let openai = config.openai.as_ref().unwrap();
+        assert_eq!(openai.api_key, "openai-secret");
+        assert_eq!(openai.endpoint, "https://api.openai.com/v1");
+        assert_eq!(config.effective_llm_provider(), Some(LlmProvider::OpenAi));
+        assert_eq!(config.effective_max_advertised_tools(), 32);
+    }
+
+    #[test]
     fn prefers_explicit_anthropic_version_when_set() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -772,7 +852,7 @@ azure_openai:
     }
 
     #[test]
-    fn defaults_to_openai_when_both_providers_are_configured_and_selector_is_omitted() {
+    fn defaults_to_azure_openai_when_both_azure_providers_are_configured_and_selector_is_omitted() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         fs::write(
@@ -821,6 +901,24 @@ openai_compatible:
     }
 
     #[test]
+    fn defaults_to_openai_when_it_is_the_only_configured_provider() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+openai:
+  api_key: test
+  model: gpt-5
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(config.effective_llm_provider(), Some(LlmProvider::OpenAi));
+    }
+
+    #[test]
     fn rejects_missing_selected_provider_block() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -864,6 +962,29 @@ azure_openai:
         assert!(format!("{err:#}").contains(
             "llm_provider selects openai_compatible but openai_compatible is not configured"
         ));
+    }
+
+    #[test]
+    fn rejects_missing_selected_openai_block() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+llm_provider: openai
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+"#,
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("llm_provider selects openai but openai is not configured")
+        );
     }
 
     #[test]

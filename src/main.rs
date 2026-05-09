@@ -17,7 +17,7 @@ mod types;
 mod ui;
 mod web;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use auto_pull::AutoPullRuntime;
 use config::AppConfig;
 use orchestrator::Orchestrator;
@@ -60,14 +60,14 @@ async fn main() -> Result<()> {
     debug!("application config loaded successfully");
     let orchestrator = Orchestrator::new(config)?;
 
-    match options.interface.as_str() {
-        "web" => {
+    match options.interface {
+        Interface::Web => {
             info!("launching web interface");
             AutoPullRuntime::new(orchestrator.clone()).start();
             let recipes = orchestrator.recipes().clone();
             web::run_web_server(orchestrator, recipes, &options.host, options.port).await
         }
-        _ => {
+        Interface::Tui => {
             if let Some(message) = options.once_message {
                 info!("running in one-shot mode");
                 run_once(orchestrator, options.conversation_id, message).await
@@ -126,13 +126,44 @@ struct CliOptions {
     config_path_source: &'static str,
     once_message: Option<String>,
     conversation_id: Option<String>,
-    interface: String,
+    interface: Interface,
     host: String,
     port: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interface {
+    Tui,
+    Web,
+}
+
+impl Interface {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "tui" => Ok(Self::Tui),
+            "web" => Ok(Self::Web),
+            other => bail!("invalid --interface value '{other}'; expected 'tui' or 'web'"),
+        }
+    }
+}
+
 impl CliOptions {
     fn parse() -> Self {
+        match Self::try_parse_from(std::env::args().skip(1)) {
+            Ok(options) => options,
+            Err(err) => {
+                eprintln!("{err}");
+                eprintln!("Run with --help for usage.");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    fn try_parse_from<I, S>(args: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let env_config_path = std::env::var("RUSTY_BIDULE_CONFIG").ok();
         let mut options = Self {
             config_path: env_config_path
@@ -146,11 +177,11 @@ impl CliOptions {
             },
             once_message: None,
             conversation_id: None,
-            interface: "tui".to_string(),
+            interface: Interface::Tui,
             host: "127.0.0.1".to_string(),
             port: 8080,
         };
-        let mut args = std::env::args().skip(1);
+        let mut args = args.into_iter().map(Into::into);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "-h" | "--help" => {
@@ -158,43 +189,41 @@ impl CliOptions {
                     std::process::exit(0);
                 }
                 "--config" => {
-                    if let Some(path) = args.next() {
-                        options.config_path = path.into();
-                        options.config_path_source = "cli";
-                    }
+                    let path = next_arg_value(&mut args, "--config")?;
+                    options.config_path = path.into();
+                    options.config_path_source = "cli";
                 }
                 "--once" => {
-                    options.once_message = args.next();
+                    options.once_message = Some(next_arg_value(&mut args, "--once")?);
                 }
                 "--conversation" => {
-                    options.conversation_id = args.next();
+                    options.conversation_id = Some(next_arg_value(&mut args, "--conversation")?);
                 }
                 "--interface" => {
-                    if let Some(iface) = args.next() {
-                        options.interface = iface;
-                    }
+                    let iface = next_arg_value(&mut args, "--interface")?;
+                    options.interface = Interface::parse(&iface)?;
                 }
                 "--host" => {
-                    if let Some(host) = args.next() {
-                        options.host = host;
-                    }
+                    options.host = next_arg_value(&mut args, "--host")?;
                 }
                 "--port" => {
-                    if let Some(port_str) = args.next()
-                        && let Ok(port) = port_str.parse()
-                    {
-                        options.port = port;
-                    }
+                    let port_str = next_arg_value(&mut args, "--port")?;
+                    options.port = port_str
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("invalid --port value '{port_str}'"))?;
                 }
                 other => {
-                    eprintln!("Unknown option: {other}");
-                    eprintln!("Run with --help for usage.");
-                    std::process::exit(1);
+                    bail!("unknown option: {other}");
                 }
             }
         }
-        options
+        Ok(options)
     }
+}
+
+fn next_arg_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
+    args.next()
+        .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))
 }
 
 fn print_help() {
@@ -260,4 +289,38 @@ fn default_config_path() -> PathBuf {
     paths::discover_project_root()
         .map(|root| root.join("config").join("config.local.yaml"))
         .unwrap_or_else(|| PathBuf::from("config/config.local.yaml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliOptions, Interface};
+
+    #[test]
+    fn parses_web_interface_and_port() {
+        let options = CliOptions::try_parse_from(["--interface", "web", "--port", "9000"]).unwrap();
+
+        assert_eq!(options.interface, Interface::Web);
+        assert_eq!(options.port, 9000);
+    }
+
+    #[test]
+    fn rejects_invalid_interface() {
+        let err = CliOptions::try_parse_from(["--interface", "desktop"]).unwrap_err();
+
+        assert!(err.to_string().contains("invalid --interface value"));
+    }
+
+    #[test]
+    fn rejects_invalid_port() {
+        let err = CliOptions::try_parse_from(["--port", "not-a-port"]).unwrap_err();
+
+        assert!(err.to_string().contains("invalid --port value"));
+    }
+
+    #[test]
+    fn rejects_missing_option_value() {
+        let err = CliOptions::try_parse_from(["--once"]).unwrap_err();
+
+        assert!(err.to_string().contains("--once requires a value"));
+    }
 }

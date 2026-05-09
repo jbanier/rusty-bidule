@@ -211,6 +211,9 @@ pub struct FindingRecord {
 }
 
 impl FindingRecord {
+    pub const MIN_CONFIDENCE: u8 = 0;
+    pub const MAX_CONFIDENCE: u8 = 100;
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         finding_id: String,
@@ -221,9 +224,10 @@ impl FindingRecord {
         tags: Vec<String>,
         confidence: Option<u8>,
         source_artifact: Option<String>,
-    ) -> Self {
+    ) -> Result<Self> {
+        validate_finding_confidence(confidence)?;
         let now = Utc::now();
-        Self {
+        Ok(Self {
             finding_id,
             conversation_id,
             kind,
@@ -234,8 +238,31 @@ impl FindingRecord {
             source_artifact,
             created_at: now,
             updated_at: now,
-        }
+        })
     }
+
+    pub fn set_confidence(&mut self, confidence: Option<u8>) -> Result<()> {
+        validate_finding_confidence(confidence)?;
+        self.confidence = confidence;
+        Ok(())
+    }
+
+    pub fn validate_for_storage(&self) -> Result<()> {
+        validate_finding_confidence(self.confidence)
+    }
+}
+
+fn validate_finding_confidence(confidence: Option<u8>) -> Result<()> {
+    if let Some(confidence) = confidence
+        && !(FindingRecord::MIN_CONFIDENCE..=FindingRecord::MAX_CONFIDENCE).contains(&confidence)
+    {
+        bail!(
+            "invalid finding confidence: must be between {} and {}",
+            FindingRecord::MIN_CONFIDENCE,
+            FindingRecord::MAX_CONFIDENCE
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

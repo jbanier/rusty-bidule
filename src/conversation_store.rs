@@ -323,11 +323,23 @@ impl ConversationStore {
         }
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+        let findings: Vec<FindingRecord> = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        for finding in &findings {
+            finding
+                .validate_for_storage()
+                .with_context(|| format!("invalid finding state in {}", path.display()))?;
+        }
+        Ok(findings)
     }
 
     pub fn save_findings(&self, findings: &[FindingRecord]) -> Result<()> {
         self.init()?;
+        for finding in findings {
+            finding
+                .validate_for_storage()
+                .with_context(|| format!("invalid finding state for '{}'", finding.finding_id))?;
+        }
         let path = self.findings_path();
         let payload = serde_json::to_string_pretty(findings)?;
         fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))
@@ -359,7 +371,7 @@ impl ConversationStore {
             normalize_tags(tags),
             confidence,
             source_artifact.map(str::to_string),
-        );
+        )?;
         let mut findings = self.load_findings()?;
         findings.push(finding.clone());
         findings.sort_by_key(|finding| std::cmp::Reverse(finding.updated_at));
@@ -388,7 +400,7 @@ impl ConversationStore {
             finding.value = value.trim().to_string();
             finding.note = normalize_optional_text(note);
             finding.tags = normalize_tags(tags);
-            finding.confidence = confidence;
+            finding.set_confidence(confidence)?;
             finding.source_artifact = normalize_optional_text(source_artifact);
             finding.updated_at = Utc::now();
             updated = Some(finding.clone());
@@ -1037,6 +1049,27 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("missing field `summary`"));
+    }
+
+    #[test]
+    fn findings_reject_invalid_confidence() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+
+        let err = store
+            .add_finding(
+                &conversation.conversation_id,
+                "ip",
+                "1.2.3.4",
+                None,
+                &[],
+                Some(101),
+                None,
+            )
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("invalid finding confidence"));
     }
 
     #[test]

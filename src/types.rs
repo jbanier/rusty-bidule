@@ -1,3 +1,4 @@
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -333,9 +334,14 @@ pub struct RememberedJob {
 }
 
 impl RememberedJob {
-    pub fn new(alias: String, transaction_id: String) -> Self {
+    pub const MIN_POLL_INTERVAL_SECONDS: u64 = 1;
+    pub const MAX_POLL_INTERVAL_SECONDS: u64 = 86_400;
+
+    pub fn new(alias: String, transaction_id: String) -> Result<Self> {
         let now = Utc::now();
-        Self {
+        let alias = validate_non_empty_job_field("job alias", alias)?;
+        let transaction_id = validate_non_empty_job_field("job transaction_id", transaction_id)?;
+        Ok(Self {
             alias,
             transaction_id,
             source_tool: None,
@@ -352,7 +358,51 @@ impl RememberedJob {
             last_error: None,
             stored_at: now,
             updated_at: now,
+        })
+    }
+
+    pub fn set_transaction_id(&mut self, transaction_id: String) -> Result<()> {
+        self.transaction_id = validate_non_empty_job_field("job transaction_id", transaction_id)?;
+        Ok(())
+    }
+
+    pub fn set_mode(&mut self, mode: Option<String>) -> Result<()> {
+        self.mode = match mode {
+            Some(mode) => {
+                let mode = mode.trim();
+                if mode.is_empty() {
+                    None
+                } else if mode == "auto_pull" {
+                    Some(mode.to_string())
+                } else {
+                    bail!("job mode must be 'auto_pull' when set");
+                }
+            }
+            None => None,
+        };
+        Ok(())
+    }
+
+    pub fn set_poll_interval_seconds(&mut self, interval: Option<u64>) -> Result<()> {
+        if let Some(interval) = interval {
+            validate_poll_interval_seconds(interval)?;
         }
+        self.poll_interval_seconds = interval;
+        Ok(())
+    }
+
+    pub fn validate_for_storage(&self) -> Result<()> {
+        validate_non_empty_job_field("job alias", self.alias.clone())?;
+        validate_non_empty_job_field("job transaction_id", self.transaction_id.clone())?;
+        if let Some(mode) = &self.mode
+            && mode != "auto_pull"
+        {
+            bail!("job mode must be 'auto_pull' when set");
+        }
+        if let Some(interval) = self.poll_interval_seconds {
+            validate_poll_interval_seconds(interval)?;
+        }
+        Ok(())
     }
 
     pub fn is_due_for_poll(&self, now: DateTime<Utc>) -> bool {
@@ -363,6 +413,27 @@ impl RememberedJob {
                 .map(|lease| lease <= now)
                 .unwrap_or(true)
     }
+}
+
+fn validate_non_empty_job_field(label: &str, value: String) -> Result<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        bail!("{label} must not be empty");
+    }
+    Ok(value)
+}
+
+fn validate_poll_interval_seconds(value: u64) -> Result<()> {
+    if !(RememberedJob::MIN_POLL_INTERVAL_SECONDS..=RememberedJob::MAX_POLL_INTERVAL_SECONDS)
+        .contains(&value)
+    {
+        bail!(
+            "job poll_interval_seconds must be between {} and {}",
+            RememberedJob::MIN_POLL_INTERVAL_SECONDS,
+            RememberedJob::MAX_POLL_INTERVAL_SECONDS
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

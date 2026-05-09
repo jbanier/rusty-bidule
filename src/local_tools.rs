@@ -222,17 +222,9 @@ impl LocalToolExecutor {
 
     fn exec_remember_job(&self, arguments: Value) -> Result<String> {
         self.require_filesystem_write("local__remember_job")?;
-        let alias = arguments
-            .get("alias")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("remember_job: missing 'alias'"))?
-            .to_string();
-        let transaction_id = arguments
-            .get("transaction_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("remember_job: missing 'transaction_id'"))?
-            .to_string();
-        let mut record = RememberedJob::new(alias.clone(), transaction_id);
+        let alias = required_string_arg(&arguments, "alias", "remember_job")?;
+        let transaction_id = required_string_arg(&arguments, "transaction_id", "remember_job")?;
+        let mut record = RememberedJob::new(alias.clone(), transaction_id)?;
         record.source_tool = arguments
             .get("source_tool")
             .and_then(Value::as_str)
@@ -245,13 +237,12 @@ impl LocalToolExecutor {
             .get("notes")
             .and_then(Value::as_str)
             .map(str::to_string);
-        record.mode = arguments
-            .get("mode")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        record.poll_interval_seconds = arguments
-            .get("poll_interval_seconds")
-            .and_then(Value::as_u64);
+        record.set_mode(optional_string_arg(&arguments, "mode", "remember_job")?)?;
+        record.set_poll_interval_seconds(optional_u64_arg(
+            &arguments,
+            "poll_interval_seconds",
+            "remember_job",
+        )?)?;
         record.next_poll_at = parse_optional_datetime(arguments.get("next_poll_at"))?;
         record.lease_expires_at = parse_optional_datetime(arguments.get("lease_expires_at"))?;
         record.result_expires_at = parse_optional_datetime(arguments.get("result_expires_at"))?;
@@ -288,8 +279,12 @@ impl LocalToolExecutor {
             .find(|job| job.alias == alias)
             .ok_or_else(|| anyhow!("Job '{alias}' not found."))?;
 
-        if let Some(value) = arguments.get("transaction_id").and_then(Value::as_str) {
-            job.transaction_id = value.to_string();
+        if arguments.get("transaction_id").is_some() {
+            job.set_transaction_id(required_string_arg(
+                &arguments,
+                "transaction_id",
+                "update_job",
+            )?)?;
         }
         if let Some(value) = arguments.get("source_tool").and_then(Value::as_str) {
             job.source_tool = Some(value.to_string());
@@ -307,15 +302,14 @@ impl LocalToolExecutor {
                 .map(str::to_string);
         }
         if arguments.get("mode").is_some() {
-            job.mode = arguments
-                .get("mode")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            job.set_mode(optional_string_arg(&arguments, "mode", "update_job")?)?;
         }
         if arguments.get("poll_interval_seconds").is_some() {
-            job.poll_interval_seconds = arguments
-                .get("poll_interval_seconds")
-                .and_then(Value::as_u64);
+            job.set_poll_interval_seconds(optional_u64_arg(
+                &arguments,
+                "poll_interval_seconds",
+                "update_job",
+            )?)?;
         }
         if arguments.get("next_poll_at").is_some() {
             job.next_poll_at = parse_optional_datetime(arguments.get("next_poll_at"))?;
@@ -920,12 +914,14 @@ impl LocalToolExecutor {
         let alias = pending
             .alias
             .unwrap_or_else(|| format!("{tool_slug}-{}", pending.transaction_id));
-        let mut record = RememberedJob::new(alias, pending.transaction_id);
+        let mut record = RememberedJob::new(alias, pending.transaction_id)?;
         record.source_tool = Some(tool_slug.to_string());
         record.status = Some(pending.status.unwrap_or_else(|| "pending".to_string()));
         record.notes = pending.notes;
-        record.mode = Some(pending.mode.unwrap_or_else(|| "auto_pull".to_string()));
-        record.poll_interval_seconds = Some(pending.poll_interval_seconds.unwrap_or(30));
+        record.set_mode(Some(
+            pending.mode.unwrap_or_else(|| "auto_pull".to_string()),
+        ))?;
+        record.set_poll_interval_seconds(Some(pending.poll_interval_seconds.unwrap_or(30)))?;
         record.next_poll_at = match pending.next_poll_at {
             Some(value) => Some(value),
             None => record
@@ -1012,6 +1008,51 @@ fn parse_optional_datetime(value: Option<&Value>) -> Result<Option<chrono::DateT
     let parsed = chrono::DateTime::parse_from_rfc3339(raw)
         .with_context(|| format!("invalid RFC3339 timestamp '{raw}'"))?;
     Ok(Some(parsed.with_timezone(&chrono::Utc)))
+}
+
+fn required_string_arg(arguments: &Value, field: &str, tool_name: &str) -> Result<String> {
+    let value = arguments
+        .get(field)
+        .ok_or_else(|| anyhow!("{tool_name}: missing '{field}'"))?;
+    let value = value
+        .as_str()
+        .ok_or_else(|| anyhow!("{tool_name}: '{field}' must be a string"))?
+        .trim();
+    if value.is_empty() {
+        bail!("{tool_name}: '{field}' must not be empty");
+    }
+    Ok(value.to_string())
+}
+
+fn optional_string_arg(arguments: &Value, field: &str, tool_name: &str) -> Result<Option<String>> {
+    let Some(value) = arguments.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value
+        .as_str()
+        .ok_or_else(|| anyhow!("{tool_name}: '{field}' must be a string or null"))?
+        .trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value.to_string()))
+    }
+}
+
+fn optional_u64_arg(arguments: &Value, field: &str, tool_name: &str) -> Result<Option<u64>> {
+    let Some(value) = arguments.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| anyhow!("{tool_name}: '{field}' must be an unsigned integer or null"))
 }
 
 fn memory_patch_value<'a>(arguments: &'a Value, field: &str) -> Option<&'a Value> {
@@ -1254,6 +1295,81 @@ mod tests {
         assert!(err.to_string().contains("filesystem write access"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn job_storage_rejects_invalid_identifiers_and_poll_intervals() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            AgentPermissions {
+                allow_network: false,
+                filesystem: FilesystemAccess::ReadWrite,
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(180),
+            Vec::new(),
+        );
+
+        let err = executor
+            .execute(
+                "local__remember_job",
+                json!({"alias": " ", "transaction_id": "123"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("'alias' must not be empty"));
+
+        let err = executor
+            .execute(
+                "local__remember_job",
+                json!({"alias": "demo", "transaction_id": "123", "poll_interval_seconds": 0}),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("poll_interval_seconds"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_job_rejects_unknown_mode() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            AgentPermissions {
+                allow_network: false,
+                filesystem: FilesystemAccess::ReadWrite,
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(180),
+            Vec::new(),
+        );
+        executor
+            .execute(
+                "local__remember_job",
+                json!({"alias": "demo", "transaction_id": "123"}),
+            )
+            .await
+            .unwrap();
+
+        let err = executor
+            .execute(
+                "local__update_job",
+                json!({"alias": "demo", "mode": "manual"}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("job mode must be 'auto_pull'"));
+    }
+
     #[test]
     fn known_local_tool_can_be_disabled_by_filter() {
         let dir = tempdir().unwrap();
@@ -1454,6 +1570,70 @@ Tools:
         assert_eq!(job.mode.as_deref(), Some("auto_pull"));
         assert_eq!(job.poll_interval_seconds, Some(45));
         assert_eq!(job.retrieval_state.as_deref(), Some("submitted"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_skill_rejects_invalid_pending_job_metadata() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("bad-job-demo");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::write(
+            skill_dir.join("scripts/submit.py"),
+            r#"import json
+print(json.dumps({
+  "status": "pending",
+  "job": {
+    "alias": "bad-job",
+    "transaction_id": "sid-123",
+    "poll_interval_seconds": 0
+  }
+}))
+"#,
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: bad-job-demo
+description: Demo invalid pending job metadata
+---
+
+Tools:
+  - name: Submit
+    slug: submit
+    script: scripts/submit.py
+    filesystem: read_write
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            Some(skills),
+            AgentPermissions {
+                allow_network: false,
+                filesystem: FilesystemAccess::ReadWrite,
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(180),
+            Vec::new(),
+        );
+
+        let err = executor
+            .execute(
+                "local__run_skill",
+                json!({"skill_name": "bad-job-demo", "tool_slug": "submit"}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("poll_interval_seconds"));
     }
 
     #[tokio::test(flavor = "current_thread")]

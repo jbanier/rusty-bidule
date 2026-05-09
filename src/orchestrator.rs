@@ -386,6 +386,10 @@ impl Orchestrator {
             max_advertised_tools,
         );
         let advertised_mcp_tools = advertised_mcp_tools(&llm_tools, &mcp_tools);
+        let advertised_mcp_tool_names = advertised_mcp_tools
+            .iter()
+            .map(|tool| tool.external_name.clone())
+            .collect::<HashSet<_>>();
         let mcp_capability_summary =
             summarize_advertised_mcp_tools(&advertised_mcp_tools, &mcp_tools);
 
@@ -561,6 +565,7 @@ impl Orchestrator {
                             tool_input,
                             &local_executor,
                             &agent_permissions,
+                            &advertised_mcp_tool_names,
                         )
                         .await;
                     tool_seconds += tool_start.elapsed().as_secs_f64();
@@ -758,6 +763,7 @@ impl Orchestrator {
         arguments: Value,
         local_executor: &LocalToolExecutor,
         agent_permissions: &AgentPermissions,
+        advertised_mcp_tool_names: &HashSet<String>,
     ) -> Result<String> {
         self.inner.store.append_log(
             conversation_id,
@@ -842,6 +848,24 @@ impl Orchestrator {
             self.inner.store.append_log(
                 conversation_id,
                 &format!("tool call denied: {} error={}", tool_name, failure),
+            )?;
+            return Err(anyhow!(failure));
+        }
+
+        if !advertised_mcp_tool_names.contains(tool_name) {
+            let failure = format!(
+                "MCP tool '{tool_name}' is not advertised for the current turn. Enable its server or narrow the request to one of the currently advertised tools before retrying."
+            );
+            self.inner.evidence.write_artifact(
+                conversation_id,
+                tool_name,
+                &arguments,
+                "failure",
+                &failure,
+            )?;
+            self.inner.store.append_log(
+                conversation_id,
+                &format!("tool call rejected: {} error={}", tool_name, failure),
             )?;
             return Err(anyhow!(failure));
         }
@@ -961,29 +985,41 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
 
     let mut messages = vec![LlmMessage::System(system_prompt)];
 
-    // Check for active compaction
     let conversation = ctx.store.load(ctx.conversation_id).ok();
     if let Some(ref convo) = conversation
         && let Some(checkpoint_id) = &convo.active_compaction
-        && let Ok(summary) = ctx
+    {
+        match ctx
             .store
             .load_compaction(ctx.conversation_id, checkpoint_id)
-    {
-        messages.push(LlmMessage::System(format!(
-            "Previous conversation summary:\n{summary}"
-        )));
-        if let Some(active_skills) = activated_skills_context(ctx.store, ctx.conversation_id) {
-            messages.push(LlmMessage::System(active_skills));
+        {
+            Ok(summary) => {
+                messages.push(LlmMessage::System(format!(
+                    "Previous conversation summary:\n{summary}"
+                )));
+                if let Some(active_skills) =
+                    activated_skills_context(ctx.store, ctx.conversation_id)
+                {
+                    messages.push(LlmMessage::System(active_skills));
+                }
+                let tail: Vec<_> = ctx.history.iter().rev().take(10).collect();
+                for msg in tail.into_iter().rev() {
+                    messages.push(stored_message_to_llm_message(msg));
+                }
+                if let Some(user_message) = ctx.user_message_override {
+                    messages.push(LlmMessage::UserText(user_message.to_string()));
+                }
+                return messages;
+            }
+            Err(err) => {
+                warn!(
+                    conversation_id = %ctx.conversation_id,
+                    checkpoint_id,
+                    error = %err,
+                    "active compaction could not be loaded; using full conversation history"
+                );
+            }
         }
-        // Only include the last 10 messages after compaction
-        let tail: Vec<_> = ctx.history.iter().rev().take(10).collect();
-        for msg in tail.into_iter().rev() {
-            messages.push(stored_message_to_llm_message(msg));
-        }
-        if let Some(user_message) = ctx.user_message_override {
-            messages.push(LlmMessage::UserText(user_message.to_string()));
-        }
-        return messages;
     }
 
     messages.extend(ctx.history.iter().map(stored_message_to_llm_message));
@@ -1356,16 +1392,25 @@ fn sanitize_tool_schema(value: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        fs,
+    };
+
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::time::{Duration, timeout};
 
     use crate::{
-        config::DEFAULT_MAX_ADVERTISED_TOOLS,
+        config::{
+            AppConfig, DEFAULT_MAX_ADVERTISED_TOOLS, LocalToolsConfig, McpRuntimeConfig,
+            McpServerConfig, SkillsConfig,
+        },
         conversation_store::ConversationStore,
         llm::{LlmAssistantBlock, LlmMessage, LlmTool},
+        local_tools::LocalToolExecutor,
         mcp_runtime::McpTool,
-        types::{ActivatedSkill, AgentPermissions},
+        types::{ActivatedSkill, AgentPermissions, FilesystemAccess},
     };
 
     use super::{
@@ -1752,5 +1797,121 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn build_messages_uses_full_history_when_active_compaction_is_invalid() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        for index in 0..11 {
+            store
+                .append_message(
+                    &conversation.conversation_id,
+                    "user",
+                    format!("message {index}"),
+                )
+                .unwrap();
+        }
+        let mut conversation = store.load(&conversation.conversation_id).unwrap();
+        conversation.active_compaction = Some("checkpoint-1".to_string());
+        store.save(&conversation).unwrap();
+        fs::write(
+            store
+                .conversation_dir(&conversation.conversation_id)
+                .unwrap()
+                .join("compactions/checkpoint-1.json"),
+            r#"{"checkpoint_id":"checkpoint-1","created_at":"2026-05-09T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let history = store.load(&conversation.conversation_id).unwrap().messages;
+        let permissions = AgentPermissions::default();
+
+        let messages = build_messages(MessageBuildContext {
+            prompt: None,
+            history: &history,
+            mcp_error: None,
+            recipe_instructions: None,
+            capability_summary: None,
+            mcp_capability_summary: None,
+            agent_permissions: &permissions,
+            store: &store,
+            conversation_id: &conversation.conversation_id,
+            user_message_override: None,
+        });
+
+        let user_message_count = messages
+            .iter()
+            .filter(|message| matches!(message, LlmMessage::UserText(text) if text.starts_with("message ")))
+            .count();
+        assert_eq!(user_message_count, 11);
+        assert!(!messages.iter().any(|message| {
+            matches!(
+                message,
+                LlmMessage::System(text) if text.contains("Previous conversation summary:")
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn rejects_mcp_tool_not_advertised_for_current_turn() {
+        let dir = tempdir().unwrap();
+        let permissions = AgentPermissions {
+            allow_network: true,
+            filesystem: FilesystemAccess::ReadOnly,
+            yolo: false,
+        };
+        let orchestrator = super::Orchestrator::new(AppConfig {
+            prompt: None,
+            data_dir: Some(dir.path().to_path_buf()),
+            llm_provider: None,
+            azure_openai: None,
+            openai: None,
+            azure_anthropic: None,
+            openai_compatible: None,
+            agent_permissions: permissions.clone(),
+            local_tools: LocalToolsConfig::default(),
+            skills: SkillsConfig::default(),
+            mcp_runtime: McpRuntimeConfig::default(),
+            mcp_servers: vec![McpServerConfig {
+                name: "demo".to_string(),
+                transport: "streamable_http".to_string(),
+                url: "http://127.0.0.1:1/mcp".to_string(),
+                command: None,
+                args: Vec::new(),
+                headers: HashMap::new(),
+                timeout: Some(1),
+                sse_read_timeout: None,
+                client_session_timeout_seconds: Some(1),
+                auth: None,
+            }],
+            tracing: None,
+        })
+        .unwrap();
+        let store = orchestrator.store();
+        let conversation = store.create_conversation().unwrap();
+        let local_executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            permissions.clone(),
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        );
+
+        let err = orchestrator
+            .execute_tool_call(
+                &conversation.conversation_id,
+                "demo__hello",
+                json!({}),
+                &local_executor,
+                &permissions,
+                &HashSet::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("not advertised for the current turn"));
     }
 }

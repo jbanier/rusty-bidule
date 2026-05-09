@@ -6,11 +6,19 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 use crate::types::{
     ActivatedSkill, AgentPermissions, Conversation, ConversationSummary, FindingRecord,
     InvestigationMemory, Message, MessageMetadata, RememberedJob, SearchResult,
 };
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CompactionRecord {
+    checkpoint_id: String,
+    created_at: String,
+    summary: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct ConversationStore {
@@ -616,8 +624,12 @@ impl ConversationStore {
         if path.exists() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            let jobs = serde_json::from_str(&raw)
+            let jobs: Vec<RememberedJob> = serde_json::from_str(&raw)
                 .with_context(|| format!("failed to parse {}", path.display()))?;
+            for job in &jobs {
+                job.validate_for_storage()
+                    .with_context(|| format!("invalid job state in {}", path.display()))?;
+            }
             return Ok(jobs);
         }
 
@@ -642,7 +654,7 @@ impl ConversationStore {
             if transaction_id.is_empty() {
                 continue;
             }
-            let mut job = RememberedJob::new(alias.clone(), transaction_id);
+            let mut job = RememberedJob::new(alias.clone(), transaction_id)?;
             job.source_tool = value
                 .get("source_tool")
                 .and_then(|v| v.as_str())
@@ -671,6 +683,10 @@ impl ConversationStore {
 
     pub fn save_job_state(&self, conversation_id: &str, jobs: &[RememberedJob]) -> Result<()> {
         self.ensure_layout(conversation_id)?;
+        for job in jobs {
+            job.validate_for_storage()
+                .with_context(|| format!("invalid job state for '{}'", job.alias))?;
+        }
         let path = self.job_state_path(conversation_id)?;
         let payload = serde_json::to_string_pretty(jobs)?;
         fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
@@ -705,11 +721,11 @@ impl ConversationStore {
             .conversation_dir(conversation_id)?
             .join("compactions")
             .join(format!("{checkpoint_id}.json"));
-        let payload = serde_json::to_string_pretty(&serde_json::json!({
-            "checkpoint_id": checkpoint_id,
-            "created_at": Utc::now().to_rfc3339(),
-            "summary": summary,
-        }))?;
+        let payload = serde_json::to_string_pretty(&CompactionRecord {
+            checkpoint_id: checkpoint_id.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            summary: summary.to_string(),
+        })?;
         fs::write(&path, payload)
             .with_context(|| format!("failed to write compaction {}", path.display()))?;
         // Update active_compaction pointer in conversation.json
@@ -727,8 +743,19 @@ impl ConversationStore {
             .join(format!("{checkpoint_id}.json"));
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read compaction {}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_str(&raw)?;
-        Ok(value["summary"].as_str().unwrap_or_default().to_string())
+        let record: CompactionRecord = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse compaction {}", path.display()))?;
+        if record.checkpoint_id != checkpoint_id {
+            bail!(
+                "compaction {} contains checkpoint id '{}'",
+                path.display(),
+                record.checkpoint_id
+            );
+        }
+        if record.summary.trim().is_empty() {
+            bail!("compaction {} has an empty summary", path.display());
+        }
+        Ok(record.summary)
     }
 }
 
@@ -989,6 +1016,27 @@ mod tests {
             export_path.file_name().unwrap().to_string_lossy(),
             format!("{}-summary.json", conversation.conversation_id)
         );
+    }
+
+    #[test]
+    fn load_compaction_rejects_missing_summary() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        fs::write(
+            store
+                .conversation_dir(&conversation.conversation_id)
+                .unwrap()
+                .join("compactions/checkpoint-1.json"),
+            r#"{"checkpoint_id":"checkpoint-1","created_at":"2026-05-09T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let err = store
+            .load_compaction(&conversation.conversation_id, "checkpoint-1")
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("missing field `summary`"));
     }
 
     #[test]

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 import argparse
-import pathlib
 
-from common import json_dump, preview_text
+from common import json_dump, preview_text, resolve_scoped_path
 
 
 def main() -> None:
@@ -12,7 +11,7 @@ def main() -> None:
     parser.add_argument("--start-byte", type=int, default=0)
     args = parser.parse_args()
 
-    path = pathlib.Path(args.path).expanduser().resolve()
+    path = resolve_scoped_path(args.path)
     with path.open("rb") as handle:
         handle.seek(max(args.start_byte, 0))
         data = handle.read(max(args.max_bytes, 1))

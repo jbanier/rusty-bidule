@@ -32,6 +32,9 @@ use crate::{
 const MAX_AGENT_ITERATIONS: usize = 10;
 const PINNED_LOCAL_TOOL_NAMES: &[&str] = &[
     "local__configure_mcp_servers",
+    "local__list_directory",
+    "local__read_file",
+    "local__write_file",
     "local__activate_skill",
     "local__run_skill",
     "local__get_investigation_memory",
@@ -562,7 +565,8 @@ impl Orchestrator {
             local_tool_filter.clone(),
             std::time::Duration::from_secs(self.inner.config.local_tools.execution_timeout_seconds),
             self.inner.config.local_tools.allowed_cli_tools.clone(),
-        );
+        )
+        .with_local_tools_config(&self.inner.config.local_tools);
 
         let mut tool_call_count = 0usize;
         let mut evidence = Vec::<ToolArtifact>::new();
@@ -1467,6 +1471,17 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
         "\n\nActive agent permissions:\n- {}\n",
         ctx.agent_permissions.summary()
     ));
+    let workspace_root = std::env::current_dir()
+        .ok()
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    system_prompt.push_str(&format!(
+        "- filesystem workspace root: `{}`\n",
+        workspace_root.display()
+    ));
+    system_prompt.push_str(
+        "- Use `local__list_directory`, `local__read_file`, and `local__write_file` for local filesystem work. Relative paths resolve under the workspace root; paths outside it require filesystem_scope=full.\n",
+    );
     if let Some(prompt) = ctx.prompt {
         system_prompt.push_str("\n\nOperator prompt:\n");
         system_prompt.push_str(prompt);
@@ -2430,6 +2445,7 @@ mod tests {
         let permissions = AgentPermissions {
             allow_network: true,
             filesystem: FilesystemAccess::ReadOnly,
+            filesystem_scope: Default::default(),
             yolo: false,
         };
         let orchestrator = super::Orchestrator::new(AppConfig {

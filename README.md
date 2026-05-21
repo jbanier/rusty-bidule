@@ -264,11 +264,13 @@ The app applies default tool permissions from config to every new conversation:
 agent_permissions:
   allow_network: false
   filesystem: read_only
+  filesystem_scope: workspace
   yolo: false
 ```
 
 - `allow_network`: controls networked tool use such as MCP calls
 - `filesystem`: one of `none`, `read_only`, `read_write`
+- `filesystem_scope`: `workspace` restricts paths under the process working directory; `full` permits paths outside it while still requiring filesystem read/write permission
 - `yolo`: bypasses the internal permission checks
 
 In the TUI, these can be changed per conversation with `/permissions ...` and
@@ -281,6 +283,9 @@ Local built-in tools are configured under:
 ```yaml
 local_tools:
   execution_timeout_seconds: 180
+  max_file_read_bytes: 16384
+  max_file_write_bytes: 1048576
+  max_directory_entries: 1000
   allowed_cli_tools:
     - nmap
     - vt
@@ -292,6 +297,7 @@ local_tools:
 - `local__run_skill` executes script-backed skills
 - `local__exec_cli` executes only the listed binary names with direct argv execution
 - `local__time` returns current UTC/local time and computes relative windows like last 12 hours or last 2 days
+- `local__list_directory`, `local__read_file`, and `local__write_file` provide scoped local filesystem access with chunked reads and capped writes
 - `local__get_investigation_memory`, `local__update_investigation_memory`,
   `local__clear_investigation_memory`, and `local__search_conversation_memories`
   manage durable case carry-over state
@@ -411,6 +417,7 @@ Permissions:
 - `/permissions`
 - `/permissions network on|off`
 - `/permissions fs none|read|write`
+- `/permissions fs-scope workspace|full`
 - `/permissions yolo on|off`
 - `/permissions reset`
 - `/yolo on|off`

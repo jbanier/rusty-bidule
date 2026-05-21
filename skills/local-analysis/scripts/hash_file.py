@@ -5,7 +5,7 @@ import pathlib
 import shutil
 import subprocess
 
-from common import json_dump, sha256_file
+from common import json_dump, resolve_scoped_path, sha256_file
 
 
 def digest(path: pathlib.Path, algorithm: str) -> str:
@@ -35,7 +35,7 @@ def main() -> None:
     parser.add_argument("--path", required=True, help="Local file path")
     args = parser.parse_args()
 
-    path = pathlib.Path(args.path).expanduser().resolve()
+    path = resolve_scoped_path(args.path)
     stat = path.stat()
     ssdeep_value, ssdeep_error = maybe_ssdeep(path)
 

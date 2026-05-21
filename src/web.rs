@@ -22,8 +22,8 @@ use crate::{
     recipes::RecipeRegistry,
     schedules::{ScheduleCreateRequest, build_schedule_record, run_schedule_by_id},
     types::{
-        ConversationSummary, FilesystemAccess, ProgressEvent, RetentionPolicy, RunTurnResult,
-        UiEvent,
+        ConversationSummary, FilesystemAccess, FilesystemScope, ProgressEvent, RetentionPolicy,
+        RunTurnResult, UiEvent,
     },
 };
 
@@ -155,6 +155,7 @@ struct ConversationProtectionBody {
 struct PermissionsUpdateBody {
     allow_network: Option<bool>,
     filesystem: Option<FilesystemAccess>,
+    filesystem_scope: Option<FilesystemScope>,
     yolo: Option<bool>,
     reset: Option<bool>,
 }
@@ -302,6 +303,9 @@ async fn put_conversation_permissions(
     }
     if let Some(value) = body.filesystem {
         permissions.filesystem = value;
+    }
+    if let Some(value) = body.filesystem_scope {
+        permissions.filesystem_scope = value;
     }
     if let Some(value) = body.yolo {
         permissions.yolo = value;
@@ -1378,7 +1382,7 @@ mod tests {
         config::{AppConfig, LocalToolsConfig, McpRuntimeConfig, SkillsConfig},
         orchestrator::Orchestrator,
         recipes::RecipeRegistry,
-        types::{AgentPermissions, FilesystemAccess},
+        types::{AgentPermissions, FilesystemAccess, FilesystemScope},
     };
 
     use super::{
@@ -1566,6 +1570,7 @@ mod tests {
             axum::Json(PermissionsUpdateBody {
                 allow_network: Some(true),
                 filesystem: Some(FilesystemAccess::ReadWrite),
+                filesystem_scope: Some(FilesystemScope::Full),
                 yolo: Some(true),
                 reset: None,
             }),
@@ -1575,6 +1580,7 @@ mod tests {
         .0;
         assert_eq!(updated["allow_network"], true);
         assert_eq!(updated["filesystem"], "read_write");
+        assert_eq!(updated["filesystem_scope"], "full");
         assert_eq!(updated["yolo"], true);
 
         let loaded = get_conversation_permissions(State(state), Path(conversation.conversation_id))
@@ -1583,6 +1589,7 @@ mod tests {
             .0;
         assert_eq!(loaded["allow_network"], true);
         assert_eq!(loaded["filesystem"], "read_write");
+        assert_eq!(loaded["filesystem_scope"], "full");
         assert_eq!(loaded["yolo"], true);
     }
 

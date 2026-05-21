@@ -210,6 +210,12 @@ pub struct LocalToolsConfig {
     pub execution_timeout_seconds: u64,
     #[serde(default = "default_allowed_cli_tools")]
     pub allowed_cli_tools: Vec<String>,
+    #[serde(default = "default_max_file_read_bytes")]
+    pub max_file_read_bytes: u64,
+    #[serde(default = "default_max_file_write_bytes")]
+    pub max_file_write_bytes: u64,
+    #[serde(default = "default_max_directory_entries")]
+    pub max_directory_entries: usize,
 }
 
 impl Default for LocalToolsConfig {
@@ -217,6 +223,9 @@ impl Default for LocalToolsConfig {
         Self {
             execution_timeout_seconds: default_local_tool_execution_timeout_seconds(),
             allowed_cli_tools: default_allowed_cli_tools(),
+            max_file_read_bytes: default_max_file_read_bytes(),
+            max_file_write_bytes: default_max_file_write_bytes(),
+            max_directory_entries: default_max_directory_entries(),
         }
     }
 }
@@ -712,6 +721,18 @@ const fn default_local_tool_execution_timeout_seconds() -> u64 {
     180
 }
 
+const fn default_max_file_read_bytes() -> u64 {
+    16_384
+}
+
+const fn default_max_file_write_bytes() -> u64 {
+    1_048_576
+}
+
+const fn default_max_directory_entries() -> usize {
+    1_000
+}
+
 fn default_token_endpoint_auth_method() -> String {
     "none".to_string()
 }
@@ -730,7 +751,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::types::FilesystemAccess;
+    use crate::types::{FilesystemAccess, FilesystemScope};
 
     use super::{AdkProvider, AppConfig, AzureAnthropicConfig, LlmProvider, ProjectSkillsPolicy};
 
@@ -764,6 +785,9 @@ mcp_servers:
             Some("super-secret")
         );
         assert_eq!(config.local_tools.execution_timeout_seconds, 180);
+        assert_eq!(config.local_tools.max_file_read_bytes, 16_384);
+        assert_eq!(config.local_tools.max_file_write_bytes, 1_048_576);
+        assert_eq!(config.local_tools.max_directory_entries, 1_000);
         assert_eq!(config.effective_max_advertised_tools(), 128);
         assert_eq!(
             config.skills.project_skills,
@@ -1279,6 +1303,7 @@ azure_openai:
 agent_permissions:
   allow_network: true
   filesystem: read_write
+  filesystem_scope: full
   yolo: false
 "#,
         )
@@ -1289,6 +1314,10 @@ agent_permissions:
         assert_eq!(
             config.agent_permissions.filesystem,
             FilesystemAccess::ReadWrite
+        );
+        assert_eq!(
+            config.agent_permissions.filesystem_scope,
+            FilesystemScope::Full
         );
         assert!(!config.agent_permissions.yolo);
     }

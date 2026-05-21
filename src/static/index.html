@@ -119,6 +119,13 @@
               <option value="read_write">Write</option>
             </select>
           </label>
+          <label class="filesystem-control" for="permission-filesystem-scope">
+            <span>Scope</span>
+            <select id="permission-filesystem-scope" title="Set filesystem path scope for this conversation">
+              <option value="workspace">Workspace</option>
+              <option value="full">Full</option>
+            </select>
+          </label>
           <button
             id="permission-yolo"
             class="permission-chip permission-chip-danger"
@@ -505,6 +512,7 @@
   const compactConversationButtonEl = document.getElementById('compact-conversation');
   const permissionNetworkButtonEl = document.getElementById('permission-network');
   const permissionFilesystemSelectEl = document.getElementById('permission-filesystem');
+  const permissionFilesystemScopeSelectEl = document.getElementById('permission-filesystem-scope');
   const permissionYoloButtonEl = document.getElementById('permission-yolo');
   const permissionResetButtonEl = document.getElementById('permission-reset');
   const applyRecipeButtonEl = document.getElementById('apply-recipe');
@@ -644,6 +652,9 @@
   });
   permissionFilesystemSelectEl.addEventListener('change', () => {
     setConversationPermissions({ filesystem: permissionFilesystemSelectEl.value });
+  });
+  permissionFilesystemScopeSelectEl.addEventListener('change', () => {
+    setConversationPermissions({ filesystem_scope: permissionFilesystemScopeSelectEl.value });
   });
   permissionYoloButtonEl.addEventListener('click', () => {
     const permissions = normalizePermissions(state.activeConversation && state.activeConversation.agent_permissions);
@@ -1625,9 +1636,13 @@
     const filesystem = permissions && ['none', 'read_only', 'read_write'].includes(permissions.filesystem)
       ? permissions.filesystem
       : 'read_only';
+    const filesystem_scope = permissions && ['workspace', 'full'].includes(permissions.filesystem_scope)
+      ? permissions.filesystem_scope
+      : 'workspace';
     return {
       allow_network: Boolean(permissions && permissions.allow_network),
       filesystem,
+      filesystem_scope,
       yolo: Boolean(permissions && permissions.yolo),
     };
   }
@@ -1642,6 +1657,7 @@
     return [
       normalized.allow_network || normalized.yolo ? 'net:on' : 'net:off',
       normalized.yolo ? 'fs:all' : filesystemLabels[normalized.filesystem],
+      normalized.yolo ? 'scope:full' : `scope:${normalized.filesystem_scope}`,
       normalized.yolo ? 'all:on' : 'all:off',
     ].join(' ');
   }
@@ -1657,6 +1673,7 @@
     permissionNetworkButtonEl.classList.toggle('is-on', normalized.allow_network);
 
     permissionFilesystemSelectEl.value = normalized.filesystem;
+    permissionFilesystemScopeSelectEl.value = normalized.filesystem_scope;
 
     permissionYoloButtonEl.textContent = normalized.yolo ? 'All on' : 'All off';
     permissionYoloButtonEl.setAttribute('aria-pressed', String(normalized.yolo));
@@ -1664,6 +1681,7 @@
 
     permissionNetworkButtonEl.disabled = disabled;
     permissionFilesystemSelectEl.disabled = disabled;
+    permissionFilesystemScopeSelectEl.disabled = disabled;
     permissionYoloButtonEl.disabled = disabled;
     permissionResetButtonEl.disabled = disabled;
   }
@@ -1671,7 +1689,7 @@
   async function setConversationPermissions(patch) {
     if (!state.activeConversationId) return;
     const conversationId = state.activeConversationId;
-    [permissionNetworkButtonEl, permissionFilesystemSelectEl, permissionYoloButtonEl, permissionResetButtonEl]
+    [permissionNetworkButtonEl, permissionFilesystemSelectEl, permissionFilesystemScopeSelectEl, permissionYoloButtonEl, permissionResetButtonEl]
       .forEach((control) => { control.disabled = true; });
     const response = await fetch(`/api/conversations/${conversationId}/permissions`, {
       method: 'PUT',

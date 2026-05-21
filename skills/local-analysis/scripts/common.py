@@ -29,7 +29,42 @@ def read_text_argument(args: argparse.Namespace) -> str:
 
 
 def read_bytes_from_file(path: str) -> bytes:
-    return pathlib.Path(path).read_bytes()
+    return resolve_scoped_path(path).read_bytes()
+
+
+def filesystem_scope() -> str:
+    return os.environ.get("RUSTY_BIDULE_FILESYSTEM_SCOPE", "full")
+
+
+def filesystem_root() -> pathlib.Path:
+    raw = os.environ.get("RUSTY_BIDULE_FILESYSTEM_ROOT")
+    if raw:
+        return pathlib.Path(raw).expanduser().resolve()
+    return pathlib.Path.cwd().resolve()
+
+
+def path_is_relative_to(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_scoped_path(path: str, *, must_exist: bool = True) -> pathlib.Path:
+    root = filesystem_root()
+    candidate = pathlib.Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    if must_exist or candidate.exists():
+        resolved = candidate.resolve()
+    else:
+        resolved = candidate.parent.resolve() / candidate.name
+    if filesystem_scope() != "full" and not path_is_relative_to(resolved, root):
+        raise SystemExit(
+            f"path outside filesystem workspace scope: {resolved} (workspace root: {root})"
+        )
+    return resolved
 
 
 def shannon_entropy(data: bytes) -> float:

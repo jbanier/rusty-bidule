@@ -2,6 +2,7 @@
 import argparse
 import datetime as dt
 import json
+import os
 import pathlib
 import shutil
 
@@ -30,6 +31,41 @@ def copy_tree(source: pathlib.Path, target: pathlib.Path) -> list[pathlib.Path]:
     return copied
 
 
+def filesystem_scope() -> str:
+    return os.environ.get("RUSTY_BIDULE_FILESYSTEM_SCOPE", "full")
+
+
+def filesystem_root() -> pathlib.Path:
+    raw = os.environ.get("RUSTY_BIDULE_FILESYSTEM_ROOT")
+    if raw:
+        return pathlib.Path(raw).expanduser().resolve()
+    return pathlib.Path.cwd().resolve()
+
+
+def path_is_relative_to(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_scoped_path(path: str, *, must_exist: bool) -> pathlib.Path:
+    root = filesystem_root()
+    candidate = pathlib.Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    if must_exist or candidate.exists():
+        resolved = candidate.resolve()
+    else:
+        resolved = candidate.parent.resolve() / candidate.name
+    if filesystem_scope() != "full" and not path_is_relative_to(resolved, root):
+        raise SystemExit(
+            f"path outside filesystem workspace scope: {resolved} (workspace root: {root})"
+        )
+    return resolved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-dir", required=True)
@@ -38,8 +74,8 @@ def main() -> None:
     parser.add_argument("--summary-json", default="{}")
     args = parser.parse_args()
 
-    source = pathlib.Path(args.source_dir).expanduser().resolve()
-    output_root = pathlib.Path(args.output_dir).expanduser().resolve()
+    source = resolve_scoped_path(args.source_dir, must_exist=True)
+    output_root = resolve_scoped_path(args.output_dir, must_exist=False)
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S")
     bundle_dir = output_root / f"{args.case_name}-{timestamp}"
     bundle_dir.mkdir(parents=True, exist_ok=True)

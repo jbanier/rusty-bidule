@@ -22,12 +22,31 @@ impl FilesystemAccess {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemScope {
+    #[default]
+    Workspace,
+    Full,
+}
+
+impl FilesystemScope {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Full => "full",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentPermissions {
     #[serde(default)]
     pub allow_network: bool,
     #[serde(default)]
     pub filesystem: FilesystemAccess,
+    #[serde(default)]
+    pub filesystem_scope: FilesystemScope,
     #[serde(default)]
     pub yolo: bool,
 }
@@ -37,6 +56,7 @@ impl Default for AgentPermissions {
         Self {
             allow_network: false,
             filesystem: FilesystemAccess::ReadOnly,
+            filesystem_scope: FilesystemScope::Workspace,
             yolo: false,
         }
     }
@@ -55,14 +75,23 @@ impl AgentPermissions {
         self.yolo || matches!(self.filesystem, FilesystemAccess::ReadWrite)
     }
 
+    pub fn allows_full_filesystem(&self) -> bool {
+        self.yolo || matches!(self.filesystem_scope, FilesystemScope::Full)
+    }
+
     pub fn summary(&self) -> String {
         format!(
-            "network={} filesystem={} yolo={}",
+            "network={} filesystem={} filesystem_scope={} yolo={}",
             if self.allows_network() { "on" } else { "off" },
             if self.yolo {
                 "all"
             } else {
                 self.filesystem.label()
+            },
+            if self.yolo {
+                "full"
+            } else {
+                self.filesystem_scope.label()
             },
             if self.yolo { "on" } else { "off" }
         )
@@ -93,6 +122,13 @@ pub fn permission_denied_user_prompt(error: &str) -> Option<String> {
                     "`/permissions fs write`",
                     "`/yolo on`",
                 ],
+            ))
+        } else if error.contains("requires full filesystem access")
+            || error.contains("require full filesystem access")
+        {
+            Some((
+                "full filesystem access",
+                vec!["`/permissions fs-scope full`", "`/yolo on`"],
             ))
         } else {
             None
@@ -752,5 +788,16 @@ mod tests {
         assert!(prompt.contains("filesystem read access"));
         assert!(prompt.contains("`/permissions fs read`"));
         assert!(prompt.contains("reply without changing permissions"));
+    }
+
+    #[test]
+    fn formats_filesystem_scope_permission_prompt_for_user() {
+        let prompt = permission_denied_user_prompt(
+            "permission denied: local__read_file requires full filesystem access for path '/tmp/outside' outside workspace root '/workspace'. Enable it with /permissions fs-scope full, or use /yolo on.",
+        )
+        .unwrap();
+
+        assert!(prompt.contains("full filesystem access"));
+        assert!(prompt.contains("`/permissions fs-scope full`"));
     }
 }

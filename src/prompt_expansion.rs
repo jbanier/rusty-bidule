@@ -28,7 +28,7 @@ pub fn expand_prompt_file_references(
 
     for reference in references {
         expanded.push_str(&unescape_literal_ats(&input[cursor..reference.start]));
-        let resolved = resolve_reference_path(&reference.raw_path, project_root)?;
+        let resolved = resolve_reference_path(&reference.raw_path, project_root, permissions)?;
         let contents = fs::read_to_string(&resolved)
             .with_context(|| format!("failed to read referenced file {}", resolved.display()))?;
         let display_path = display_reference_path(&reference.raw_path, &resolved, project_root);
@@ -122,7 +122,11 @@ fn unescape_literal_ats(input: &str) -> String {
     input.replace("\\@", "@")
 }
 
-fn resolve_reference_path(raw_path: &str, project_root: Option<&Path>) -> Result<PathBuf> {
+fn resolve_reference_path(
+    raw_path: &str,
+    project_root: Option<&Path>,
+    permissions: &AgentPermissions,
+) -> Result<PathBuf> {
     let expanded = if raw_path == "~" || raw_path.starts_with("~/") {
         let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
             anyhow::anyhow!("cannot expand '{}' because HOME is not set", raw_path)
@@ -164,6 +168,30 @@ fn resolve_reference_path(raw_path: &str, project_root: Option<&Path>) -> Result
         );
     }
 
+    if !permissions.allows_full_filesystem() {
+        let root = project_root.ok_or_else(|| {
+            anyhow::anyhow!(
+                "permission denied: inline file references require full filesystem access when the workspace root is unknown. Enable it with /permissions fs-scope full, or use /yolo on."
+            )
+        })?;
+        let root = root.canonicalize().with_context(|| {
+            format!(
+                "failed to resolve workspace root for file reference scope: {}",
+                root.display()
+            )
+        })?;
+        if !canonical.starts_with(&root) {
+            let denied = format!(
+                "permission denied: inline file references require full filesystem access for path '{}' outside workspace root '{}'. Enable it with /permissions fs-scope full, or use /yolo on.",
+                canonical.display(),
+                root.display()
+            );
+            let prompt =
+                permission_denied_user_prompt(&denied).unwrap_or_else(|| denied.to_string());
+            bail!(prompt);
+        }
+    }
+
     Ok(canonical)
 }
 
@@ -196,7 +224,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::types::{AgentPermissions, FilesystemAccess};
+    use crate::types::{AgentPermissions, FilesystemAccess, FilesystemScope};
 
     use super::expand_prompt_file_references;
 
@@ -204,7 +232,15 @@ mod tests {
         AgentPermissions {
             allow_network: false,
             filesystem: FilesystemAccess::ReadOnly,
+            filesystem_scope: Default::default(),
             yolo: false,
+        }
+    }
+
+    fn full_scope_read_perms() -> AgentPermissions {
+        AgentPermissions {
+            filesystem_scope: FilesystemScope::Full,
+            ..read_perms()
         }
     }
 
@@ -300,6 +336,7 @@ mod tests {
         let perms = AgentPermissions {
             allow_network: false,
             filesystem: FilesystemAccess::None,
+            filesystem_scope: Default::default(),
             yolo: false,
         };
 
@@ -309,6 +346,40 @@ mod tests {
         assert!(err.to_string().contains("filesystem read access"));
         assert!(err.to_string().contains("Enable it and retry?"));
         assert!(err.to_string().contains("`/permissions fs read`"));
+    }
+
+    #[test]
+    fn rejects_absolute_reference_outside_workspace_without_full_scope() {
+        let workspace = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_path = outside.path().join("note.md");
+        fs::write(&outside_path, "hello").unwrap();
+
+        let err = expand_prompt_file_references(
+            &format!("Read @{}", outside_path.display()),
+            &read_perms(),
+            Some(workspace.path()),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("full filesystem access"));
+    }
+
+    #[test]
+    fn allows_absolute_reference_outside_workspace_with_full_scope() {
+        let workspace = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_path = outside.path().join("note.md");
+        fs::write(&outside_path, "hello").unwrap();
+
+        let expanded = expand_prompt_file_references(
+            &format!("Read @{}", outside_path.display()),
+            &full_scope_read_perms(),
+            Some(workspace.path()),
+        )
+        .unwrap();
+
+        assert!(expanded.contains("hello"));
     }
 
     #[test]
@@ -356,7 +427,8 @@ mod tests {
         fs::write(home.path().join("tilde.txt"), "home").unwrap();
 
         let expanded =
-            expand_prompt_file_references("Use @~/tilde.txt", &read_perms(), None).unwrap();
+            expand_prompt_file_references("Use @~/tilde.txt", &full_scope_read_perms(), None)
+                .unwrap();
 
         assert!(expanded.contains("[file: "));
         assert!(expanded.contains("tilde.txt"));

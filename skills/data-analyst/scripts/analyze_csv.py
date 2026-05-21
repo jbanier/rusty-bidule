@@ -9,6 +9,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
 import statistics
 import sys
@@ -51,17 +52,47 @@ def split_columns(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def filesystem_scope() -> str:
+    return os.environ.get("RUSTY_BIDULE_FILESYSTEM_SCOPE", "full")
+
+
+def filesystem_root() -> Path:
+    raw = os.environ.get("RUSTY_BIDULE_FILESYSTEM_ROOT")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
+def path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def enforce_filesystem_scope(path: Path) -> Path:
+    resolved = path.resolve()
+    root = filesystem_root()
+    if filesystem_scope() != "full" and not path_is_relative_to(resolved, root):
+        raise FileNotFoundError(
+            f"CSV file outside filesystem workspace scope: {resolved} (workspace root: {root})"
+        )
+    return resolved
+
+
 def resolve_file(path: str) -> Path:
+    root = filesystem_root()
     candidate = Path(path).expanduser()
     if candidate.is_file():
-        return candidate.resolve()
+        return enforce_filesystem_scope(candidate)
     if not candidate.is_absolute():
-        cwd_candidate = Path.cwd() / candidate
+        cwd_candidate = root / candidate
         if cwd_candidate.is_file():
-            return cwd_candidate.resolve()
+            return enforce_filesystem_scope(cwd_candidate)
         project_root_candidate = Path(__file__).resolve().parents[3] / candidate
         if project_root_candidate.is_file():
-            return project_root_candidate.resolve()
+            return enforce_filesystem_scope(project_root_candidate)
     raise FileNotFoundError(f"CSV file not found: {path}")
 
 

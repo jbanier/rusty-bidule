@@ -79,8 +79,8 @@ The config model is defined in `src/config.rs`. Main top-level keys:
 | `openai_compatible` | OpenAI Chat Completions compatible endpoint, model, optional API key, sampling settings, and tool budget. |
 | `mcp_servers` | Remote MCP server definitions. |
 | `mcp_runtime` | MCP connection timeout and parallelism settings. |
-| `local_tools` | Local execution timeout and allowed CLI binaries. |
-| `agent_permissions` | Default per-conversation network/filesystem/yolo permissions. |
+| `local_tools` | Local execution timeout, file tool caps, and allowed CLI binaries. |
+| `agent_permissions` | Default per-conversation network/filesystem/scope/yolo permissions. |
 | `tracing` | Log path and filtering settings. |
 
 Per-conversation permissions can differ from defaults and are stored in each conversation record.
@@ -133,6 +133,9 @@ Built-in local tools are advertised as model tools when enabled by the current c
 | `local__time` | Return UTC/local time and relative windows. |
 | `local__configure_mcp_servers` | Update the conversation-scoped MCP server filter. |
 | `local__exec_cli` | Execute an explicitly allowlisted bare CLI command with direct argv. |
+| `local__list_directory` | List a scoped local directory with pagination. |
+| `local__read_file` | Read a scoped local file chunk as strict UTF-8 text or lowercase hex. |
+| `local__write_file` | Create or overwrite a scoped local file from text or hex bytes. |
 | `local__activate_skill` | Load full Agent Skills instructions and list bundled resources. |
 | `local__run_skill` | Execute script-backed skill tools. |
 | `local__remember_job` | Store a long-running job or transaction alias. |
@@ -150,6 +153,7 @@ Permission checks are enforced before local tools run:
 - networked skills and `local__exec_cli` require network permission,
 - read-only skill/file operations require filesystem read permission,
 - memory/job updates require filesystem write permission,
+- workspace filesystem scope restricts paths to the process working directory unless `filesystem_scope` is `full`,
 - `yolo` bypasses these application-level checks.
 
 ## Skills

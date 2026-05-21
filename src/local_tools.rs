@@ -1,5 +1,7 @@
 use std::{
     ffi::OsStr,
+    fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -123,6 +125,10 @@ pub struct LocalToolExecutor {
     enabled_local_tools: Option<Vec<String>>,
     execution_timeout: Duration,
     allowed_cli_tools: Vec<String>,
+    workspace_root: PathBuf,
+    max_file_read_bytes: u64,
+    max_file_write_bytes: u64,
+    max_directory_entries: usize,
 }
 
 impl LocalToolExecutor {
@@ -135,6 +141,7 @@ impl LocalToolExecutor {
         execution_timeout: Duration,
         allowed_cli_tools: Vec<String>,
     ) -> Self {
+        let default_local_tools = LocalToolsConfig::default();
         Self {
             store,
             conversation_id: conversation_id.into(),
@@ -143,7 +150,24 @@ impl LocalToolExecutor {
             enabled_local_tools,
             execution_timeout,
             allowed_cli_tools,
+            workspace_root: default_workspace_root(),
+            max_file_read_bytes: default_local_tools.max_file_read_bytes,
+            max_file_write_bytes: default_local_tools.max_file_write_bytes,
+            max_directory_entries: default_local_tools.max_directory_entries,
         }
+    }
+
+    pub fn with_local_tools_config(mut self, config: &LocalToolsConfig) -> Self {
+        self.max_file_read_bytes = config.max_file_read_bytes;
+        self.max_file_write_bytes = config.max_file_write_bytes;
+        self.max_directory_entries = config.max_directory_entries;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_workspace_root(mut self, root: impl AsRef<Path>) -> Self {
+        self.workspace_root = canonicalize_existing_or_self(root.as_ref());
+        self
     }
 
     pub fn is_local_tool(&self, name: &str) -> bool {
@@ -173,6 +197,9 @@ impl LocalToolExecutor {
             "local__time" => self.exec_time(arguments),
             "local__configure_mcp_servers" => self.exec_configure_mcp_servers(arguments),
             "local__exec_cli" => self.exec_cli(arguments).await,
+            "local__list_directory" => self.exec_list_directory(arguments),
+            "local__read_file" => self.exec_read_file(arguments),
+            "local__write_file" => self.exec_write_file(arguments),
             "local__activate_skill" => self.exec_activate_skill(arguments),
             "local__run_skill" => self.exec_run_skill(arguments).await,
             _ => Err(anyhow!("unknown local tool: {name}")),
@@ -677,6 +704,205 @@ impl LocalToolExecutor {
         Ok(reply)
     }
 
+    fn exec_list_directory(&self, arguments: Value) -> Result<String> {
+        self.require_filesystem_read("local__list_directory")?;
+        let raw_path = optional_string_arg(&arguments, "path", "list_directory")?
+            .unwrap_or_else(|| ".".to_string());
+        let path = self.resolve_existing_path(&raw_path, "local__list_directory")?;
+        if !path.is_dir() {
+            bail!(
+                "list_directory: path is not a directory: {}",
+                path.display()
+            );
+        }
+
+        let offset = optional_u64_arg(&arguments, "offset", "list_directory")?.unwrap_or(0);
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        let requested_limit =
+            optional_u64_arg(&arguments, "limit", "list_directory")?.unwrap_or(200);
+        let limit = usize::try_from(requested_limit)
+            .unwrap_or(usize::MAX)
+            .min(self.max_directory_entries);
+
+        let mut entries = fs::read_dir(&path)
+            .with_context(|| format!("list_directory: failed to read {}", path.display()))?
+            .map(|entry| {
+                let entry = entry?;
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                let entry_path = entry.path();
+                let metadata = fs::symlink_metadata(&entry_path)?;
+                let file_type = metadata.file_type();
+                let kind = if file_type.is_dir() {
+                    "directory"
+                } else if file_type.is_file() {
+                    "file"
+                } else if file_type.is_symlink() {
+                    "symlink"
+                } else {
+                    "other"
+                };
+                Ok(json!({
+                    "name": file_name,
+                    "path": entry_path.display().to_string(),
+                    "type": kind,
+                    "size_bytes": if file_type.is_file() { Some(metadata.len()) } else { None },
+                    "readonly": metadata.permissions().readonly(),
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        entries.sort_by(|left, right| {
+            left["name"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(right["name"].as_str().unwrap_or_default())
+        });
+
+        let total_entries = entries.len();
+        let page = entries
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        let next_offset = offset.saturating_add(page.len());
+        let eof = next_offset >= total_entries;
+        Ok(serde_json::to_string_pretty(&json!({
+            "path": path.display().to_string(),
+            "workspace_root": self.workspace_root.display().to_string(),
+            "scope": self.effective_filesystem_scope_label(),
+            "offset": offset,
+            "limit": limit,
+            "returned_entries": page.len(),
+            "total_entries": total_entries,
+            "next_offset": if eof { Value::Null } else { json!(next_offset) },
+            "eof": eof,
+            "entries": page,
+        }))?)
+    }
+
+    fn exec_read_file(&self, arguments: Value) -> Result<String> {
+        self.require_filesystem_read("local__read_file")?;
+        let raw_path = required_string_arg(&arguments, "path", "read_file")?;
+        let path = self.resolve_existing_path(&raw_path, "local__read_file")?;
+        if !path.is_file() {
+            bail!("read_file: path is not a file: {}", path.display());
+        }
+
+        let offset = optional_u64_arg(&arguments, "offset", "read_file")?.unwrap_or(0);
+        let requested_length = optional_u64_arg(&arguments, "length", "read_file")?.unwrap_or(4096);
+        let length = requested_length.min(self.max_file_read_bytes);
+        let format = arguments
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("text");
+        if format != "text" && format != "hex" {
+            bail!("read_file: format must be 'text' or 'hex'");
+        }
+
+        let mut file = fs::File::open(&path)
+            .with_context(|| format!("read_file: failed to open {}", path.display()))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("read_file: failed to seek {}", path.display()))?;
+        let buffer_len = usize::try_from(length)
+            .map_err(|_| anyhow!("read_file: length is too large for this platform"))?;
+        let mut buffer = vec![0_u8; buffer_len];
+        let read_size = file
+            .read(&mut buffer)
+            .with_context(|| format!("read_file: failed to read {}", path.display()))?;
+        buffer.truncate(read_size);
+        let file_size = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        let next_offset = offset.saturating_add(read_size as u64);
+        let eof = next_offset >= file_size || read_size == 0;
+
+        let mut payload = json!({
+            "path": path.display().to_string(),
+            "workspace_root": self.workspace_root.display().to_string(),
+            "scope": self.effective_filesystem_scope_label(),
+            "format": format,
+            "offset": offset,
+            "requested_length": requested_length,
+            "length": length,
+            "read_size": read_size,
+            "file_size": file_size,
+            "next_offset": if eof { Value::Null } else { json!(next_offset) },
+            "eof": eof,
+            "truncated_by_cap": requested_length > length,
+        });
+        match format {
+            "text" => {
+                let text = String::from_utf8(buffer)
+                    .map_err(|err| anyhow!("read_file: chunk is not valid UTF-8: {err}"))?;
+                payload["text"] = Value::String(text);
+            }
+            "hex" => {
+                payload["hex"] = Value::String(bytes_to_lower_hex(&buffer));
+            }
+            _ => unreachable!(),
+        }
+        Ok(serde_json::to_string_pretty(&payload)?)
+    }
+
+    fn exec_write_file(&self, arguments: Value) -> Result<String> {
+        self.require_filesystem_write("local__write_file")?;
+        let raw_path = required_string_arg(&arguments, "path", "write_file")?;
+        let mode = arguments
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("create_new");
+        if mode != "create_new" && mode != "overwrite" {
+            bail!("write_file: mode must be 'create_new' or 'overwrite'");
+        }
+
+        let text = arguments.get("text").and_then(Value::as_str);
+        let hex = arguments.get("hex").and_then(Value::as_str);
+        if text.is_some() && hex.is_some() {
+            bail!("write_file: provide either 'text' or 'hex', not both");
+        }
+        let (data, input_format) = if let Some(text) = text {
+            (text.as_bytes().to_vec(), "text")
+        } else if let Some(hex) = hex {
+            (decode_hex_bytes(hex)?, "hex")
+        } else {
+            (Vec::new(), "empty")
+        };
+        if data.len() as u64 > self.max_file_write_bytes {
+            bail!(
+                "write_file: payload is {} bytes, above max_file_write_bytes {}",
+                data.len(),
+                self.max_file_write_bytes
+            );
+        }
+
+        let path = self.resolve_write_path(&raw_path, "local__write_file")?;
+        if path.is_dir() {
+            bail!("write_file: path is a directory: {}", path.display());
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true);
+        match mode {
+            "create_new" => {
+                options.create_new(true);
+            }
+            "overwrite" => {
+                options.create(true).truncate(true);
+            }
+            _ => unreachable!(),
+        }
+        let mut file = options
+            .open(&path)
+            .with_context(|| format!("write_file: failed to open {}", path.display()))?;
+        std::io::Write::write_all(&mut file, &data)
+            .with_context(|| format!("write_file: failed to write {}", path.display()))?;
+        Ok(serde_json::to_string_pretty(&json!({
+            "status": "written",
+            "path": path.display().to_string(),
+            "workspace_root": self.workspace_root.display().to_string(),
+            "scope": self.effective_filesystem_scope_label(),
+            "mode": mode,
+            "input_format": input_format,
+            "bytes_written": data.len(),
+        }))?)
+    }
+
     async fn exec_run_skill(&self, arguments: Value) -> Result<String> {
         let registry = self
             .skills
@@ -793,6 +1019,7 @@ impl LocalToolExecutor {
         match &launch.program {
             SkillProgram::Direct(_) => {
                 let mut cmd = launch.command_with_interpreter(None);
+                self.apply_filesystem_env(&mut cmd);
                 apply_skill_arguments(&mut cmd, params);
                 self.run_child_command(cmd, timeout_seconds)
                     .await
@@ -805,6 +1032,7 @@ impl LocalToolExecutor {
             }
             SkillProgram::Python(_) => {
                 let mut primary = launch.command_with_interpreter(Some("python3"));
+                self.apply_filesystem_env(&mut primary);
                 apply_skill_arguments(&mut primary, params);
                 match self.run_child_command(primary, timeout_seconds).await {
                     Ok(output) => Ok(output),
@@ -814,6 +1042,7 @@ impl LocalToolExecutor {
                         }) =>
                     {
                         let mut fallback = launch.command_with_interpreter(Some("python"));
+                        self.apply_filesystem_env(&mut fallback);
                         apply_skill_arguments(&mut fallback, params);
                         self.run_child_command(fallback, timeout_seconds)
                             .await
@@ -934,6 +1163,97 @@ impl LocalToolExecutor {
         record.result_artifacts_json = pending.result_artifacts_json;
         record.last_error = pending.last_error;
         Ok(record)
+    }
+
+    fn resolve_existing_path(&self, raw_path: &str, capability: &str) -> Result<PathBuf> {
+        let candidate = self.path_candidate(raw_path)?;
+        let resolved = fs::canonicalize(&candidate)
+            .with_context(|| format!("{capability}: failed to resolve {}", candidate.display()))?;
+        self.require_path_scope(&resolved, capability)?;
+        Ok(resolved)
+    }
+
+    fn resolve_write_path(&self, raw_path: &str, capability: &str) -> Result<PathBuf> {
+        let candidate = self.path_candidate(raw_path)?;
+        if candidate.file_name().is_none() {
+            bail!("{capability}: path must include a file name");
+        }
+
+        if candidate.exists() {
+            let resolved = fs::canonicalize(&candidate).with_context(|| {
+                format!("{capability}: failed to resolve {}", candidate.display())
+            })?;
+            self.require_path_scope(&resolved, capability)?;
+            return Ok(resolved);
+        }
+
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| anyhow!("{capability}: path must include a parent directory"))?;
+        let resolved_parent = fs::canonicalize(parent).with_context(|| {
+            format!(
+                "{capability}: failed to resolve parent {}",
+                parent.display()
+            )
+        })?;
+        if !resolved_parent.is_dir() {
+            bail!(
+                "{capability}: parent path is not a directory: {}",
+                resolved_parent.display()
+            );
+        }
+        self.require_path_scope(&resolved_parent, capability)?;
+        Ok(resolved_parent.join(candidate.file_name().unwrap()))
+    }
+
+    fn path_candidate(&self, raw_path: &str) -> Result<PathBuf> {
+        let raw_path = raw_path.trim();
+        if raw_path.is_empty() {
+            bail!("path must not be empty");
+        }
+        let path = Path::new(raw_path);
+        Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workspace_root.join(path)
+        })
+    }
+
+    fn require_path_scope(&self, resolved_path: &Path, capability: &str) -> Result<()> {
+        if self.permissions.allows_full_filesystem()
+            || resolved_path.starts_with(&self.workspace_root)
+        {
+            return Ok(());
+        }
+        bail!(
+            "permission denied: {capability} requires full filesystem access for path '{}' outside workspace root '{}'. Enable it with /permissions fs-scope full, or use /yolo on.",
+            resolved_path.display(),
+            self.workspace_root.display()
+        )
+    }
+
+    fn effective_filesystem_scope_label(&self) -> &'static str {
+        if self.permissions.allows_full_filesystem() {
+            "full"
+        } else {
+            "workspace"
+        }
+    }
+
+    fn apply_filesystem_env(&self, cmd: &mut tokio::process::Command) {
+        cmd.env("RUSTY_BIDULE_FILESYSTEM_ROOT", &self.workspace_root)
+            .env(
+                "RUSTY_BIDULE_FILESYSTEM_SCOPE",
+                self.effective_filesystem_scope_label(),
+            )
+            .env(
+                "RUSTY_BIDULE_FILESYSTEM_ACCESS",
+                if self.permissions.yolo {
+                    "all"
+                } else {
+                    self.permissions.filesystem.label()
+                },
+            );
     }
 
     fn require_filesystem_read(&self, capability: &str) -> Result<()> {
@@ -1117,6 +1437,9 @@ fn is_advertised_local_tool_name(name: &str) -> bool {
             | "local__time"
             | "local__configure_mcp_servers"
             | "local__exec_cli"
+            | "local__list_directory"
+            | "local__read_file"
+            | "local__write_file"
             | "local__activate_skill"
             | "local__run_skill"
     )
@@ -1186,6 +1509,47 @@ where
         .transpose()
 }
 
+fn default_workspace_root() -> PathBuf {
+    std::env::current_dir()
+        .map(|path| canonicalize_existing_or_self(&path))
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn canonicalize_existing_or_self(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn bytes_to_lower_hex(data: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(data.len() * 2);
+    for byte in data {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn decode_hex_bytes(raw: &str) -> Result<Vec<u8>> {
+    let stripped = raw
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let stripped = stripped
+        .strip_prefix("0x")
+        .or_else(|| stripped.strip_prefix("0X"))
+        .unwrap_or(&stripped);
+    if stripped.len() % 2 != 0 {
+        bail!("write_file: hex input must contain an even number of hex digits");
+    }
+    let mut out = Vec::with_capacity(stripped.len() / 2);
+    for index in (0..stripped.len()).step_by(2) {
+        let byte = u8::from_str_radix(&stripped[index..index + 2], 16)
+            .with_context(|| format!("write_file: invalid hex byte at offset {index}"))?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
 async fn read_stream<R>(mut reader: R) -> Result<Vec<u8>>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1198,19 +1562,35 @@ where
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{fs, os::unix::fs::PermissionsExt, os::unix::fs::symlink, path::Path};
 
     use serde_json::{Value, json};
     use tempfile::tempdir;
     use tokio::time::Duration;
 
     use crate::{
+        config::LocalToolsConfig,
         conversation_store::ConversationStore,
         skills::SkillRegistry,
-        types::{AgentPermissions, FilesystemAccess},
+        types::{AgentPermissions, FilesystemAccess, FilesystemScope},
     };
 
     use super::{LocalToolExecutor, SkillLaunchSpec, SkillProgram};
+
+    fn file_tool_executor(root: &Path, permissions: AgentPermissions) -> LocalToolExecutor {
+        let store = ConversationStore::new(root.join(".agent-data"), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            permissions,
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        )
+        .with_workspace_root(root)
+    }
 
     #[test]
     fn python_scripts_are_resolved_via_interpreter() {
@@ -1277,6 +1657,7 @@ mod tests {
             AgentPermissions {
                 allow_network: false,
                 filesystem: FilesystemAccess::ReadOnly,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1307,6 +1688,7 @@ mod tests {
             AgentPermissions {
                 allow_network: false,
                 filesystem: FilesystemAccess::ReadWrite,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1345,6 +1727,7 @@ mod tests {
             AgentPermissions {
                 allow_network: false,
                 filesystem: FilesystemAccess::ReadWrite,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1545,6 +1928,7 @@ Tools:
             AgentPermissions {
                 allow_network: false,
                 filesystem: FilesystemAccess::ReadWrite,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1618,6 +2002,7 @@ Tools:
             AgentPermissions {
                 allow_network: false,
                 filesystem: FilesystemAccess::ReadWrite,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1763,6 +2148,7 @@ Tools:
             AgentPermissions {
                 allow_network: true,
                 filesystem: FilesystemAccess::ReadOnly,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1793,6 +2179,7 @@ Tools:
             AgentPermissions {
                 allow_network: true,
                 filesystem: FilesystemAccess::ReadOnly,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1824,6 +2211,7 @@ Tools:
             AgentPermissions {
                 allow_network: false,
                 filesystem: FilesystemAccess::ReadWrite,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1901,6 +2289,7 @@ Tools:
             AgentPermissions {
                 allow_network: false,
                 filesystem: FilesystemAccess::ReadWrite,
+                filesystem_scope: Default::default(),
                 yolo: false,
             },
             None,
@@ -1938,6 +2327,232 @@ Tools:
             .unwrap();
         assert_eq!(memory.summary, "Existing case context");
         assert_eq!(memory.entities[0]["value"], "server-1");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_directory_returns_sorted_paginated_entries() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("b.txt"), "b").unwrap();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        let executor = file_tool_executor(dir.path(), AgentPermissions::default());
+
+        let output = executor
+            .execute("local__list_directory", json!({"path": ".", "limit": 2}))
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["returned_entries"], 2);
+        assert_eq!(parsed["eof"], false);
+        assert_eq!(parsed["entries"][0]["name"], ".agent-data");
+        assert_eq!(parsed["entries"][1]["name"], "a.txt");
+        assert_eq!(parsed["next_offset"], 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_file_supports_text_hex_offsets_and_caps() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("note.txt"), "hello world").unwrap();
+        fs::write(dir.path().join("blob.bin"), [0_u8, 1, 254, 255]).unwrap();
+        let executor = file_tool_executor(dir.path(), AgentPermissions::default())
+            .with_local_tools_config(&LocalToolsConfig {
+                max_file_read_bytes: 4,
+                ..LocalToolsConfig::default()
+            });
+
+        let text = executor
+            .execute(
+                "local__read_file",
+                json!({"path": "note.txt", "offset": 6, "length": 99, "format": "text"}),
+            )
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["text"], "worl");
+        assert_eq!(parsed["truncated_by_cap"], true);
+        assert_eq!(parsed["next_offset"], 10);
+
+        let hex = executor
+            .execute(
+                "local__read_file",
+                json!({"path": "blob.bin", "format": "hex"}),
+            )
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&hex).unwrap();
+        assert_eq!(parsed["hex"], "0001feff");
+        assert_eq!(parsed["eof"], true);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_file_rejects_invalid_utf8_text_chunks() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("blob.bin"), [0xff_u8]).unwrap();
+        let executor = file_tool_executor(dir.path(), AgentPermissions::default());
+
+        let err = executor
+            .execute(
+                "local__read_file",
+                json!({"path": "blob.bin", "format": "text"}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_file_creates_overwrites_hex_and_enforces_permissions() {
+        let dir = tempdir().unwrap();
+        let executor = file_tool_executor(
+            dir.path(),
+            AgentPermissions {
+                filesystem: FilesystemAccess::ReadWrite,
+                ..AgentPermissions::default()
+            },
+        );
+
+        let output = executor
+            .execute(
+                "local__write_file",
+                json!({"path": "created.txt", "text": "hello"}),
+            )
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["bytes_written"], 5);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("created.txt")).unwrap(),
+            "hello"
+        );
+
+        let err = executor
+            .execute(
+                "local__write_file",
+                json!({"path": "created.txt", "text": "again"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("failed to open"));
+
+        executor
+            .execute(
+                "local__write_file",
+                json!({"path": "created.txt", "mode": "overwrite", "hex": "00 ff"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("created.txt")).unwrap(),
+            vec![0, 255]
+        );
+
+        let read_only = file_tool_executor(dir.path(), AgentPermissions::default());
+        let err = read_only
+            .execute(
+                "local__write_file",
+                json!({"path": "denied.txt", "text": "no"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("filesystem write access"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn file_tools_restrict_paths_to_workspace_without_full_scope() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside = dir.path().join("outside.txt");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("inside.txt"), "inside").unwrap();
+        fs::write(&outside, "outside").unwrap();
+        symlink(&outside, workspace.join("outside-link")).unwrap();
+
+        let executor = file_tool_executor(&workspace, AgentPermissions::default());
+        executor
+            .execute(
+                "local__read_file",
+                json!({"path": "inside.txt", "format": "text"}),
+            )
+            .await
+            .unwrap();
+        executor
+            .execute(
+                "local__read_file",
+                json!({"path": workspace.join("inside.txt").display().to_string(), "format": "text"}),
+            )
+            .await
+            .unwrap();
+
+        let err = executor
+            .execute(
+                "local__read_file",
+                json!({"path": "../outside.txt", "format": "text"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("full filesystem access"));
+
+        let err = executor
+            .execute(
+                "local__read_file",
+                json!({"path": "outside-link", "format": "text"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("full filesystem access"));
+
+        let full_scope = file_tool_executor(
+            &workspace,
+            AgentPermissions {
+                filesystem_scope: FilesystemScope::Full,
+                ..AgentPermissions::default()
+            },
+        );
+        let output = full_scope
+            .execute(
+                "local__read_file",
+                json!({"path": "../outside.txt", "format": "text"}),
+            )
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["text"], "outside");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_file_rejects_missing_parent_and_large_payloads() {
+        let dir = tempdir().unwrap();
+        let executor = file_tool_executor(
+            dir.path(),
+            AgentPermissions {
+                filesystem: FilesystemAccess::ReadWrite,
+                ..AgentPermissions::default()
+            },
+        )
+        .with_local_tools_config(&LocalToolsConfig {
+            max_file_write_bytes: 2,
+            ..LocalToolsConfig::default()
+        });
+
+        let err = executor
+            .execute(
+                "local__write_file",
+                json!({"path": "missing/created.txt", "text": "a"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("failed to resolve parent"));
+
+        let err = executor
+            .execute(
+                "local__write_file",
+                json!({"path": "too-large.txt", "text": "abc"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("max_file_write_bytes"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2160,6 +2775,55 @@ pub fn local_tool_definitions(
                     "server_names": {"type": "array", "items": {"type": "string"}}
                 },
                 "required": ["action"]
+            }),
+        },
+        LlmTool {
+            name: "local__list_directory".to_string(),
+            description: format!(
+                "List immediate entries in a local directory. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem read permission. Results are sorted by name and paginated; limit is capped at {}.",
+                local_tools_config.max_directory_entries
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path. Relative paths resolve under the workspace root. Defaults to ."},
+                    "offset": {"type": "integer", "description": "Zero-based entry offset for pagination"},
+                    "limit": {"type": "integer", "description": "Maximum entries to return, capped by local_tools.max_directory_entries"}
+                }
+            }),
+        },
+        LlmTool {
+            name: "local__read_file".to_string(),
+            description: format!(
+                "Read a bounded chunk from a local file as strict UTF-8 text or lowercase hex. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem read permission. Length is capped at {} bytes.",
+                local_tools_config.max_file_read_bytes
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path. Relative paths resolve under the workspace root."},
+                    "offset": {"type": "integer", "description": "Byte offset to start reading from"},
+                    "length": {"type": "integer", "description": "Maximum bytes to read, capped by local_tools.max_file_read_bytes"},
+                    "format": {"type": "string", "enum": ["text", "hex"], "description": "Output format. text requires valid UTF-8; hex is binary-safe."}
+                },
+                "required": ["path"]
+            }),
+        },
+        LlmTool {
+            name: "local__write_file".to_string(),
+            description: format!(
+                "Create or overwrite a local file from UTF-8 text or hex-encoded bytes. Parent directories must already exist. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem write permission. Payloads are capped at {} bytes.",
+                local_tools_config.max_file_write_bytes
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path. Relative paths resolve under the workspace root."},
+                    "mode": {"type": "string", "enum": ["create_new", "overwrite"], "description": "create_new refuses existing files; overwrite truncates or creates the file"},
+                    "text": {"type": "string", "description": "UTF-8 text payload"},
+                    "hex": {"type": "string", "description": "Hex-encoded binary payload; whitespace and optional 0x prefix are accepted"}
+                },
+                "required": ["path"]
             }),
         },
     ];

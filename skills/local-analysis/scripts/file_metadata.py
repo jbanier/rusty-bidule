@@ -3,7 +3,14 @@ import argparse
 import datetime as dt
 import pathlib
 
-from common import json_dump, maybe_magic_description, mimetypes, read_bytes_from_file, shannon_entropy
+from common import (
+    json_dump,
+    maybe_magic_description,
+    mimetypes,
+    read_bytes_from_file,
+    resolve_scoped_path,
+    shannon_entropy,
+)
 
 
 def main() -> None:
@@ -12,7 +19,7 @@ def main() -> None:
     parser.add_argument("--sample-bytes", type=int, default=65536)
     args = parser.parse_args()
 
-    path = pathlib.Path(args.path).expanduser().resolve()
+    path = resolve_scoped_path(args.path)
     stat = path.stat()
     sample = read_bytes_from_file(str(path))[: max(args.sample_bytes, 1)]
     guessed_mime, _encoding = mimetypes.guess_type(str(path))

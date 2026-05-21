@@ -20,7 +20,7 @@ use crate::{
     orchestrator::Orchestrator,
     paths::discover_project_root,
     prompt_expansion::expand_prompt_file_references,
-    types::{AgentPermissions, Conversation, FilesystemAccess, Message, UiEvent},
+    types::{AgentPermissions, Conversation, FilesystemAccess, FilesystemScope, Message, UiEvent},
 };
 
 const SPINNER: &[&str] = &["|", "/", "-", "\\"];
@@ -455,6 +455,11 @@ impl App {
         } else {
             format!("fs:{}", self.agent_permissions.filesystem.label())
         };
+        let filesystem_scope = if self.agent_permissions.yolo {
+            "scope:full".to_string()
+        } else {
+            format!("scope:{}", self.agent_permissions.filesystem_scope.label())
+        };
         let yolo = if self.agent_permissions.yolo {
             "yolo:on"
         } else {
@@ -519,6 +524,8 @@ impl App {
             ),
             Span::raw("  "),
             Span::styled(filesystem, Style::default().fg(neon_cyan())),
+            Span::raw("  "),
+            Span::styled(filesystem_scope, Style::default().fg(neon_cyan())),
             Span::raw("  "),
             Span::styled(
                 yolo,
@@ -1293,6 +1300,23 @@ impl App {
                             .activities
                             .push("Usage: /permissions fs none|read|write".to_string()),
                     },
+                    "fs-scope" | "filesystem-scope" => match parts.next() {
+                        Some("workspace") => {
+                            self.agent_permissions.filesystem_scope = FilesystemScope::Workspace;
+                            self.persist_agent_permissions(self.agent_permissions.clone())?;
+                            self.activities
+                                .push("Filesystem scope set to workspace.".to_string());
+                        }
+                        Some("full") => {
+                            self.agent_permissions.filesystem_scope = FilesystemScope::Full;
+                            self.persist_agent_permissions(self.agent_permissions.clone())?;
+                            self.activities
+                                .push("Filesystem scope set to full.".to_string());
+                        }
+                        _ => self
+                            .activities
+                            .push("Usage: /permissions fs-scope workspace|full".to_string()),
+                    },
                     "yolo" => match parts.next() {
                         Some("on") => {
                             self.agent_permissions.yolo = true;
@@ -1319,7 +1343,7 @@ impl App {
                             .push("Agent permissions reset to config defaults.".to_string());
                     }
                     _ => self.activities.push(
-                        "Usage: /permissions [show] | /permissions network on|off | /permissions fs none|read|write | /permissions yolo on|off | /permissions reset"
+                        "Usage: /permissions [show] | /permissions network on|off | /permissions fs none|read|write | /permissions fs-scope workspace|full | /permissions yolo on|off | /permissions reset"
                             .to_string(),
                     ),
                 }
@@ -1813,7 +1837,7 @@ impl App {
 
     fn show_agent_permissions(&mut self) {
         let mut body = format!(
-            "- Network: `{}`\n- Filesystem: `{}`\n- YOLO: `{}`",
+            "- Network: `{}`\n- Filesystem: `{}`\n- Filesystem scope: `{}`\n- YOLO: `{}`",
             if self.agent_permissions.allows_network() {
                 "on"
             } else {
@@ -1825,6 +1849,11 @@ impl App {
                 self.agent_permissions.filesystem.label()
             },
             if self.agent_permissions.yolo {
+                "full"
+            } else {
+                self.agent_permissions.filesystem_scope.label()
+            },
+            if self.agent_permissions.yolo {
                 "on"
             } else {
                 "off"
@@ -1834,7 +1863,7 @@ impl App {
             body.push_str("\n\nYOLO mode bypasses internal tool permission checks.");
         } else {
             body.push_str(
-                "\n\nUse `/permissions network on|off`, `/permissions fs none|read|write`, or `/yolo on|off`.",
+                "\n\nUse `/permissions network on|off`, `/permissions fs none|read|write`, `/permissions fs-scope workspace|full`, or `/yolo on|off`.",
             );
         }
         self.push_command_output("/permissions", body);
@@ -1961,6 +1990,7 @@ fn build_help_markdown() -> String {
         "- `/permissions`: Show active agent permissions",
         "- `/permissions network on|off`: Toggle network access",
         "- `/permissions fs none|read|write`: Set filesystem access",
+        "- `/permissions fs-scope workspace|full`: Set filesystem path scope",
         "- `/permissions yolo on|off`: Toggle YOLO mode",
         "- `/permissions reset`: Restore config defaults",
         "- `/yolo on|off`: Shortcut for YOLO mode",
@@ -2555,7 +2585,7 @@ mod tests {
         },
         orchestrator::Orchestrator,
         prompt_expansion::expand_prompt_file_references,
-        types::{AgentPermissions, FilesystemAccess, Message, UiEvent},
+        types::{AgentPermissions, FilesystemAccess, FilesystemScope, Message, UiEvent},
     };
 
     use super::{
@@ -2960,6 +2990,14 @@ mod tests {
         assert_eq!(
             app.agent_permissions.filesystem,
             FilesystemAccess::ReadWrite
+        );
+
+        app.handle_command("/permissions fs-scope full")
+            .await
+            .unwrap();
+        assert_eq!(
+            app.agent_permissions.filesystem_scope,
+            FilesystemScope::Full
         );
 
         app.handle_command("/yolo on").await.unwrap();

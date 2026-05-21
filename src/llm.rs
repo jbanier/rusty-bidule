@@ -1,5 +1,11 @@
-use std::{future::Future, pin::Pin};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
+use adk_rust::futures::StreamExt as _;
+use adk_rust::{
+    Content as AdkContent, FinishReason as AdkFinishReason, FunctionResponseData,
+    GenerateContentConfig, Llm as AdkLlm, LlmRequest as AdkLlmRequest,
+    LlmResponse as AdkLlmResponse, Part as AdkPart, UsageMetadata as AdkUsageMetadata,
+};
 use anyhow::{Result, anyhow, bail};
 use async_openai::{
     Client as AsyncOpenAiClient,
@@ -14,8 +20,8 @@ use serde_json::{Value, json};
 use tracing::{debug, error, warn};
 
 use crate::config::{
-    AppConfig, AzureAnthropicConfig, AzureOpenAiConfig, LlmProvider, OpenAiCompatibleConfig,
-    OpenAiConfig,
+    AdkConfig, AdkProvider, AppConfig, AzureAnthropicConfig, AzureOpenAiConfig, LlmProvider,
+    OpenAiCompatibleConfig, OpenAiConfig,
 };
 use crate::types::LlmUsage;
 
@@ -113,6 +119,7 @@ pub struct LlmClient {
     openai: Option<OpenAiClient>,
     azure_anthropic: Option<AzureAnthropicClient>,
     openai_compatible: Option<OpenAiCompatibleClient>,
+    adk: Option<AdkClient>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +168,29 @@ struct OpenAiCompatibleClient {
     max_output_tokens: u32,
 }
 
+#[derive(Clone)]
+struct AdkClient {
+    provider: AdkProvider,
+    model: String,
+    temperature: f32,
+    top_p: f32,
+    max_output_tokens: u32,
+    backend: Arc<dyn AdkLlm>,
+}
+
+impl std::fmt::Debug for AdkClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdkClient")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("temperature", &self.temperature)
+            .field("top_p", &self.top_p)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LlmClient {
     pub fn new(config: &AppConfig) -> Result<Self> {
         Ok(Self {
@@ -177,6 +207,7 @@ impl LlmClient {
                 .as_ref()
                 .map(OpenAiCompatibleClient::new)
                 .transpose()?,
+            adk: config.adk.as_ref().map(AdkClient::new).transpose()?,
         })
     }
 
@@ -236,8 +267,16 @@ impl LlmClient {
                 };
                 Ok(client)
             }
+            Some(LlmProvider::Adk) => {
+                let Some(client) = &self.adk else {
+                    return Err(anyhow!(
+                        "ADK is selected but not configured. Add an adk block to enable inference."
+                    ));
+                };
+                Ok(client)
+            }
             None => Err(anyhow!(
-                "No LLM provider is configured. Add an azure_openai, openai, azure_anthropic, or openai_compatible block to enable inference."
+                "No LLM provider is configured. Add an azure_openai, openai, azure_anthropic, openai_compatible, or adk block to enable inference."
             )),
         }
     }
@@ -746,6 +785,151 @@ impl ModelBackend for OpenAiCompatibleClient {
     }
 }
 
+impl AdkClient {
+    fn new(config: &AdkConfig) -> Result<Self> {
+        let api_key = config.api_key.clone();
+        let model = config.model.clone();
+        let endpoint = normalized_optional_endpoint(config.endpoint.as_deref());
+        let backend: Arc<dyn AdkLlm> = match config.provider {
+            AdkProvider::Gemini => {
+                Arc::new(adk_rust::model::GeminiModel::new(api_key, model.clone())?)
+            }
+            AdkProvider::OpenAi => {
+                let mut adk_config =
+                    adk_rust::model::openai::OpenAIConfig::new(api_key, model.clone());
+                adk_config.base_url = endpoint.clone();
+                Arc::new(adk_rust::model::openai::OpenAIClient::new(adk_config)?)
+            }
+            AdkProvider::OpenAiCompatible => {
+                let endpoint = endpoint.ok_or_else(|| {
+                    anyhow!("adk.endpoint is required when adk.provider is openai_compatible")
+                })?;
+                let adk_config = adk_rust::model::openai_compatible::OpenAICompatibleConfig::new(
+                    api_key,
+                    model.clone(),
+                )
+                .with_base_url(endpoint)
+                .with_provider_name("openai-compatible");
+                Arc::new(adk_rust::model::openai_compatible::OpenAICompatible::new(
+                    adk_config,
+                )?)
+            }
+            AdkProvider::Anthropic => {
+                let mut adk_config =
+                    adk_rust::model::anthropic::AnthropicConfig::new(api_key, model.clone())
+                        .with_max_tokens(config.max_output_tokens);
+                if let Some(endpoint) = endpoint {
+                    adk_config = adk_config.with_base_url(endpoint);
+                }
+                Arc::new(adk_rust::model::anthropic::AnthropicClient::new(
+                    adk_config,
+                )?)
+            }
+            AdkProvider::AzureAi => {
+                let endpoint = endpoint.ok_or_else(|| {
+                    anyhow!("adk.endpoint is required when adk.provider is azure_ai")
+                })?;
+                let adk_config =
+                    adk_rust::model::azure_ai::AzureAIConfig::new(endpoint, api_key, model.clone());
+                Arc::new(adk_rust::model::azure_ai::AzureAIClient::new(adk_config)?)
+            }
+        };
+
+        Ok(Self {
+            provider: config.provider,
+            model,
+            temperature: config.temperature,
+            top_p: config.top_p,
+            max_output_tokens: config.max_output_tokens,
+            backend,
+        })
+    }
+
+    async fn chat_completion(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[LlmTool],
+    ) -> Result<LlmCompletion> {
+        let mut request =
+            AdkLlmRequest::new(self.model.clone(), adk_contents(self.provider, messages))
+                .with_config(GenerateContentConfig {
+                    temperature: Some(self.temperature),
+                    top_p: Some(self.top_p),
+                    max_output_tokens: Some(self.max_output_tokens as i32),
+                    ..Default::default()
+                });
+        request.tools = adk_tools(tools);
+
+        debug!(
+            provider = ?self.provider,
+            model = %self.model,
+            message_count = messages.len(),
+            tool_count = tools.len(),
+            "sending ADK model request"
+        );
+
+        let mut stream = self
+            .backend
+            .generate_content(request, false)
+            .await
+            .map_err(|err| {
+                error!(
+                    provider = ?self.provider,
+                    model = %self.model,
+                    error = %err,
+                    "ADK model request failed"
+                );
+                anyhow!("ADK model request failed: {err}")
+            })?;
+
+        let mut responses = Vec::new();
+        while let Some(item) = stream.next().await {
+            responses.push(item.map_err(|err| {
+                error!(
+                    provider = ?self.provider,
+                    model = %self.model,
+                    error = %err,
+                    "ADK model response failed"
+                );
+                anyhow!("ADK model response failed: {err}")
+            })?);
+        }
+
+        adk_completion_from_responses(&responses)
+    }
+
+    const fn provider_label(&self) -> &'static str {
+        match self.provider {
+            AdkProvider::Gemini => "ADK Gemini",
+            AdkProvider::OpenAi => "ADK OpenAI",
+            AdkProvider::OpenAiCompatible => "ADK OpenAI-compatible",
+            AdkProvider::Anthropic => "ADK Anthropic",
+            AdkProvider::AzureAi => "ADK Azure AI",
+        }
+    }
+}
+
+impl ModelBackend for AdkClient {
+    fn label(&self) -> &'static str {
+        self.provider_label()
+    }
+
+    fn chat_completion<'a>(
+        &'a self,
+        messages: &'a [LlmMessage],
+        tools: &'a [LlmTool],
+    ) -> ModelBackendFuture<'a> {
+        Box::pin(async move { AdkClient::chat_completion(self, messages, tools).await })
+    }
+}
+
+fn normalized_optional_endpoint(endpoint: Option<&str>) -> Option<String> {
+    endpoint
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(|endpoint| endpoint.trim_end_matches('/').to_string())
+}
+
 fn openai_compatible_chat_url(base_url: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
     if base_url.ends_with("/chat/completions") {
@@ -868,6 +1052,185 @@ fn assistant_blocks_to_openai_tool_calls(blocks: &[LlmAssistantBlock]) -> Vec<Va
             _ => None,
         })
         .collect()
+}
+
+fn adk_contents(provider: AdkProvider, messages: &[LlmMessage]) -> Vec<AdkContent> {
+    let mut out = Vec::new();
+    let mut tool_names_by_id = HashMap::new();
+
+    for message in messages {
+        match message {
+            LlmMessage::System(text) if provider == AdkProvider::Gemini => {
+                if !text.trim().is_empty() {
+                    out.push(
+                        AdkContent::new("user").with_text(format!("System instruction:\n{text}")),
+                    );
+                }
+            }
+            LlmMessage::System(text) => {
+                if !text.trim().is_empty() {
+                    out.push(AdkContent::new("system").with_text(text.clone()));
+                }
+            }
+            LlmMessage::UserText(text) => out.push(AdkContent::new("user").with_text(text.clone())),
+            LlmMessage::Assistant { blocks } => {
+                let mut parts = Vec::new();
+                for block in blocks {
+                    match block {
+                        LlmAssistantBlock::Text { text } if !text.trim().is_empty() => {
+                            parts.push(AdkPart::Text { text: text.clone() });
+                        }
+                        LlmAssistantBlock::ToolUse { id, name, input } => {
+                            tool_names_by_id.insert(id.clone(), name.clone());
+                            parts.push(AdkPart::FunctionCall {
+                                name: name.clone(),
+                                args: input.clone(),
+                                id: Some(id.clone()),
+                                thought_signature: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if !parts.is_empty() {
+                    out.push(AdkContent {
+                        role: "model".to_string(),
+                        parts,
+                    });
+                }
+            }
+            LlmMessage::UserToolResults { results } => {
+                for result in results {
+                    let name = tool_names_by_id
+                        .get(&result.tool_use_id)
+                        .cloned()
+                        .unwrap_or_else(|| "tool".to_string());
+                    let response = if result.is_error {
+                        json!({
+                            "is_error": true,
+                            "content": result.content,
+                        })
+                    } else {
+                        Value::String(result.content.clone())
+                    };
+                    out.push(AdkContent {
+                        role: "function".to_string(),
+                        parts: vec![AdkPart::FunctionResponse {
+                            function_response: FunctionResponseData::new(name, response),
+                            id: Some(result.tool_use_id.clone()),
+                        }],
+                    });
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn adk_tools(tools: &[LlmTool]) -> HashMap<String, Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            (
+                tool.name.clone(),
+                json!({
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }),
+            )
+        })
+        .collect()
+}
+
+fn adk_completion_from_responses(responses: &[AdkLlmResponse]) -> Result<LlmCompletion> {
+    let mut assistant_blocks = Vec::new();
+    let mut finish_reason = None;
+    let mut usage = LlmUsage::default();
+
+    for response in responses {
+        if let Some(error_message) = response
+            .error_message
+            .as_deref()
+            .filter(|message| !message.trim().is_empty())
+        {
+            let error_code = response.error_code.as_deref().unwrap_or("unknown");
+            bail!("ADK model response returned {error_code}: {error_message}");
+        }
+
+        if let Some(content) = &response.content {
+            for part in &content.parts {
+                match part {
+                    AdkPart::Text { text } if !text.trim().is_empty() => {
+                        assistant_blocks.push(LlmAssistantBlock::Text { text: text.clone() });
+                    }
+                    AdkPart::FunctionCall { name, args, id, .. } => {
+                        assistant_blocks.push(LlmAssistantBlock::ToolUse {
+                            id: id
+                                .clone()
+                                .unwrap_or_else(|| format!("adk_tool_{}", assistant_blocks.len())),
+                            name: name.clone(),
+                            input: args.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(response_finish_reason) = response.finish_reason {
+            finish_reason = Some(response_finish_reason);
+        }
+
+        if let Some(response_usage) = &response.usage_metadata
+            && let Some(next_usage) = adk_usage(response_usage)
+        {
+            usage.add_assign(&next_usage);
+        }
+    }
+
+    let stop_reason = if assistant_blocks
+        .iter()
+        .any(|block| matches!(block, LlmAssistantBlock::ToolUse { .. }))
+    {
+        LlmStopReason::ToolUse
+    } else {
+        match finish_reason {
+            Some(AdkFinishReason::Stop) | None => LlmStopReason::EndTurn,
+            Some(AdkFinishReason::MaxTokens) => LlmStopReason::MaxTokens,
+            Some(AdkFinishReason::Safety) => LlmStopReason::Unknown("safety".to_string()),
+            Some(AdkFinishReason::Recitation) => LlmStopReason::Unknown("recitation".to_string()),
+            Some(AdkFinishReason::Other) => LlmStopReason::Unknown("other".to_string()),
+        }
+    };
+
+    Ok(LlmCompletion {
+        assistant_blocks,
+        stop_reason,
+        usage: (!usage.is_empty()).then_some(usage),
+    })
+}
+
+fn adk_usage(metadata: &AdkUsageMetadata) -> Option<LlmUsage> {
+    let estimated_cost_micros = metadata.cost.and_then(|cost| {
+        if cost.is_finite() && cost >= 0.0 {
+            Some((cost * 1_000_000.0).round() as u64)
+        } else {
+            None
+        }
+    });
+    let usage = LlmUsage {
+        input_tokens: positive_i32_to_u64(metadata.prompt_token_count),
+        output_tokens: positive_i32_to_u64(metadata.candidates_token_count),
+        total_tokens: positive_i32_to_u64(metadata.total_token_count),
+        estimated_cost_micros,
+        estimated_cost_currency: estimated_cost_micros.map(|_| "USD".to_string()),
+    };
+    (!usage.is_empty()).then_some(usage)
+}
+
+fn positive_i32_to_u64(value: i32) -> Option<u64> {
+    (value > 0).then_some(value as u64)
 }
 
 fn parse_openai_chat_completion_payload(payload: &Value) -> Result<LlmCompletion> {
@@ -1258,15 +1621,16 @@ mod tests {
 
     use crate::{
         config::{
-            AppConfig, LlmProvider, LocalToolsConfig, McpRuntimeConfig, OpenAiCompatibleConfig,
-            OpenAiConfig, SkillsConfig,
+            AdkConfig, AdkProvider, AppConfig, LlmProvider, LocalToolsConfig, McpRuntimeConfig,
+            OpenAiCompatibleConfig, OpenAiConfig, SkillsConfig,
         },
         types::AgentPermissions,
     };
 
     use super::{
-        LlmAssistantBlock, LlmMessage, LlmStopReason, LlmTool, LlmToolResult, OpenAiClient,
-        OpenAiCompatibleClient, build_anthropic_chat_request_body, build_openai_chat_request_body,
+        AdkPart, LlmAssistantBlock, LlmMessage, LlmStopReason, LlmTool, LlmToolResult,
+        OpenAiClient, OpenAiCompatibleClient, adk_contents, adk_tools,
+        build_anthropic_chat_request_body, build_openai_chat_request_body,
         build_openai_compatible_chat_request_body, openai_compatible_chat_url,
         parse_anthropic_chat_completion_payload, parse_openai_chat_completion_payload,
         truncate_for_log,
@@ -1334,6 +1698,7 @@ mod tests {
             }),
             azure_anthropic: None,
             openai_compatible: None,
+            adk: None,
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
             skills: SkillsConfig::default(),
@@ -1351,6 +1716,93 @@ mod tests {
         assert!(capabilities.tool_calling);
         assert!(capabilities.usage_metadata);
         assert!(!capabilities.streaming);
+    }
+
+    #[test]
+    fn llm_client_exposes_adk_backend_capabilities() {
+        let config = AppConfig {
+            prompt: None,
+            data_dir: None,
+            llm_provider: Some(LlmProvider::Adk),
+            azure_openai: None,
+            openai: None,
+            azure_anthropic: None,
+            openai_compatible: None,
+            adk: Some(AdkConfig {
+                provider: AdkProvider::AzureAi,
+                api_key: "test-key".to_string(),
+                endpoint: Some("https://example.invalid".to_string()),
+                model: "test-model".to_string(),
+                temperature: 0.2,
+                top_p: 1.0,
+                max_output_tokens: 1_024,
+                max_advertised_tools: 128,
+            }),
+            agent_permissions: AgentPermissions::default(),
+            local_tools: LocalToolsConfig::default(),
+            skills: SkillsConfig::default(),
+            mcp_runtime: McpRuntimeConfig::default(),
+            mcp_servers: Vec::new(),
+            tracing: None,
+        };
+
+        let client = super::LlmClient::new(&config).expect("client should build");
+        let capabilities = client
+            .model_capabilities()
+            .expect("active backend should expose capabilities");
+
+        assert_eq!(client.provider_label(), "ADK Azure AI");
+        assert!(capabilities.tool_calling);
+        assert!(capabilities.usage_metadata);
+    }
+
+    #[test]
+    fn builds_adk_contents_with_tool_results() {
+        let contents = adk_contents(
+            AdkProvider::AzureAi,
+            &[
+                LlmMessage::System("system prompt".to_string()),
+                LlmMessage::Assistant {
+                    blocks: vec![LlmAssistantBlock::ToolUse {
+                        id: "call-1".to_string(),
+                        name: "lookup".to_string(),
+                        input: json!({"query": "example"}),
+                    }],
+                },
+                LlmMessage::UserToolResults {
+                    results: vec![LlmToolResult {
+                        tool_use_id: "call-1".to_string(),
+                        content: "done".to_string(),
+                        is_error: false,
+                    }],
+                },
+            ],
+        );
+
+        assert_eq!(contents[0].role, "system");
+        assert_eq!(contents[1].role, "model");
+        assert_eq!(contents[2].role, "function");
+        match &contents[2].parts[0] {
+            AdkPart::FunctionResponse {
+                function_response, ..
+            } => {
+                assert_eq!(function_response.name, "lookup");
+                assert_eq!(function_response.response, json!("done"));
+            }
+            part => panic!("expected function response, got {part:?}"),
+        }
+    }
+
+    #[test]
+    fn builds_adk_tools() {
+        let tools = adk_tools(&[LlmTool {
+            name: "demo".to_string(),
+            description: "Demo tool".to_string(),
+            parameters: json!({"type": "object"}),
+        }]);
+
+        assert_eq!(tools["demo"]["description"], json!("Demo tool"));
+        assert_eq!(tools["demo"]["parameters"]["type"], json!("object"));
     }
 
     #[test]

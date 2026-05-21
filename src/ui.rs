@@ -2582,6 +2582,7 @@ mod tests {
             openai: None,
             azure_anthropic: None,
             openai_compatible: None,
+            adk: None,
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
             skills: SkillsConfig::default(),

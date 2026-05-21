@@ -20,6 +20,7 @@ pub struct AppConfig {
     pub openai: Option<OpenAiConfig>,
     pub azure_anthropic: Option<AzureAnthropicConfig>,
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
+    pub adk: Option<AdkConfig>,
     #[serde(default)]
     pub agent_permissions: AgentPermissions,
     #[serde(default)]
@@ -150,6 +151,35 @@ pub struct OpenAiCompatibleConfig {
     pub max_advertised_tools: usize,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AdkConfig {
+    pub provider: AdkProvider,
+    pub api_key: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    pub model: String,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+    #[serde(default = "default_max_advertised_tools")]
+    pub max_advertised_tools: usize,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdkProvider {
+    Gemini,
+    #[serde(rename = "openai", alias = "open_ai")]
+    OpenAi,
+    #[serde(rename = "openai_compatible", alias = "open_ai_compatible")]
+    OpenAiCompatible,
+    Anthropic,
+    AzureAi,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProvider {
@@ -161,6 +191,7 @@ pub enum LlmProvider {
     AzureAnthropic,
     #[serde(rename = "openai_compatible", alias = "open_ai_compatible")]
     OpenAiCompatible,
+    Adk,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -284,6 +315,14 @@ impl AppConfig {
             }
             openai_compatible.base_url = resolve_value(&openai_compatible.base_url)?;
         }
+        if let Some(adk) = &mut self.adk {
+            adk.api_key = resolve_value(&adk.api_key)?;
+            if let Some(endpoint) = &mut adk.endpoint
+                && !endpoint.trim().is_empty()
+            {
+                *endpoint = resolve_value(endpoint)?;
+            }
+        }
         for server in &mut self.mcp_servers {
             server.url = resolve_value(&server.url)?;
             if let Some(command) = &mut server.command {
@@ -334,6 +373,7 @@ impl AppConfig {
         validate_openai_config("openai", self.openai.as_ref())?;
         validate_azure_anthropic_config("azure_anthropic", self.azure_anthropic.as_ref())?;
         validate_openai_compatible_config("openai_compatible", self.openai_compatible.as_ref())?;
+        validate_adk_config("adk", self.adk.as_ref())?;
 
         match self.effective_llm_provider() {
             Some(LlmProvider::AzureOpenAi) if self.azure_openai.is_none() => {
@@ -349,6 +389,9 @@ impl AppConfig {
                 bail!(
                     "llm_provider selects openai_compatible but openai_compatible is not configured"
                 );
+            }
+            Some(LlmProvider::Adk) if self.adk.is_none() => {
+                bail!("llm_provider selects adk but adk is not configured");
             }
             _ => {}
         }
@@ -425,6 +468,9 @@ impl AppConfig {
         if self.openai_compatible.is_some() {
             return Some(LlmProvider::OpenAiCompatible);
         }
+        if self.adk.is_some() {
+            return Some(LlmProvider::Adk);
+        }
         None
     }
 
@@ -446,6 +492,7 @@ impl AppConfig {
                 .openai_compatible
                 .as_ref()
                 .map(|config| config.max_advertised_tools),
+            Some(LlmProvider::Adk) => self.adk.as_ref().map(|config| config.max_advertised_tools),
             None => None,
         }
         .unwrap_or(DEFAULT_MAX_ADVERTISED_TOOLS)
@@ -528,6 +575,31 @@ fn validate_openai_compatible_config(
     }
     if config.model.trim().is_empty() {
         bail!("{label}.model must not be empty");
+    }
+    Ok(())
+}
+
+fn validate_adk_config(label: &str, config: Option<&AdkConfig>) -> Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    if config.api_key.trim().is_empty() {
+        bail!("{label}.api_key must not be empty");
+    }
+    if config.model.trim().is_empty() {
+        bail!("{label}.model must not be empty");
+    }
+    if matches!(
+        config.provider,
+        AdkProvider::OpenAiCompatible | AdkProvider::AzureAi
+    ) && config
+        .endpoint
+        .as_deref()
+        .is_none_or(|endpoint| endpoint.trim().is_empty())
+    {
+        bail!(
+            "{label}.endpoint must not be empty when adk.provider is openai_compatible or azure_ai"
+        );
     }
     Ok(())
 }
@@ -660,7 +732,7 @@ mod tests {
 
     use crate::types::FilesystemAccess;
 
-    use super::{AppConfig, AzureAnthropicConfig, LlmProvider, ProjectSkillsPolicy};
+    use super::{AdkProvider, AppConfig, AzureAnthropicConfig, LlmProvider, ProjectSkillsPolicy};
 
     #[test]
     fn resolves_env_backed_secrets() {
@@ -919,6 +991,33 @@ openai:
     }
 
     #[test]
+    fn parses_selected_adk_provider() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+llm_provider: adk
+adk:
+  provider: azure_ai
+  api_key: test
+  endpoint: https://example.invalid
+  model: claude-opus-4-6
+  max_advertised_tools: 32
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(config.effective_llm_provider(), Some(LlmProvider::Adk));
+        assert_eq!(
+            config.adk.as_ref().map(|adk| adk.provider),
+            Some(AdkProvider::AzureAi)
+        );
+        assert_eq!(config.effective_max_advertised_tools(), 32);
+    }
+
+    #[test]
     fn rejects_missing_selected_provider_block() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -962,6 +1061,47 @@ azure_openai:
         assert!(format!("{err:#}").contains(
             "llm_provider selects openai_compatible but openai_compatible is not configured"
         ));
+    }
+
+    #[test]
+    fn rejects_missing_selected_adk_block() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+llm_provider: adk
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+"#,
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("llm_provider selects adk but adk is not configured"));
+    }
+
+    #[test]
+    fn rejects_adk_azure_ai_without_endpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+llm_provider: adk
+adk:
+  provider: azure_ai
+  api_key: test
+  model: claude-opus-4-6
+"#,
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("adk.endpoint must not be empty"));
     }
 
     #[test]

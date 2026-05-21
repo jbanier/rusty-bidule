@@ -781,6 +781,16 @@
       max_output_tokens: 4096,
       max_advertised_tools: 128,
     };
+    draft.adk = draft.adk || {
+      provider: 'azure_ai',
+      api_key: '',
+      endpoint: '',
+      model: '',
+      temperature: 0,
+      top_p: 1,
+      max_output_tokens: 4096,
+      max_advertised_tools: 128,
+    };
     draft.tracing = draft.tracing || {
       provider: 'none',
       phoenix_endpoint: 'http://localhost:4317',
@@ -863,6 +873,7 @@
               <option value="openai" ${config.llm_provider === 'openai' ? 'selected' : ''}>openai</option>
               <option value="azure_anthropic" ${config.llm_provider === 'azure_anthropic' ? 'selected' : ''}>azure_anthropic</option>
               <option value="openai_compatible" ${config.llm_provider === 'openai_compatible' ? 'selected' : ''}>openai_compatible</option>
+              <option value="adk" ${config.llm_provider === 'adk' ? 'selected' : ''}>adk</option>
             </select>
           </label>
           <label class="config-field"><span>Max Turns</span><input type="number" min="1" max="100" step="1" data-config-path="agent.max_turns" value="${escapeAttribute(String(config.agent.max_turns ?? 20))}" /></label>
@@ -903,6 +914,28 @@
           <label class="config-field"><span>Top P</span><input type="number" min="0" max="1" step="0.1" data-config-path="openai_compatible.top_p" value="${escapeAttribute(String(config.openai_compatible.top_p ?? 1))}" /></label>
           <label class="config-field"><span>Max Output Tokens</span><input type="number" min="64" step="1" data-config-path="openai_compatible.max_output_tokens" value="${escapeAttribute(String(config.openai_compatible.max_output_tokens ?? 4096))}" /></label>
           <label class="config-field"><span>Max Tools</span><input type="number" min="0" step="1" data-config-path="openai_compatible.max_advertised_tools" value="${escapeAttribute(String(config.openai_compatible.max_advertised_tools ?? 128))}" /></label>
+        </div>
+      </section>
+      <section class="config-section">
+        <h4>ADK</h4>
+        <div class="config-grid">
+          <label class="config-field">
+            <span>Provider</span>
+            <select data-config-path="adk.provider">
+              <option value="azure_ai" ${config.adk.provider === 'azure_ai' ? 'selected' : ''}>azure_ai</option>
+              <option value="gemini" ${config.adk.provider === 'gemini' ? 'selected' : ''}>gemini</option>
+              <option value="openai" ${config.adk.provider === 'openai' ? 'selected' : ''}>openai</option>
+              <option value="openai_compatible" ${config.adk.provider === 'openai_compatible' ? 'selected' : ''}>openai_compatible</option>
+              <option value="anthropic" ${config.adk.provider === 'anthropic' ? 'selected' : ''}>anthropic</option>
+            </select>
+          </label>
+          <label class="config-field"><span>API Key</span><input type="password" data-config-path="adk.api_key" value="${escapeAttribute(config.adk.api_key || '')}" /></label>
+          <label class="config-field"><span>Endpoint</span><input type="url" data-config-path="adk.endpoint" value="${escapeAttribute(config.adk.endpoint || '')}" /></label>
+          <label class="config-field"><span>Model</span><input type="text" data-config-path="adk.model" value="${escapeAttribute(config.adk.model || '')}" /></label>
+          <label class="config-field"><span>Temperature</span><input type="number" min="0" max="2" step="0.1" data-config-path="adk.temperature" value="${escapeAttribute(String(config.adk.temperature ?? 0))}" /></label>
+          <label class="config-field"><span>Top P</span><input type="number" min="0" max="1" step="0.1" data-config-path="adk.top_p" value="${escapeAttribute(String(config.adk.top_p ?? 1))}" /></label>
+          <label class="config-field"><span>Max Output Tokens</span><input type="number" min="64" step="1" data-config-path="adk.max_output_tokens" value="${escapeAttribute(String(config.adk.max_output_tokens ?? 4096))}" /></label>
+          <label class="config-field"><span>Max Tools</span><input type="number" min="0" step="1" data-config-path="adk.max_advertised_tools" value="${escapeAttribute(String(config.adk.max_advertised_tools ?? 128))}" /></label>
         </div>
       </section>
       <section class="config-section">
@@ -1160,6 +1193,18 @@
         draft.openai_compatible = null;
       } else if (!String(draft.openai_compatible.api_key || '').trim()) {
         delete draft.openai_compatible.api_key;
+      }
+    }
+    if (draft.adk) {
+      const required = ['api_key', 'model'];
+      const endpoint = String(draft.adk.endpoint || '').trim();
+      const isBlank =
+        required.every((key) => !String(draft.adk[key] || '').trim()) &&
+        !endpoint;
+      if (isBlank) {
+        draft.adk = null;
+      } else if (!endpoint) {
+        delete draft.adk.endpoint;
       }
     }
     if (Array.isArray(draft.mcp_servers)) {

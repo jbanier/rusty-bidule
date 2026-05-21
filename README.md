@@ -292,6 +292,21 @@ local_tools:
     - dig
     - whois
     - nslookup
+    - curl
+    - wafw00f
+    - testssl.sh
+    - httpx
+    - subfinder
+    - dnsx
+    - naabu
+    - nuclei
+    - katana
+    - ffuf
+    - feroxbuster
+    - dalfox
+    - wpscan
+    - wscat
+    - websocat
 ```
 
 - `local__run_skill` executes script-backed skills
@@ -302,6 +317,7 @@ local_tools:
   `local__clear_investigation_memory`, and `local__search_conversation_memories`
   manage durable case carry-over state
 - `local__exec_cli` does not invoke a shell, and does not support pipes, redirects, or path-based commands
+- Web posture recipes use the web assessment skills and keep destructive, brute-force, DoS, OOB, and WAF-evasion testing disabled unless scope explicitly authorizes it
 
 ### MCP Runtime
 

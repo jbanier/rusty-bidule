@@ -68,6 +68,21 @@ local_tools:
     - dig
     - whois
     - nslookup
+    - curl
+    - wafw00f
+    - testssl.sh
+    - httpx
+    - subfinder
+    - dnsx
+    - naabu
+    - nuclei
+    - katana
+    - ffuf
+    - feroxbuster
+    - dalfox
+    - wpscan
+    - wscat
+    - websocat
 
 skills:
   # User-level skill directories and bundled repo skills are enabled by default.

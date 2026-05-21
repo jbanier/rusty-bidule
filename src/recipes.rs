@@ -210,7 +210,7 @@ fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
 mod tests {
     use tempfile::tempdir;
 
-    use super::parse_recipe_md;
+    use super::{RecipeRegistry, parse_recipe_md};
 
     #[test]
     fn parses_initial_prompt_section() {
@@ -317,5 +317,36 @@ Workflow:
             Some(vec!["csirt".to_string(), "splunk".to_string()])
         );
         assert!(recipe.prompt_guidance().contains("Workflow guidance"));
+    }
+
+    #[test]
+    fn bundled_web_assessment_recipes_load_with_local_tool_filters() {
+        let recipes_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("recipes");
+        let registry = RecipeRegistry::load(&recipes_dir).unwrap();
+        let expected = [
+            "web-app-scope-intake",
+            "web-app-passive-recon",
+            "web-app-active-baseline",
+            "web-app-auth-session",
+            "web-app-access-control",
+            "web-app-input-validation",
+            "web-app-api-graphql-websocket",
+            "web-app-files-cache-host",
+            "web-app-business-logic-race",
+            "web-app-cms-wordpress",
+            "web-app-final-report",
+        ];
+
+        for name in expected {
+            let recipe = registry
+                .find(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            let local_tools = recipe
+                .config_local_tools
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} missing local tool filter"));
+            assert!(local_tools.contains(&"local__activate_skill".to_string()));
+            assert!(local_tools.contains(&"local__run_skill".to_string()));
+        }
     }
 }

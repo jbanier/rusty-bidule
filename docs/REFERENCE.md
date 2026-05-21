@@ -321,6 +321,15 @@ Supported recipe sections:
 
 If a recipe restricts `local_tools`, only those local tools are advertised for the turn.
 
+Bundled web application posture recipes are provided under `web-app-*`. They
+activate script-backed web assessment skills for scope intake, passive recon,
+active baseline inventory, auth/session review, access-control comparison,
+input-validation planning, API/GraphQL/WebSocket review, file/cache/host checks,
+business-logic/race review, CMS/WordPress review, and final reporting. These
+recipes are authorized-only: active requests, destructive tests, OOB callbacks,
+brute force, DoS, and WAF evasion remain disabled unless the captured scope
+explicitly permits them.
+
 ## MCP
 
 MCP servers are configured in `mcp_servers`. Network permission must be enabled before MCP discovery or tool calls happen. The orchestrator advertises a ranked subset of local and MCP tools to stay under the provider tool limit. The active provider block's `max_advertised_tools` setting controls that budget and defaults to 128.

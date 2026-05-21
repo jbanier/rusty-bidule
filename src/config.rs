@@ -669,10 +669,31 @@ fn normalize_path_for_compare(path: &Path) -> PathBuf {
 }
 
 fn default_allowed_cli_tools() -> Vec<String> {
-    ["nmap", "vt", "dig", "whois", "nslookup"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    [
+        "nmap",
+        "vt",
+        "dig",
+        "whois",
+        "nslookup",
+        "curl",
+        "wafw00f",
+        "testssl.sh",
+        "httpx",
+        "subfinder",
+        "dnsx",
+        "naabu",
+        "nuclei",
+        "katana",
+        "ffuf",
+        "feroxbuster",
+        "dalfox",
+        "wpscan",
+        "wscat",
+        "websocat",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 const fn default_temperature() -> f32 {
@@ -1214,9 +1235,23 @@ local_tools:
 
         let config = AppConfig::load(&path).unwrap();
         assert_eq!(config.local_tools.execution_timeout_seconds, 240);
-        assert_eq!(
-            config.local_tools.allowed_cli_tools,
-            vec!["nmap", "vt", "dig", "whois", "nslookup"]
+        assert!(
+            config
+                .local_tools
+                .allowed_cli_tools
+                .contains(&"nmap".to_string())
+        );
+        assert!(
+            config
+                .local_tools
+                .allowed_cli_tools
+                .contains(&"nuclei".to_string())
+        );
+        assert!(
+            config
+                .local_tools
+                .allowed_cli_tools
+                .contains(&"websocat".to_string())
         );
     }
 

@@ -768,12 +768,13 @@ fn parse_filesystem_access(value: &str) -> Option<FilesystemAccess> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, process::Command};
 
     use crate::{
         config::{ProjectSkillsPolicy, SkillsConfig},
         types::FilesystemAccess,
     };
+    use serde_json::Value;
     use tempfile::tempdir;
 
     use super::{
@@ -1130,5 +1131,198 @@ Run `scripts/run.py`.
         assert!(activated.contains("Skill directory:"));
         assert!(activated.contains("<file>scripts/run.py</file>"));
         assert!(!activated.contains("description: Demo activation skill"));
+    }
+
+    #[test]
+    fn bundled_web_assessment_skills_load_with_script_tools() {
+        let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let registry = SkillRegistry::load(&skills_dir).unwrap();
+        let expected = [
+            "web-scope-guard",
+            "web-http-baseline",
+            "web-crawler-inventory",
+            "web-discovery-recon",
+            "web-scanner-safe",
+            "web-auth-session-auditor",
+            "web-access-control-matrix",
+            "web-input-probe",
+            "web-api-graphql",
+            "web-websocket",
+            "web-upload-content",
+            "web-evidence-report",
+        ];
+
+        for name in expected {
+            let skill = registry
+                .find_skill(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(
+                skill.tools.iter().any(|tool| tool.script.is_some()),
+                "{name} should expose at least one script-backed tool"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_web_assessment_scripts_fail_closed_and_emit_json() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let scripts: Vec<(&str, Vec<&str>)> = vec![
+            (
+                "skills/web-scope-guard/scripts/scope_guard.py",
+                vec![
+                    "--target-urls",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                ],
+            ),
+            (
+                "skills/web-http-baseline/scripts/http_baseline.py",
+                vec![
+                    "--target-url",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                ],
+            ),
+            (
+                "skills/web-crawler-inventory/scripts/crawler_inventory.py",
+                vec![
+                    "--seed-url",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                ],
+            ),
+            (
+                "skills/web-discovery-recon/scripts/discovery_recon.py",
+                vec![
+                    "--target-url",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                ],
+            ),
+            (
+                "skills/web-scanner-safe/scripts/scanner_safe.py",
+                vec![
+                    "--target-url",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                ],
+            ),
+            (
+                "skills/web-auth-session-auditor/scripts/auth_session_auditor.py",
+                vec!["--set-cookie", "sid=abc; Secure; HttpOnly; SameSite=Lax"],
+            ),
+            (
+                "skills/web-access-control-matrix/scripts/access_control_matrix.py",
+                vec![
+                    "--observations-json",
+                    r#"[{"role":"user","method":"GET","path":"/orders/1","object_id":"1","status":200,"expected":true}]"#,
+                ],
+            ),
+            (
+                "skills/web-input-probe/scripts/input_probe.py",
+                vec!["--parameters", "q,id"],
+            ),
+            (
+                "skills/web-api-graphql/scripts/api_graphql_review.py",
+                vec![
+                    "--target-url",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                ],
+            ),
+            (
+                "skills/web-websocket/scripts/websocket_review.py",
+                vec![
+                    "--websocket-url",
+                    "wss://example.com/socket",
+                    "--allowed-hosts",
+                    "example.com",
+                ],
+            ),
+            (
+                "skills/web-upload-content/scripts/upload_content_review.py",
+                vec!["--upload-endpoints", "/upload"],
+            ),
+            (
+                "skills/web-evidence-report/scripts/evidence_report.py",
+                vec![
+                    "--findings-json",
+                    r#"[{"title":"Missing HSTS","severity":"low","confirmed":true}]"#,
+                ],
+            ),
+        ];
+
+        for (script, args) in scripts {
+            let parsed = run_python_json(&root.join(script), &args);
+            assert_eq!(parsed["status"], "ok", "script {script} did not return ok");
+        }
+
+        let failed = run_python_raw(
+            &root.join("skills/web-http-baseline/scripts/http_baseline.py"),
+            &[
+                "--target-url",
+                "https://evil.example",
+                "--allowed-hosts",
+                "example.com",
+            ],
+        );
+        assert_ne!(failed.status.code(), Some(0));
+        let parsed: Value = serde_json::from_slice(&failed.stdout).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains("outside allowed_hosts")
+        );
+
+        let inactive_scope = run_python_raw(
+            &root.join("skills/web-http-baseline/scripts/http_baseline.py"),
+            &[
+                "--target-url",
+                "https://example.com",
+                "--scope-json",
+                r#"{"target_urls":["https://example.com"],"allowed_hosts":["example.com"],"active_authorized":"false"}"#,
+                "--fetch",
+                "true",
+            ],
+        );
+        assert_ne!(inactive_scope.status.code(), Some(0));
+        let parsed: Value = serde_json::from_slice(&inactive_scope.stdout).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains("active network testing requires")
+        );
+    }
+
+    fn run_python_json(script: &std::path::Path, args: &[&str]) -> Value {
+        let output = run_python_raw(script, args);
+        assert!(
+            output.status.success(),
+            "{} failed: {}",
+            script.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    fn run_python_raw(script: &std::path::Path, args: &[&str]) -> std::process::Output {
+        for python in ["python3", "python"] {
+            match Command::new(python).arg(script).args(args).output() {
+                Ok(output) => return output,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => panic!("failed to execute {}: {err}", script.display()),
+            }
+        }
+        panic!("python3 or python is required for web assessment script tests");
     }
 }

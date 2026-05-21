@@ -146,7 +146,8 @@ impl Orchestrator {
             &data_dir,
             config.mcp_runtime.clone(),
             config.mcp_servers.clone(),
-        )?;
+        )?
+        .with_tool_environment(config.tool_environment.clone());
 
         // Load Agent Skills from project/user locations, including .agents/skills.
         let project_root = discover_project_root().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -566,6 +567,7 @@ impl Orchestrator {
             std::time::Duration::from_secs(self.inner.config.local_tools.execution_timeout_seconds),
             self.inner.config.local_tools.allowed_cli_tools.clone(),
         )
+        .with_tool_environment(&self.inner.config.tool_environment)
         .with_local_tools_config(&self.inner.config.local_tools);
 
         let mut tool_call_count = 0usize;
@@ -2459,6 +2461,7 @@ mod tests {
             adk: None,
             agent_permissions: permissions.clone(),
             local_tools: LocalToolsConfig::default(),
+            tool_environment: Default::default(),
             skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: vec![McpServerConfig {

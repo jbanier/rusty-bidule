@@ -57,6 +57,21 @@ agent_permissions:
   filesystem_scope: workspace
   yolo: false
 
+# Optional child-process environment for skills, allowed CLI tools, and stdio
+# MCP servers. `pass_through` requires the variable to exist in this process
+# environment. `variables` supports env:NAME references. `path_prepend` is
+# placed before the effective PATH inherited by child processes.
+# tool_environment:
+#   pass_through:
+#     - all_proxy
+#     - ALL_PROXY
+#   variables:
+#     HTTPS_PROXY: env:HTTPS_PROXY
+#     CUSTOM_TOOL_HOME: /opt/tooling
+#   path_prepend:
+#     - /opt/homebrew/bin
+#     - /usr/local/bin
+
 local_tools:
   execution_timeout_seconds: 180
   max_file_read_bytes: 16384

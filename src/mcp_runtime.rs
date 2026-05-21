@@ -13,7 +13,7 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::{McpAuthConfig, McpRuntimeConfig, McpServerConfig},
+    config::{McpAuthConfig, McpRuntimeConfig, McpServerConfig, ToolEnvironmentConfig},
     oauth::OAuthProvider,
 };
 
@@ -41,6 +41,7 @@ pub struct McpManager {
     client: Client,
     oauth: OAuthProvider,
     runtime: McpRuntimeConfig,
+    tool_environment: ToolEnvironmentConfig,
     servers: Vec<ServerState>,
     tool_index: HashMap<String, (usize, String)>,
     next_id: u64,
@@ -94,6 +95,7 @@ impl McpManager {
             client,
             oauth,
             runtime,
+            tool_environment: ToolEnvironmentConfig::default(),
             servers: servers
                 .into_iter()
                 .map(|config| {
@@ -116,6 +118,11 @@ impl McpManager {
             tool_index: HashMap::new(),
             next_id: 1,
         })
+    }
+
+    pub fn with_tool_environment(mut self, config: ToolEnvironmentConfig) -> Self {
+        self.tool_environment = config;
+        self
     }
 
     pub async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
@@ -315,18 +322,21 @@ impl McpManager {
             return Ok(());
         }
 
-        let server = &self.servers[server_index].config;
+        let server = self.servers[server_index].config.clone();
         let command = server
             .command
             .as_deref()
             .ok_or_else(|| anyhow!("server '{}' is missing a stdio command", server.name))?;
         info!(server = %server.name, command, "starting MCP stdio server");
 
-        let mut child = Command::new(command)
-            .args(&server.args)
+        let mut cmd = Command::new(command);
+        cmd.args(&server.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        self.tool_environment.apply_to_command(&mut cmd)?;
+
+        let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn MCP stdio server '{}'", server.name))?;
         let stdin = child.stdin.take().ok_or_else(|| {
@@ -909,6 +919,8 @@ fn sanitize_name(name: &str) -> String {
 mod tests {
     use std::{
         collections::HashMap,
+        fs,
+        os::unix::fs::PermissionsExt,
         sync::{
             Arc, Mutex, MutexGuard, OnceLock,
             atomic::{AtomicUsize, Ordering},
@@ -931,7 +943,7 @@ mod tests {
         net::{TcpListener, TcpStream},
     };
 
-    use crate::config::{McpRuntimeConfig, McpServerConfig};
+    use crate::config::{McpRuntimeConfig, McpServerConfig, ToolEnvironmentConfig};
 
     use super::{
         McpManager, PREFERRED_PROTOCOL_VERSION, ServerState, Transport, build_headers,
@@ -1046,6 +1058,67 @@ mod tests {
         let parsed = read_stdio_frame(&mut reader).await.unwrap();
 
         assert_eq!(parsed["result"]["tools"][0]["name"], "hello");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stdio_server_receives_tool_environment() {
+        let dir = tempdir().unwrap();
+        let bin_dir = dir.path().join("tool-bin");
+        let env_file = dir.path().join("stdio-env.txt");
+        let script_path = dir.path().join("stdio-env.sh");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nprintf '%s\\n' \"$MCP_STDIO_TOOL_ENV_TEST\" > \"$1\"\nprintf '%s\\n' \"${PATH%%:*}\" >> \"$1\"\nsleep 1\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let mut manager = McpManager::new(
+            dir.path(),
+            McpRuntimeConfig::default(),
+            vec![McpServerConfig {
+                name: "stdio-env".to_string(),
+                transport: "stdio".to_string(),
+                url: String::new(),
+                command: Some("/bin/sh".to_string()),
+                args: vec![
+                    script_path.display().to_string(),
+                    env_file.display().to_string(),
+                ],
+                headers: HashMap::new(),
+                timeout: Some(30),
+                sse_read_timeout: None,
+                client_session_timeout_seconds: Some(30),
+                auth: None,
+            }],
+        )
+        .unwrap()
+        .with_tool_environment(ToolEnvironmentConfig {
+            pass_through: Vec::new(),
+            variables: HashMap::from([(
+                "MCP_STDIO_TOOL_ENV_TEST".to_string(),
+                "stdio-value".to_string(),
+            )]),
+            path_prepend: vec![bin_dir.clone()],
+        });
+
+        manager.ensure_stdio_started(0).await.unwrap();
+        for _ in 0..50 {
+            if env_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        manager.reset_server_session(0);
+
+        let contents = fs::read_to_string(&env_file).unwrap();
+        let mut lines = contents.lines();
+        let expected_path = bin_dir.display().to_string();
+        assert_eq!(lines.next(), Some("stdio-value"));
+        assert_eq!(lines.next(), Some(expected_path.as_str()));
     }
 
     #[tokio::test(flavor = "current_thread")]

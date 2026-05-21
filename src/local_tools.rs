@@ -14,7 +14,7 @@ use tokio::io::AsyncReadExt;
 use tokio::time::Duration;
 
 use crate::{
-    config::LocalToolsConfig,
+    config::{LocalToolsConfig, ToolEnvironmentConfig},
     conversation_store::ConversationStore,
     llm::LlmTool,
     skills::{SkillRegistry, SkillTool},
@@ -125,6 +125,7 @@ pub struct LocalToolExecutor {
     enabled_local_tools: Option<Vec<String>>,
     execution_timeout: Duration,
     allowed_cli_tools: Vec<String>,
+    tool_environment: ToolEnvironmentConfig,
     workspace_root: PathBuf,
     max_file_read_bytes: u64,
     max_file_write_bytes: u64,
@@ -150,6 +151,7 @@ impl LocalToolExecutor {
             enabled_local_tools,
             execution_timeout,
             allowed_cli_tools,
+            tool_environment: ToolEnvironmentConfig::default(),
             workspace_root: default_workspace_root(),
             max_file_read_bytes: default_local_tools.max_file_read_bytes,
             max_file_write_bytes: default_local_tools.max_file_write_bytes,
@@ -161,6 +163,11 @@ impl LocalToolExecutor {
         self.max_file_read_bytes = config.max_file_read_bytes;
         self.max_file_write_bytes = config.max_file_write_bytes;
         self.max_directory_entries = config.max_directory_entries;
+        self
+    }
+
+    pub fn with_tool_environment(mut self, config: &ToolEnvironmentConfig) -> Self {
+        self.tool_environment = config.clone();
         self
     }
 
@@ -666,6 +673,7 @@ impl LocalToolExecutor {
 
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(&args);
+        self.apply_tool_environment(&mut cmd)?;
         let output = self
             .run_child_command(cmd, timeout_seconds)
             .await
@@ -1019,6 +1027,7 @@ impl LocalToolExecutor {
         match &launch.program {
             SkillProgram::Direct(_) => {
                 let mut cmd = launch.command_with_interpreter(None);
+                self.apply_tool_environment(&mut cmd)?;
                 self.apply_filesystem_env(&mut cmd);
                 apply_skill_arguments(&mut cmd, params);
                 self.run_child_command(cmd, timeout_seconds)
@@ -1032,6 +1041,7 @@ impl LocalToolExecutor {
             }
             SkillProgram::Python(_) => {
                 let mut primary = launch.command_with_interpreter(Some("python3"));
+                self.apply_tool_environment(&mut primary)?;
                 self.apply_filesystem_env(&mut primary);
                 apply_skill_arguments(&mut primary, params);
                 match self.run_child_command(primary, timeout_seconds).await {
@@ -1042,6 +1052,7 @@ impl LocalToolExecutor {
                         }) =>
                     {
                         let mut fallback = launch.command_with_interpreter(Some("python"));
+                        self.apply_tool_environment(&mut fallback)?;
                         self.apply_filesystem_env(&mut fallback);
                         apply_skill_arguments(&mut fallback, params);
                         self.run_child_command(fallback, timeout_seconds)
@@ -1238,6 +1249,10 @@ impl LocalToolExecutor {
         } else {
             "workspace"
         }
+    }
+
+    fn apply_tool_environment(&self, cmd: &mut tokio::process::Command) -> Result<()> {
+        self.tool_environment.apply_to_command(cmd)
     }
 
     fn apply_filesystem_env(&self, cmd: &mut tokio::process::Command) {
@@ -1562,14 +1577,16 @@ where
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt, os::unix::fs::symlink, path::Path};
+    use std::{
+        collections::HashMap, fs, os::unix::fs::PermissionsExt, os::unix::fs::symlink, path::Path,
+    };
 
     use serde_json::{Value, json};
     use tempfile::tempdir;
     use tokio::time::Duration;
 
     use crate::{
-        config::LocalToolsConfig,
+        config::{LocalToolsConfig, ToolEnvironmentConfig},
         conversation_store::ConversationStore,
         skills::SkillRegistry,
         types::{AgentPermissions, FilesystemAccess, FilesystemScope},
@@ -2085,6 +2102,70 @@ Tools:
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn run_skill_applies_tool_environment_and_path_prepend() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("env-skill");
+        let bin_dir = dir.path().join("tool-bin");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::create_dir_all(&bin_dir).unwrap();
+        let script_path = skill_dir.join("scripts/env.sh");
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nprintf 'TOOL_ENV_TEST=%s\\n' \"$TOOL_ENV_TEST\"\nprintf 'PATH_FIRST=%s\\n' \"${PATH%%:*}\"\nprintf 'FILESYSTEM_ROOT=%s\\n' \"$RUSTY_BIDULE_FILESYSTEM_ROOT\"\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: env-skill
+description: Prints child environment
+---
+
+Tools:
+  - name: Env
+    slug: env
+    script: scripts/env.sh
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let tool_environment = ToolEnvironmentConfig {
+            pass_through: Vec::new(),
+            variables: HashMap::from([("TOOL_ENV_TEST".to_string(), "skill-value".to_string())]),
+            path_prepend: vec![bin_dir.clone()],
+        };
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            Some(skills),
+            AgentPermissions::default(),
+            None,
+            Duration::from_secs(5),
+            Vec::new(),
+        )
+        .with_tool_environment(&tool_environment);
+
+        let output = executor
+            .execute(
+                "local__run_skill",
+                json!({"skill_name": "env-skill", "tool_slug": "env"}),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("TOOL_ENV_TEST=skill-value"));
+        assert!(output.contains(&format!("PATH_FIRST={}", bin_dir.display())));
+        assert!(output.contains("FILESYSTEM_ROOT="));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn run_skill_enforces_timeout() {
         let dir = tempdir().unwrap();
         let store = ConversationStore::new(dir.path(), AgentPermissions::default());
@@ -2197,6 +2278,53 @@ Tools:
 
         assert!(output.contains("Command: `echo`"));
         assert!(output.contains("hello world"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exec_cli_uses_tool_environment_path_prepend() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let bin_dir = dir.path().join("tool-bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let script_path = bin_dir.join("rb-tool-env-test");
+        fs::write(
+            &script_path,
+            "#!/bin/sh\nprintf 'CLI_TOOL_ENV_TEST=%s\\n' \"$CLI_TOOL_ENV_TEST\"\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let tool_environment = ToolEnvironmentConfig {
+            pass_through: Vec::new(),
+            variables: HashMap::from([("CLI_TOOL_ENV_TEST".to_string(), "cli-value".to_string())]),
+            path_prepend: vec![bin_dir],
+        };
+        let executor = LocalToolExecutor::new(
+            store,
+            &conversation.conversation_id,
+            None,
+            AgentPermissions {
+                allow_network: true,
+                filesystem: FilesystemAccess::ReadOnly,
+                filesystem_scope: Default::default(),
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(5),
+            vec!["rb-tool-env-test".to_string()],
+        )
+        .with_tool_environment(&tool_environment);
+
+        let output = executor
+            .execute("local__exec_cli", json!({"command": "rb-tool-env-test"}))
+            .await
+            .unwrap();
+
+        assert!(output.contains("Command: `rb-tool-env-test`"));
+        assert!(output.contains("CLI_TOOL_ENV_TEST=cli-value"));
     }
 
     #[tokio::test(flavor = "current_thread")]

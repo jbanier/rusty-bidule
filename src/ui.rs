@@ -2615,6 +2615,7 @@ mod tests {
             adk: None,
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
+            tool_environment: Default::default(),
             skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: mcp_servers

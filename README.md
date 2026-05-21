@@ -320,6 +320,29 @@ local_tools:
 - Web posture recipes use the web assessment skills and keep destructive, brute-force, DoS, OOB, and WAF-evasion testing disabled unless scope explicitly authorizes it
 - On Ubuntu, install the supporting web assessment binaries with `bash scripts/setup-web-assessment-tools.sh`; use `--apt-only` if upstream Go/npm/gem installs are not allowed.
 
+### Tool Environment
+
+Use `tool_environment` when skill scripts, `local__exec_cli`, or stdio MCP
+servers need specific environment variables:
+
+```yaml
+tool_environment:
+  pass_through:
+    - all_proxy
+    - ALL_PROXY
+  variables:
+    HTTPS_PROXY: env:HTTPS_PROXY
+    CUSTOM_TOOL_HOME: /opt/tooling
+  path_prepend:
+    - /opt/homebrew/bin
+    - /usr/local/bin
+```
+
+- `pass_through` copies required variables from the Rusty Bidule process and fails startup if any are missing or empty
+- `variables` sets explicit child-process values; `env:NAME` is resolved at startup
+- `path_prepend` places directories before the effective child `PATH`
+- Configured variable names are case-sensitive
+
 ### MCP Runtime
 
 Current shared runtime settings:

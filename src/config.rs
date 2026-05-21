@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
@@ -26,6 +27,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub local_tools: LocalToolsConfig,
     #[serde(default)]
+    pub tool_environment: ToolEnvironmentConfig,
+    #[serde(default)]
     pub skills: SkillsConfig,
     #[serde(default)]
     pub mcp_runtime: McpRuntimeConfig,
@@ -33,6 +36,82 @@ pub struct AppConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub tracing: Option<TracingConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct ToolEnvironmentConfig {
+    #[serde(default)]
+    pub pass_through: Vec<String>,
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
+    #[serde(default)]
+    pub path_prepend: Vec<PathBuf>,
+}
+
+impl ToolEnvironmentConfig {
+    pub fn apply_to_command(&self, cmd: &mut tokio::process::Command) -> Result<()> {
+        for name in &self.pass_through {
+            let Some(value) = std::env::var_os(name) else {
+                bail!("tool_environment.pass_through variable {name} is not set");
+            };
+            if value.as_os_str().is_empty() {
+                bail!("tool_environment.pass_through variable {name} resolved to an empty value");
+            }
+            cmd.env(name, value);
+        }
+
+        for (name, value) in &self.variables {
+            cmd.env(name, value);
+        }
+
+        if !self.path_prepend.is_empty() {
+            let mut paths = self.path_prepend.clone();
+            let base_path = self
+                .variables
+                .get("PATH")
+                .map(OsString::from)
+                .or_else(|| std::env::var_os("PATH"));
+            if let Some(base_path) = base_path
+                && !base_path.as_os_str().is_empty()
+            {
+                paths.extend(std::env::split_paths(&base_path));
+            }
+            let joined = std::env::join_paths(paths)
+                .context("failed to build child PATH from tool_environment.path_prepend")?;
+            cmd.env("PATH", joined);
+        }
+
+        Ok(())
+    }
+
+    fn resolve_values(&mut self) -> Result<()> {
+        for (name, value) in &mut self.variables {
+            validate_env_name("tool_environment.variables", name)?;
+            *value = resolve_value(value)?;
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<()> {
+        for name in &self.pass_through {
+            validate_env_name("tool_environment.pass_through", name)?;
+            let Some(value) = std::env::var_os(name) else {
+                bail!("tool_environment.pass_through variable {name} is not set");
+            };
+            if value.as_os_str().is_empty() {
+                bail!("tool_environment.pass_through variable {name} resolved to an empty value");
+            }
+        }
+        for name in self.variables.keys() {
+            validate_env_name("tool_environment.variables", name)?;
+        }
+        for path in &self.path_prepend {
+            if path.as_os_str().is_empty() {
+                bail!("tool_environment.path_prepend entries must not be empty");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -332,6 +411,7 @@ impl AppConfig {
                 *endpoint = resolve_value(endpoint)?;
             }
         }
+        self.tool_environment.resolve_values()?;
         for server in &mut self.mcp_servers {
             server.url = resolve_value(&server.url)?;
             if let Some(command) = &mut server.command {
@@ -383,6 +463,7 @@ impl AppConfig {
         validate_azure_anthropic_config("azure_anthropic", self.azure_anthropic.as_ref())?;
         validate_openai_compatible_config("openai_compatible", self.openai_compatible.as_ref())?;
         validate_adk_config("adk", self.adk.as_ref())?;
+        self.tool_environment.validate()?;
 
         match self.effective_llm_provider() {
             Some(LlmProvider::AzureOpenAi) if self.azure_openai.is_none() => {
@@ -664,6 +745,16 @@ fn resolve_value(value: &str) -> Result<String> {
     }
 }
 
+fn validate_env_name(label: &str, name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("{label} names must not be empty");
+    }
+    if name.contains('=') || name.contains('\0') {
+        bail!("{label} name '{name}' must not contain '=' or NUL");
+    }
+    Ok(())
+}
+
 fn normalize_path_for_compare(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -809,11 +900,132 @@ mcp_servers:
         assert_eq!(config.local_tools.max_file_read_bytes, 16_384);
         assert_eq!(config.local_tools.max_file_write_bytes, 1_048_576);
         assert_eq!(config.local_tools.max_directory_entries, 1_000);
+        assert!(config.tool_environment.pass_through.is_empty());
+        assert!(config.tool_environment.variables.is_empty());
+        assert!(config.tool_environment.path_prepend.is_empty());
         assert_eq!(config.effective_max_advertised_tools(), 128);
         assert_eq!(
             config.skills.project_skills,
             ProjectSkillsPolicy::TrustedOnly
         );
+    }
+
+    #[test]
+    fn resolves_tool_environment_config() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        unsafe {
+            std::env::set_var("RUSTY_BIDULE_TEST_TOOL_PASS", "pass-value");
+            std::env::set_var("RUSTY_BIDULE_TEST_TOOL_ENV_VALUE", "resolved-value");
+        }
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+tool_environment:
+  pass_through:
+    - RUSTY_BIDULE_TEST_TOOL_PASS
+  variables:
+    RUSTY_BIDULE_TEST_DIRECT: direct-value
+    RUSTY_BIDULE_TEST_FROM_ENV: env:RUSTY_BIDULE_TEST_TOOL_ENV_VALUE
+    RUSTY_BIDULE_TEST_EMPTY_LITERAL: ""
+  path_prepend:
+    - /opt/rusty-bidule/bin
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+
+        assert_eq!(
+            config.tool_environment.pass_through,
+            vec!["RUSTY_BIDULE_TEST_TOOL_PASS"]
+        );
+        assert_eq!(
+            config
+                .tool_environment
+                .variables
+                .get("RUSTY_BIDULE_TEST_DIRECT")
+                .map(String::as_str),
+            Some("direct-value")
+        );
+        assert_eq!(
+            config
+                .tool_environment
+                .variables
+                .get("RUSTY_BIDULE_TEST_FROM_ENV")
+                .map(String::as_str),
+            Some("resolved-value")
+        );
+        assert_eq!(
+            config
+                .tool_environment
+                .variables
+                .get("RUSTY_BIDULE_TEST_EMPTY_LITERAL")
+                .map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            config.tool_environment.path_prepend,
+            vec![PathBuf::from("/opt/rusty-bidule/bin")]
+        );
+    }
+
+    #[test]
+    fn rejects_missing_tool_environment_pass_through() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        unsafe {
+            std::env::remove_var("RUSTY_BIDULE_TEST_MISSING_TOOL_PASS");
+        }
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+tool_environment:
+  pass_through:
+    - RUSTY_BIDULE_TEST_MISSING_TOOL_PASS
+"#,
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+
+        assert!(format!("{err:#}").contains(
+            "tool_environment.pass_through variable RUSTY_BIDULE_TEST_MISSING_TOOL_PASS is not set"
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_tool_environment_variable_names() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+tool_environment:
+  variables:
+    "BAD=NAME": value
+"#,
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+
+        assert!(format!("{err:#}").contains("must not contain '=' or NUL"));
     }
 
     #[test]

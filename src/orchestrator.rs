@@ -227,6 +227,23 @@ impl Orchestrator {
         self.inner.config.clone()
     }
 
+    pub fn model_status(&self) -> Value {
+        let capabilities = self.inner.llm.model_capabilities().map(|capabilities| {
+            json!({
+                "tool_calling": capabilities.tool_calling,
+                "streaming": capabilities.streaming,
+                "usage_metadata": capabilities.usage_metadata,
+                "structured_output": capabilities.structured_output,
+                "reasoning_controls": capabilities.reasoning_controls,
+            })
+        });
+        json!({
+            "provider": self.inner.config.effective_llm_provider(),
+            "provider_label": self.inner.llm.provider_label(),
+            "capabilities": capabilities,
+        })
+    }
+
     pub async fn mcp_tool_counts_by_server(
         &self,
         filter: Option<&[String]>,
@@ -577,6 +594,18 @@ impl Orchestrator {
             } else {
                 "Continuing tool-grounded reasoning".to_string()
             };
+            if let Some(capabilities) = self.inner.llm.model_capabilities() {
+                debug!(
+                    %conversation_id,
+                    provider = self.inner.llm.provider_label(),
+                    tool_calling = capabilities.tool_calling,
+                    streaming = capabilities.streaming,
+                    usage_metadata = capabilities.usage_metadata,
+                    structured_output = capabilities.structured_output,
+                    reasoning_controls = capabilities.reasoning_controls,
+                    "active model backend capabilities"
+                );
+            }
             self.emit(
                 &ui_tx,
                 "llm_start",

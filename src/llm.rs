@@ -1,3 +1,5 @@
+use std::{future::Future, pin::Pin};
+
 use anyhow::{Result, anyhow, bail};
 use async_openai::{
     Client as AsyncOpenAiClient,
@@ -65,6 +67,43 @@ pub struct LlmCompletion {
     pub assistant_blocks: Vec<LlmAssistantBlock>,
     pub stop_reason: LlmStopReason,
     pub usage: Option<LlmUsage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelCapabilities {
+    pub tool_calling: bool,
+    pub streaming: bool,
+    pub usage_metadata: bool,
+    pub structured_output: bool,
+    pub reasoning_controls: bool,
+}
+
+impl ModelCapabilities {
+    const fn chat_with_tools_and_usage() -> Self {
+        Self {
+            tool_calling: true,
+            streaming: false,
+            usage_metadata: true,
+            structured_output: false,
+            reasoning_controls: false,
+        }
+    }
+}
+
+type ModelBackendFuture<'a> = Pin<Box<dyn Future<Output = Result<LlmCompletion>> + Send + 'a>>;
+
+trait ModelBackend: Send + Sync {
+    fn label(&self) -> &'static str;
+
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::chat_with_tools_and_usage()
+    }
+
+    fn chat_completion<'a>(
+        &'a self,
+        messages: &'a [LlmMessage],
+        tools: &'a [LlmTool],
+    ) -> ModelBackendFuture<'a>;
 }
 
 #[derive(Debug, Clone)]
@@ -142,13 +181,15 @@ impl LlmClient {
     }
 
     pub fn provider_label(&self) -> &'static str {
-        match self.selected_provider {
-            Some(LlmProvider::AzureOpenAi) => "Azure OpenAI",
-            Some(LlmProvider::OpenAi) => "OpenAI",
-            Some(LlmProvider::AzureAnthropic) => "Azure Anthropic",
-            Some(LlmProvider::OpenAiCompatible) => "OpenAI-compatible",
-            None => "LLM",
-        }
+        self.active_backend()
+            .map(|backend| backend.label())
+            .unwrap_or("LLM")
+    }
+
+    pub fn model_capabilities(&self) -> Option<ModelCapabilities> {
+        self.active_backend()
+            .map(|backend| backend.capabilities())
+            .ok()
     }
 
     pub async fn chat_completion(
@@ -156,6 +197,12 @@ impl LlmClient {
         messages: &[LlmMessage],
         tools: &[LlmTool],
     ) -> Result<LlmCompletion> {
+        self.active_backend()?
+            .chat_completion(messages, tools)
+            .await
+    }
+
+    fn active_backend(&self) -> Result<&dyn ModelBackend> {
         match self.selected_provider {
             Some(LlmProvider::AzureOpenAi) => {
                 let Some(client) = &self.azure_openai else {
@@ -163,7 +210,7 @@ impl LlmClient {
                         "Azure OpenAI is selected but not configured. Add an azure_openai block to enable inference."
                     ));
                 };
-                client.chat_completion(messages, tools).await
+                Ok(client)
             }
             Some(LlmProvider::OpenAi) => {
                 let Some(client) = &self.openai else {
@@ -171,7 +218,7 @@ impl LlmClient {
                         "OpenAI is selected but not configured. Add an openai block to enable inference."
                     ));
                 };
-                client.chat_completion(messages, tools).await
+                Ok(client)
             }
             Some(LlmProvider::AzureAnthropic) => {
                 let Some(client) = &self.azure_anthropic else {
@@ -179,7 +226,7 @@ impl LlmClient {
                         "Azure Anthropic is selected but not configured. Add an azure_anthropic block to enable inference."
                     ));
                 };
-                client.chat_completion(messages, tools).await
+                Ok(client)
             }
             Some(LlmProvider::OpenAiCompatible) => {
                 let Some(client) = &self.openai_compatible else {
@@ -187,7 +234,7 @@ impl LlmClient {
                         "OpenAI-compatible is selected but not configured. Add an openai_compatible block to enable inference."
                     ));
                 };
-                client.chat_completion(messages, tools).await
+                Ok(client)
             }
             None => Err(anyhow!(
                 "No LLM provider is configured. Add an azure_openai, openai, azure_anthropic, or openai_compatible block to enable inference."
@@ -297,6 +344,20 @@ impl AzureOpenAiClient {
     }
 }
 
+impl ModelBackend for AzureOpenAiClient {
+    fn label(&self) -> &'static str {
+        "Azure OpenAI"
+    }
+
+    fn chat_completion<'a>(
+        &'a self,
+        messages: &'a [LlmMessage],
+        tools: &'a [LlmTool],
+    ) -> ModelBackendFuture<'a> {
+        Box::pin(async move { AzureOpenAiClient::chat_completion(self, messages, tools).await })
+    }
+}
+
 impl OpenAiClient {
     fn new(config: &OpenAiConfig) -> Result<Self> {
         let endpoint = config.endpoint.trim_end_matches('/').to_string();
@@ -396,6 +457,20 @@ impl OpenAiClient {
         })?;
 
         parse_openai_chat_completion_payload(&payload)
+    }
+}
+
+impl ModelBackend for OpenAiClient {
+    fn label(&self) -> &'static str {
+        "OpenAI"
+    }
+
+    fn chat_completion<'a>(
+        &'a self,
+        messages: &'a [LlmMessage],
+        tools: &'a [LlmTool],
+    ) -> ModelBackendFuture<'a> {
+        Box::pin(async move { OpenAiClient::chat_completion(self, messages, tools).await })
     }
 }
 
@@ -535,6 +610,20 @@ impl AzureAnthropicClient {
     }
 }
 
+impl ModelBackend for AzureAnthropicClient {
+    fn label(&self) -> &'static str {
+        "Azure Anthropic"
+    }
+
+    fn chat_completion<'a>(
+        &'a self,
+        messages: &'a [LlmMessage],
+        tools: &'a [LlmTool],
+    ) -> ModelBackendFuture<'a> {
+        Box::pin(async move { AzureAnthropicClient::chat_completion(self, messages, tools).await })
+    }
+}
+
 impl OpenAiCompatibleClient {
     fn new(config: &OpenAiCompatibleConfig) -> Result<Self> {
         let base_url = config.base_url.trim_end_matches('/').to_string();
@@ -638,6 +727,22 @@ impl OpenAiCompatibleClient {
         })?;
 
         parse_openai_chat_completion_payload(&payload)
+    }
+}
+
+impl ModelBackend for OpenAiCompatibleClient {
+    fn label(&self) -> &'static str {
+        "OpenAI-compatible"
+    }
+
+    fn chat_completion<'a>(
+        &'a self,
+        messages: &'a [LlmMessage],
+        tools: &'a [LlmTool],
+    ) -> ModelBackendFuture<'a> {
+        Box::pin(
+            async move { OpenAiCompatibleClient::chat_completion(self, messages, tools).await },
+        )
     }
 }
 
@@ -1151,7 +1256,13 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::{net::TcpListener, sync::Mutex};
 
-    use crate::config::{OpenAiCompatibleConfig, OpenAiConfig};
+    use crate::{
+        config::{
+            AppConfig, LlmProvider, LocalToolsConfig, McpRuntimeConfig, OpenAiCompatibleConfig,
+            OpenAiConfig, SkillsConfig,
+        },
+        types::AgentPermissions,
+    };
 
     use super::{
         LlmAssistantBlock, LlmMessage, LlmStopReason, LlmTool, LlmToolResult, OpenAiClient,
@@ -1203,6 +1314,43 @@ mod tests {
             "x".repeat(1_000)
         );
         assert!(logged.ends_with("...(truncated)"));
+    }
+
+    #[test]
+    fn llm_client_exposes_active_model_backend_capabilities() {
+        let config = AppConfig {
+            prompt: None,
+            data_dir: None,
+            llm_provider: Some(LlmProvider::OpenAi),
+            azure_openai: None,
+            openai: Some(OpenAiConfig {
+                api_key: "test-key".to_string(),
+                endpoint: "https://api.openai.com/v1".to_string(),
+                model: "gpt-test".to_string(),
+                temperature: 0.2,
+                top_p: 1.0,
+                max_output_tokens: 1_024,
+                max_advertised_tools: 128,
+            }),
+            azure_anthropic: None,
+            openai_compatible: None,
+            agent_permissions: AgentPermissions::default(),
+            local_tools: LocalToolsConfig::default(),
+            skills: SkillsConfig::default(),
+            mcp_runtime: McpRuntimeConfig::default(),
+            mcp_servers: Vec::new(),
+            tracing: None,
+        };
+
+        let client = super::LlmClient::new(&config).expect("client should build");
+        let capabilities = client
+            .model_capabilities()
+            .expect("active backend should expose capabilities");
+
+        assert_eq!(client.provider_label(), "OpenAI");
+        assert!(capabilities.tool_calling);
+        assert!(capabilities.usage_metadata);
+        assert!(!capabilities.streaming);
     }
 
     #[test]

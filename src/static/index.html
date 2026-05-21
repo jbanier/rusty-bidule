@@ -467,6 +467,7 @@
     configPath: 'config/config.yaml',
     configDirty: false,
     configSaving: false,
+    modelStatus: null,
     oauthServers: [],
     recipes: [],
     activeConversation: null,
@@ -852,6 +853,7 @@
       </section>
       <section class="config-section">
         <h4>Agent</h4>
+        ${renderModelStatus()}
         <div class="config-grid">
           <label class="config-field">
             <span>LLM Provider</span>
@@ -939,6 +941,18 @@
     setConfigStatus(configStatusMessage());
     saveConfigButtonEl.disabled = state.configSaving || !state.configDirty;
     reloadConfigButtonEl.disabled = state.configSaving || !state.configDirty;
+  }
+
+  function renderModelStatus() {
+    const status = state.modelStatus;
+    if (!status) {
+      return '<p class="status-message">Model backend status unavailable.</p>';
+    }
+    const enabled = Object.entries(status.capabilities || {})
+      .filter(([, value]) => value === true)
+      .map(([key]) => key.replace(/_/g, ' '));
+    const suffix = enabled.length ? ` · ${escapeHtml(enabled.join(', '))}` : '';
+    return `<p class="status-message">Active backend: ${escapeHtml(status.provider_label || status.provider || 'LLM')}${suffix}</p>`;
   }
 
   function renderConfigServer(server, index) {
@@ -1177,6 +1191,8 @@
     state.config = config;
     state.configDraft = normalizeConfigDraft(config);
     state.configPath = payload.config_path || 'config/config.local.yaml';
+    const modelResponse = await fetch('/api/model');
+    state.modelStatus = modelResponse.ok ? await readResponseJson(modelResponse) : null;
     state.configDirty = false;
     state.configSaving = false;
     renderRestartNotice(payload.message || '');

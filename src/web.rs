@@ -1022,6 +1022,12 @@ async fn get_config(State(state): State<WebAppState>) -> AppResult<axum::Json<se
     )?))
 }
 
+async fn get_model_status(
+    State(state): State<WebAppState>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    Ok(axum::Json(state.orchestrator.model_status()))
+}
+
 async fn put_config(
     axum::Json(body): axum::Json<ConfigUpdateBody>,
 ) -> AppResult<axum::Json<serde_json::Value>> {
@@ -1159,6 +1165,7 @@ pub async fn run_web_server(
         .route("/healthz", get(healthz))
         .route("/oauth/callback/{server_name}", get(oauth_callback))
         .route("/api/config", get(get_config).put(put_config))
+        .route("/api/model", get(get_model_status))
         .route(
             "/api/conversations",
             get(list_conversations).post(create_conversation),

@@ -257,6 +257,34 @@
           <p id="schedule-form-hint" class="status-message">Create a scheduled recipe or prompt run.</p>
           <div id="schedules-list" class="schedules-list"></div>
         </section>
+        <section class="evidence-panel">
+          <div class="run-status-header">
+            <p class="conversation-label">Evidence</p>
+            <div class="jobs-panel-indicators">
+              <button id="build-evidence-bundle" type="button">Bundle</button>
+              <span id="evidence-panel-badge" class="jobs-badge hidden">0</span>
+            </div>
+          </div>
+          <div id="evidence-list" class="schedules-list"></div>
+        </section>
+        <section class="workflow-panel">
+          <div class="run-status-header">
+            <p class="conversation-label">Workflow Review</p>
+            <span id="workflow-panel-badge" class="jobs-badge hidden">0</span>
+          </div>
+          <div id="workflow-list" class="schedules-list"></div>
+        </section>
+        <section class="retention-panel">
+          <div class="run-status-header">
+            <p class="conversation-label">Retention</p>
+          </div>
+          <div class="schedule-form">
+            <input id="retention-days" type="number" min="0" step="1" value="30" title="Older than days" />
+            <button id="preview-retention" type="button">Preview</button>
+            <button id="apply-retention" type="button" disabled>Apply</button>
+          </div>
+          <p id="retention-summary" class="status-message">Preview archived cleanup before deletion.</p>
+        </section>
         <section class="recipe-panel">
           <div class="run-status-header">
             <p class="conversation-label">Recipe</p>
@@ -398,6 +426,9 @@
     if (Number.isFinite(timing.llm_seconds)) {
       badges.push(`<span class="message-pill">llm: ${escapeHtml(formatDuration(timing.llm_seconds))}</span>`);
     }
+    if (Array.isArray(metadata.evidence) && metadata.evidence.length) {
+      badges.push(`<span class="message-pill">evidence: ${escapeHtml(String(metadata.evidence.length))}</span>`);
+    }
     return badges.join('');
   }
 
@@ -425,6 +456,8 @@
   const state = {
     conversations: [],
     schedules: [],
+    evidence: [],
+    workflows: [],
     scheduleSnapshot: {},
     activeConversationId: null,
     activeJobId: null,
@@ -439,6 +472,7 @@
     activeConversation: null,
     jobSnapshot: {},
     schedulesUnavailable: false,
+    retentionPreviewId: null,
     runStatus: {
       kind: 'idle',
       message: 'No request in progress.',
@@ -495,6 +529,15 @@
   const schedulePromptEl = document.getElementById('schedule-prompt');
   const scheduleHintEl = document.getElementById('schedule-form-hint');
   const createScheduleButtonEl = document.getElementById('create-schedule');
+  const evidenceListEl = document.getElementById('evidence-list');
+  const evidenceBadgeEl = document.getElementById('evidence-panel-badge');
+  const buildEvidenceBundleButtonEl = document.getElementById('build-evidence-bundle');
+  const workflowListEl = document.getElementById('workflow-list');
+  const workflowBadgeEl = document.getElementById('workflow-panel-badge');
+  const retentionDaysEl = document.getElementById('retention-days');
+  const previewRetentionButtonEl = document.getElementById('preview-retention');
+  const applyRetentionButtonEl = document.getElementById('apply-retention');
+  const retentionSummaryEl = document.getElementById('retention-summary');
   const activeRunIndicatorEl = document.getElementById('active-run-indicator');
   const toastContainerEl = document.getElementById('toast-container');
   const openToolsButton = document.getElementById('open-tools');
@@ -588,6 +631,9 @@
   document.getElementById('clear-recipe').addEventListener('click', clearRecipe);
   document.getElementById('reset-mcp-servers').addEventListener('click', resetMcpServers);
   createScheduleButtonEl.addEventListener('click', createSchedule);
+  buildEvidenceBundleButtonEl.addEventListener('click', buildEvidenceBundle);
+  previewRetentionButtonEl.addEventListener('click', previewRetention);
+  applyRetentionButtonEl.addEventListener('click', applyRetentionPreview);
   scheduleRunTypeEl.addEventListener('change', renderScheduleFormState);
   scheduleCadenceKindEl.addEventListener('change', renderScheduleFormState);
   compactConversationButtonEl.addEventListener('click', compactConversation);
@@ -1295,6 +1341,8 @@
     renderConversationList();
     updateActionState();
     await refreshJobs();
+    await refreshEvidence();
+    await refreshWorkflows();
     await refreshSchedules();
     if (scroll) {
       scrollConversationToBottom();
@@ -1662,6 +1710,165 @@
     renderJobs(jobs);
   }
 
+  async function refreshEvidence() {
+    if (!state.activeConversationId) {
+      renderEvidence([]);
+      return;
+    }
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/evidence`);
+    if (!response.ok) {
+      renderEvidence([]);
+      return;
+    }
+    state.evidence = await response.json();
+    renderEvidence(state.evidence);
+  }
+
+  function renderEvidence(artifacts) {
+    evidenceListEl.innerHTML = '';
+    evidenceBadgeEl.textContent = artifacts.length;
+    evidenceBadgeEl.classList.toggle('hidden', artifacts.length === 0);
+    if (!artifacts.length) {
+      evidenceListEl.innerHTML = '<p class="empty-state">No saved tool evidence yet.</p>';
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'jobs-table';
+    table.innerHTML = '<thead><tr><th>Tool</th><th>Status</th><th>Saved</th><th>Preview</th><th></th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    artifacts.slice().reverse().forEach((artifact) => {
+      const tr = document.createElement('tr');
+      const rawUrl = `/api/conversations/${encodeURIComponent(artifact.conversation_id)}/evidence/${encodeURIComponent(artifact.artifact_id)}/raw`;
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(artifact.tool_name || '')}</strong><div class="schedule-subline">${escapeHtml(artifact.artifact_id || '')}</div></td>
+        <td><span class="job-badge ${artifact.status === 'success' ? 'job-badge-success' : 'job-badge-error'}">${escapeHtml(artifact.status || '')}</span></td>
+        <td>${escapeHtml(formatRelativeTime(artifact.created_at))}</td>
+        <td title="${escapeAttribute(artifact.preview || '')}">${escapeHtml((artifact.preview || '').slice(0, 120))}</td>
+        <td class="schedule-actions-cell"><a href="${rawUrl}" target="_blank" rel="noreferrer">Raw</a></td>
+      `;
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    evidenceListEl.appendChild(table);
+  }
+
+  async function buildEvidenceBundle() {
+    if (!state.activeConversationId) return;
+    messageInputEl.value = `Use the evidence-bundle skill to build an evidence bundle for conversation ${state.activeConversationId}. Return the saved export path and checksum manifest path.`;
+    await sendMessage();
+  }
+
+  async function refreshWorkflows() {
+    if (!state.activeConversationId) {
+      renderWorkflows([]);
+      return;
+    }
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/workflows`);
+    if (!response.ok) {
+      renderWorkflows([]);
+      return;
+    }
+    state.workflows = await response.json();
+    renderWorkflows(state.workflows);
+  }
+
+  function renderWorkflows(workflows) {
+    workflowListEl.innerHTML = '';
+    workflowBadgeEl.textContent = workflows.length;
+    workflowBadgeEl.classList.toggle('hidden', workflows.length === 0);
+    if (!workflows.length) {
+      workflowListEl.innerHTML = '<p class="empty-state">No workflow runs for this conversation.</p>';
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'jobs-table';
+    table.innerHTML = '<thead><tr><th>Run</th><th>Status</th><th>Step</th><th>Actions</th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    workflows.forEach((workflow) => {
+      const status = String(workflow.status || '');
+      const statusLower = status.toLowerCase();
+      const tr = document.createElement('tr');
+      const step = Number.isFinite(workflow.current_step) ? `${workflow.current_step + 1}/${(workflow.steps || []).length}` : '—';
+      const canApprove = statusLower === 'paused';
+      const canRetry = ['paused', 'failed', 'rejected'].includes(statusLower);
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(workflow.workflow_type || workflow.workflow_id)}</strong><div class="schedule-subline">${escapeHtml(workflow.workflow_id || '')}</div></td>
+        <td><span class="job-badge ${statusLower === 'completed' ? 'job-badge-success' : statusLower === 'paused' ? 'job-badge-running' : statusLower === 'failed' ? 'job-badge-error' : 'job-badge-default'}">${escapeHtml(status)}</span>${workflow.pause_reason ? `<div class="schedule-error">${escapeHtml(workflow.pause_reason)}</div>` : ''}</td>
+        <td>${escapeHtml(step)}</td>
+        <td class="schedule-actions-cell">
+          <button type="button" data-action="approve" data-id="${escapeAttribute(workflow.workflow_id)}" ${canApprove ? '' : 'disabled'}>Approve</button>
+          <button type="button" data-action="retry" data-id="${escapeAttribute(workflow.workflow_id)}" ${canRetry ? '' : 'disabled'}>Retry</button>
+          <button type="button" data-action="reject" data-id="${escapeAttribute(workflow.workflow_id)}" ${canApprove ? '' : 'disabled'}>Reject</button>
+          <button type="button" data-action="cancel" data-id="${escapeAttribute(workflow.workflow_id)}">Cancel</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    workflowListEl.appendChild(table);
+    workflowListEl.querySelectorAll('button[data-action]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const action = button.dataset.action;
+        const id = button.dataset.id;
+        if (!id || !state.activeConversationId) return;
+        await updateWorkflow(action, id);
+      });
+    });
+  }
+
+  async function updateWorkflow(action, workflowId) {
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/workflows/${encodeURIComponent(workflowId)}/${action}`, { method: 'POST' });
+    const body = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setRunStatus('error', body.error || `Failed to ${action} workflow.`);
+      return;
+    }
+    setRunStatus('workflow', `Workflow ${action} complete.`);
+    await selectConversation(state.activeConversationId, { scroll: true });
+  }
+
+  async function previewRetention() {
+    const days = Number(retentionDaysEl.value || 30);
+    const response = await fetch('/api/retention/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        older_than_days: Number.isFinite(days) ? days : 30,
+        include_archived: true,
+        include_active: false,
+        include_exports: false,
+        force: false,
+      }),
+    });
+    const body = await readResponseJson(response) || {};
+    if (!response.ok) {
+      retentionSummaryEl.textContent = body.error || 'Retention preview failed.';
+      return;
+    }
+    state.retentionPreviewId = body.preview_id;
+    applyRetentionButtonEl.disabled = !(body.items && body.items.length);
+    retentionSummaryEl.textContent = `${(body.items || []).length} item(s) eligible, ${(body.blocked || []).length} protected.`;
+  }
+
+  async function applyRetentionPreview() {
+    if (!state.retentionPreviewId) return;
+    if (!confirm('Apply this retention preview and delete eligible local files?')) return;
+    const response = await fetch('/api/retention/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preview_id: state.retentionPreviewId, force: true }),
+    });
+    const body = await readResponseJson(response) || {};
+    if (!response.ok) {
+      retentionSummaryEl.textContent = body.error || 'Retention apply failed.';
+      return;
+    }
+    retentionSummaryEl.textContent = `Deleted ${(body.deleted || []).length} item(s).`;
+    state.retentionPreviewId = null;
+    applyRetentionButtonEl.disabled = true;
+    await refreshConversations();
+  }
+
   async function refreshSchedules() {
     let response;
     try {
@@ -1759,7 +1966,7 @@
     schedulesRunningIndicatorEl.classList.toggle('hidden', running.length === 0);
     schedulesRunningCountEl.textContent = `${running.length} running`;
     if (state.schedulesUnavailable) {
-      schedulesListEl.innerHTML = '<p class="empty-state">Schedules are not available in the Rust web API yet.</p>';
+      schedulesListEl.innerHTML = '<p class="empty-state">Schedules could not be loaded.</p>';
       return;
     }
     if (!schedules.length) {

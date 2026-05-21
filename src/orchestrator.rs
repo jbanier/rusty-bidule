@@ -22,9 +22,11 @@ use crate::{
     skills::SkillRegistry,
     tool_evidence::ToolEvidenceWriter,
     types::{
-        AgentPermissions, MessageMetadata, MessageTiming, ProgressEvent, RememberedJob,
-        RunTurnResult, UiEvent, permission_denied_user_prompt,
+        AgentPermissions, ApprovalRequest, LlmUsage, MessageMetadata, MessageTiming, ProgressEvent,
+        RememberedJob, RunTurnResult, ToolArtifact, UiEvent, WorkflowRun, WorkflowStep,
+        permission_denied_user_prompt,
     },
+    workflows::{WorkflowDefinition, parse_workflow_definition},
 };
 
 const MAX_AGENT_ITERATIONS: usize = 10;
@@ -62,10 +64,42 @@ struct FinishTurnContext<'a> {
     tool_seconds: f64,
     llm_seconds: f64,
     tool_call_count: usize,
+    evidence: Vec<ToolArtifact>,
+    llm_usage: Option<LlmUsage>,
     automation: bool,
+    suppress_persistence: bool,
     recipe: Option<&'a crate::recipes::Recipe>,
     ui_tx: &'a UnboundedSender<UiEvent>,
 }
+
+#[derive(Debug, Clone, Default)]
+struct RunOptions {
+    automation: bool,
+    skip_workflow: bool,
+    suppress_persistence: bool,
+    mcp_filter_override: Option<Vec<String>>,
+    local_tool_filter_override: Option<Vec<String>>,
+}
+
+#[derive(Debug)]
+struct ToolCallOutcome {
+    output: String,
+    artifact: ToolArtifact,
+}
+
+#[derive(Debug)]
+struct ToolCallFailure {
+    error: anyhow::Error,
+    artifact: Option<ToolArtifact>,
+}
+
+impl std::fmt::Display for ToolCallFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{:#}", self.error)
+    }
+}
+
+impl std::error::Error for ToolCallFailure {}
 
 struct MessageBuildContext<'a> {
     prompt: Option<&'a str>,
@@ -271,8 +305,13 @@ impl Orchestrator {
         user_message: String,
         ui_tx: UnboundedSender<UiEvent>,
     ) -> Result<RunTurnResult> {
-        self.run_turn_internal(conversation_id, Some(user_message), ui_tx, false)
-            .await
+        self.run_turn_internal(
+            conversation_id,
+            Some(user_message),
+            ui_tx,
+            RunOptions::default(),
+        )
+        .await
     }
 
     pub async fn run_automation_turn(
@@ -282,8 +321,36 @@ impl Orchestrator {
         ui_tx: UnboundedSender<UiEvent>,
     ) -> Result<RunTurnResult> {
         let prompt = build_automation_prompt(job);
-        self.run_turn_internal(conversation_id, Some(prompt), ui_tx, true)
-            .await
+        self.run_turn_internal(
+            conversation_id,
+            Some(prompt),
+            ui_tx,
+            RunOptions {
+                automation: true,
+                skip_workflow: true,
+                ..RunOptions::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn run_scheduled_prompt(
+        &self,
+        conversation_id: &str,
+        prompt: String,
+        ui_tx: UnboundedSender<UiEvent>,
+    ) -> Result<RunTurnResult> {
+        self.run_turn_internal(
+            conversation_id,
+            Some(prompt),
+            ui_tx,
+            RunOptions {
+                automation: true,
+                skip_workflow: true,
+                ..RunOptions::default()
+            },
+        )
+        .await
     }
 
     async fn run_turn_internal(
@@ -291,18 +358,18 @@ impl Orchestrator {
         conversation_id: &str,
         user_message: Option<String>,
         ui_tx: UnboundedSender<UiEvent>,
-        automation: bool,
+        options: RunOptions,
     ) -> Result<RunTurnResult> {
-        let _conversation_guard = self.acquire_conversation_lock(conversation_id).await;
+        let conversation_guard = self.acquire_conversation_lock(conversation_id).await;
         let turn_start = std::time::Instant::now();
         let mut tool_seconds: f64 = 0.0;
         let mut llm_seconds: f64 = 0.0;
 
-        info!(%conversation_id, "starting conversation turn");
+        info!(%conversation_id, automation = options.automation, "starting conversation turn");
         self.emit(
             &ui_tx,
             "turn_started",
-            if automation {
+            if options.automation {
                 "Running automation turn"
             } else {
                 "Recording user message"
@@ -311,7 +378,7 @@ impl Orchestrator {
             None,
         );
         if let Some(user_message) = user_message.as_deref() {
-            if !automation {
+            if !options.automation {
                 self.inner
                     .store
                     .append_message(conversation_id, "user", user_message)?;
@@ -320,7 +387,11 @@ impl Orchestrator {
                 conversation_id,
                 &format!(
                     "{} message received: {}",
-                    if automation { "automation" } else { "user" },
+                    if options.automation {
+                        "automation"
+                    } else {
+                        "user"
+                    },
                     user_message.replace('\n', " ")
                 ),
             )?;
@@ -339,14 +410,34 @@ impl Orchestrator {
             .and_then(|name| self.inner.recipes.find(name))
             .cloned();
 
+        if !options.skip_workflow
+            && let Some(recipe) = recipe.as_ref()
+            && let Some(workflow_raw) = recipe.workflow.as_deref()
+            && let Some(workflow) = parse_workflow_definition(workflow_raw)
+        {
+            drop(conversation_guard);
+            return self
+                .run_recipe_workflow(
+                    conversation_id,
+                    user_message.as_deref().unwrap_or_default(),
+                    recipe,
+                    workflow,
+                    ui_tx,
+                    turn_start,
+                )
+                .await;
+        }
+
         // Determine effective MCP server filter
-        let mcp_filter: Option<Vec<String>> = recipe
-            .as_ref()
-            .and_then(|r| r.config_mcp_servers.clone())
+        let mcp_filter: Option<Vec<String>> = options
+            .mcp_filter_override
+            .clone()
+            .or_else(|| recipe.as_ref().and_then(|r| r.config_mcp_servers.clone()))
             .or(enabled_mcp_servers);
-        let local_tool_filter: Option<Vec<String>> = recipe
-            .as_ref()
-            .and_then(|r| r.config_local_tools.clone())
+        let local_tool_filter: Option<Vec<String>> = options
+            .local_tool_filter_override
+            .clone()
+            .or_else(|| recipe.as_ref().and_then(|r| r.config_local_tools.clone()))
             .or(enabled_local_tools);
 
         let history = conversation.messages.clone();
@@ -438,7 +529,7 @@ impl Orchestrator {
             agent_permissions: &agent_permissions,
             store: &self.inner.store,
             conversation_id,
-            user_message_override: if automation {
+            user_message_override: if options.automation {
                 user_message.as_deref()
             } else {
                 None
@@ -457,6 +548,9 @@ impl Orchestrator {
         );
 
         let mut tool_call_count = 0usize;
+        let mut evidence = Vec::<ToolArtifact>::new();
+        let mut llm_usage = LlmUsage::default();
+        let mut have_llm_usage = false;
 
         for iteration in 0..MAX_AGENT_ITERATIONS {
             let context_chars = estimate_context_chars(&messages);
@@ -496,7 +590,7 @@ impl Orchestrator {
                 Ok(completion) => completion,
                 Err(err) => {
                     if iteration == 0 {
-                        let reply = if automation {
+                        let reply = if options.automation {
                             format!("Automation deferred: {err}")
                         } else {
                             format!(
@@ -512,7 +606,10 @@ impl Orchestrator {
                                 tool_seconds,
                                 llm_seconds,
                                 tool_call_count,
-                                automation,
+                                evidence: evidence.clone(),
+                                llm_usage: have_llm_usage.then_some(llm_usage.clone()),
+                                automation: options.automation,
+                                suppress_persistence: options.suppress_persistence,
                                 recipe: recipe.as_ref(),
                                 ui_tx: &ui_tx,
                             })
@@ -523,6 +620,10 @@ impl Orchestrator {
                 }
             };
             llm_seconds += llm_start.elapsed().as_secs_f64();
+            if let Some(usage) = &completion.usage {
+                llm_usage.add_assign(usage);
+                have_llm_usage = true;
+            }
 
             let tool_uses = completion
                 .assistant_blocks
@@ -570,10 +671,19 @@ impl Orchestrator {
                         .await;
                     tool_seconds += tool_start.elapsed().as_secs_f64();
 
-                    let tool_output: Result<String, LlmToolResult> = match tool_result {
-                        Ok(output) => Ok(output),
-                        Err(err) => {
-                            let err_text = format!("{err:#}");
+                    let tool_output: std::result::Result<String, LlmToolResult> = match tool_result
+                    {
+                        Ok(outcome) => {
+                            let content =
+                                tool_result_with_evidence(&outcome.output, &outcome.artifact);
+                            evidence.push(outcome.artifact);
+                            Ok(content)
+                        }
+                        Err(failure) => {
+                            if let Some(artifact) = failure.artifact.clone() {
+                                evidence.push(artifact);
+                            }
+                            let err_text = format!("{:#}", failure.error);
                             if let Some(prompt) = permission_denied_user_prompt(&err_text) {
                                 self.emit(
                                     &ui_tx,
@@ -590,7 +700,10 @@ impl Orchestrator {
                                         tool_seconds,
                                         llm_seconds,
                                         tool_call_count,
-                                        automation,
+                                        evidence: evidence.clone(),
+                                        llm_usage: have_llm_usage.then_some(llm_usage.clone()),
+                                        automation: options.automation,
+                                        suppress_persistence: options.suppress_persistence,
                                         recipe: recipe.as_ref(),
                                         ui_tx: &ui_tx,
                                     })
@@ -651,7 +764,10 @@ impl Orchestrator {
                             tool_seconds,
                             llm_seconds,
                             tool_call_count,
-                            automation,
+                            evidence: evidence.clone(),
+                            llm_usage: have_llm_usage.then_some(llm_usage.clone()),
+                            automation: options.automation,
+                            suppress_persistence: options.suppress_persistence,
                             recipe: recipe.as_ref(),
                             ui_tx: &ui_tx,
                         })
@@ -685,7 +801,10 @@ impl Orchestrator {
                     tool_seconds,
                     llm_seconds,
                     tool_call_count,
-                    automation,
+                    evidence,
+                    llm_usage: have_llm_usage.then_some(llm_usage),
+                    automation: options.automation,
+                    suppress_persistence: options.suppress_persistence,
                     recipe: recipe.as_ref(),
                     ui_tx: &ui_tx,
                 })
@@ -696,6 +815,336 @@ impl Orchestrator {
             "agent exceeded the {}-iteration safety limit",
             MAX_AGENT_ITERATIONS
         )
+    }
+
+    async fn run_recipe_workflow(
+        &self,
+        conversation_id: &str,
+        user_message: &str,
+        recipe: &crate::recipes::Recipe,
+        workflow: WorkflowDefinition,
+        ui_tx: UnboundedSender<UiEvent>,
+        turn_start: std::time::Instant,
+    ) -> Result<RunTurnResult> {
+        let now = chrono::Utc::now();
+        let mut run = WorkflowRun {
+            workflow_id: format!(
+                "workflow-{}-{:08x}",
+                now.format("%Y%m%d%H%M%S"),
+                rand::random::<u32>()
+            ),
+            conversation_id: conversation_id.to_string(),
+            recipe_name: Some(recipe.name.clone()),
+            workflow_type: workflow.workflow_type.clone(),
+            status: "running".to_string(),
+            current_step: Some(0),
+            pause_reason: None,
+            steps: workflow_steps_from_definition(user_message, &workflow),
+            approvals: Vec::new(),
+            artifacts: Vec::new(),
+            final_answer: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.inner.store.save_workflow_run(&run)?;
+        self.inner.store.append_audit_event(
+            Some(conversation_id),
+            "workflow_start",
+            "workflow started",
+            json!({"workflow_id": run.workflow_id, "type": run.workflow_type, "recipe": recipe.name}),
+        )?;
+        self.emit(
+            &ui_tx,
+            "workflow_start",
+            &format!("Starting workflow {}", run.workflow_id),
+            None,
+            None,
+        );
+
+        let result = self
+            .execute_workflow_run(run.clone(), workflow.max_followups, ui_tx.clone())
+            .await?;
+        run = result.0;
+        let final_reply = recipe.apply_template(&result.1);
+        if run.status == "paused" {
+            self.inner.store.save_workflow_run(&run)?;
+            return self
+                .finish_turn(FinishTurnContext {
+                    conversation_id,
+                    final_reply: &final_reply,
+                    turn_start,
+                    tool_seconds: 0.0,
+                    llm_seconds: 0.0,
+                    tool_call_count: result.2,
+                    evidence: Vec::new(),
+                    llm_usage: None,
+                    automation: false,
+                    suppress_persistence: false,
+                    recipe: Some(recipe),
+                    ui_tx: &ui_tx,
+                })
+                .await;
+        }
+        run.final_answer = Some(final_reply.clone());
+        run.status = "completed".to_string();
+        run.updated_at = chrono::Utc::now();
+        self.inner.store.save_workflow_run(&run)?;
+        self.inner.store.append_audit_event(
+            Some(conversation_id),
+            "workflow_complete",
+            "workflow completed",
+            json!({"workflow_id": run.workflow_id}),
+        )?;
+        self.finish_turn(FinishTurnContext {
+            conversation_id,
+            final_reply: &final_reply,
+            turn_start,
+            tool_seconds: 0.0,
+            llm_seconds: 0.0,
+            tool_call_count: result.2,
+            evidence: Vec::new(),
+            llm_usage: None,
+            automation: false,
+            suppress_persistence: false,
+            recipe: Some(recipe),
+            ui_tx: &ui_tx,
+        })
+        .await
+    }
+
+    pub async fn continue_workflow(
+        &self,
+        conversation_id: &str,
+        workflow_id: &str,
+        ui_tx: UnboundedSender<UiEvent>,
+    ) -> Result<RunTurnResult> {
+        let mut run = self
+            .inner
+            .store
+            .load_workflow_run(conversation_id, workflow_id)?;
+        for approval in &mut run.approvals {
+            if approval.status == "pending" {
+                approval.status = "approved".to_string();
+                approval.decided_at = Some(chrono::Utc::now());
+            }
+        }
+        if let Some(index) = run.current_step
+            && let Some(step) = run.steps.get_mut(index)
+        {
+            step.approval_required = false;
+            step.status = "approved".to_string();
+        }
+        run.status = "running".to_string();
+        run.pause_reason = None;
+        run.updated_at = chrono::Utc::now();
+        self.inner.store.save_workflow_run(&run)?;
+
+        let turn_start = std::time::Instant::now();
+        let result = self
+            .execute_workflow_run(run.clone(), 1, ui_tx.clone())
+            .await?;
+        let mut run = result.0;
+        run.status = "completed".to_string();
+        run.final_answer = Some(result.1.clone());
+        run.updated_at = chrono::Utc::now();
+        self.inner.store.save_workflow_run(&run)?;
+        self.finish_turn(FinishTurnContext {
+            conversation_id,
+            final_reply: &result.1,
+            turn_start,
+            tool_seconds: 0.0,
+            llm_seconds: 0.0,
+            tool_call_count: result.2,
+            evidence: Vec::new(),
+            llm_usage: None,
+            automation: false,
+            suppress_persistence: false,
+            recipe: None,
+            ui_tx: &ui_tx,
+        })
+        .await
+    }
+
+    pub async fn retry_workflow(
+        &self,
+        conversation_id: &str,
+        workflow_id: &str,
+        ui_tx: UnboundedSender<UiEvent>,
+    ) -> Result<RunTurnResult> {
+        let mut run = self
+            .inner
+            .store
+            .load_workflow_run(conversation_id, workflow_id)?;
+        let retry_from = run
+            .current_step
+            .unwrap_or(0)
+            .min(run.steps.len().saturating_sub(1));
+        for approval in &mut run.approvals {
+            if approval.status == "pending" {
+                approval.status = "retry".to_string();
+                approval.decided_at = Some(chrono::Utc::now());
+            }
+        }
+        for (index, step) in run.steps.iter_mut().enumerate().skip(retry_from) {
+            step.status = if index == retry_from {
+                "retrying".to_string()
+            } else {
+                "pending".to_string()
+            };
+            step.worker_output = None;
+            step.validation = None;
+        }
+        if let Some(step) = run.steps.get_mut(retry_from) {
+            step.approval_required = false;
+        }
+        run.current_step = Some(retry_from);
+        run.status = "running".to_string();
+        run.pause_reason = None;
+        run.final_answer = None;
+        run.updated_at = chrono::Utc::now();
+        self.inner.store.save_workflow_run(&run)?;
+
+        let turn_start = std::time::Instant::now();
+        let result = self
+            .execute_workflow_run(run.clone(), 1, ui_tx.clone())
+            .await?;
+        let mut run = result.0;
+        run.status = "completed".to_string();
+        run.final_answer = Some(result.1.clone());
+        run.updated_at = chrono::Utc::now();
+        self.inner.store.save_workflow_run(&run)?;
+        self.finish_turn(FinishTurnContext {
+            conversation_id,
+            final_reply: &result.1,
+            turn_start,
+            tool_seconds: 0.0,
+            llm_seconds: 0.0,
+            tool_call_count: result.2,
+            evidence: Vec::new(),
+            llm_usage: None,
+            automation: false,
+            suppress_persistence: false,
+            recipe: None,
+            ui_tx: &ui_tx,
+        })
+        .await
+    }
+
+    async fn execute_workflow_run(
+        &self,
+        mut run: WorkflowRun,
+        _max_followups: usize,
+        ui_tx: UnboundedSender<UiEvent>,
+    ) -> Result<(WorkflowRun, String, usize)> {
+        let mut total_tool_calls = 0usize;
+        let start_index = run.current_step.unwrap_or(0);
+        let mut collected = run
+            .steps
+            .iter()
+            .take(start_index)
+            .filter_map(|step| {
+                step.worker_output
+                    .as_ref()
+                    .map(|output| format!("## {}\n\n{}", step.name, output))
+            })
+            .collect::<Vec<_>>();
+        for index in start_index..run.steps.len() {
+            run.current_step = Some(index);
+            if run.steps[index].approval_required {
+                let approval_id = format!(
+                    "approval-{}-{:08x}",
+                    chrono::Utc::now().format("%Y%m%d%H%M%S"),
+                    rand::random::<u32>()
+                );
+                run.steps[index].status = "pending_approval".to_string();
+                run.status = "paused".to_string();
+                run.pause_reason = Some(format!(
+                    "Step '{}' requires operator approval",
+                    run.steps[index].name
+                ));
+                run.approvals.push(ApprovalRequest {
+                    approval_id,
+                    workflow_id: run.workflow_id.clone(),
+                    step_index: index,
+                    status: "pending".to_string(),
+                    prompt: run.steps[index].prompt.clone(),
+                    created_at: chrono::Utc::now(),
+                    decided_at: None,
+                    decision_note: None,
+                });
+                run.updated_at = chrono::Utc::now();
+                self.inner.store.save_workflow_run(&run)?;
+                return Ok((
+                    run,
+                    "Workflow paused for operator approval. Review the pending workflow step in the web UI, then approve or cancel it.".to_string(),
+                    total_tool_calls,
+                ));
+            }
+
+            run.steps[index].status = "running".to_string();
+            run.steps[index].attempt = run.steps[index].attempt.saturating_add(1);
+            run.updated_at = chrono::Utc::now();
+            self.inner.store.save_workflow_run(&run)?;
+
+            let prompt = format!(
+                "Workflow step '{}':\n{}\n\nReturn only the evidence-grounded result for this step.",
+                run.steps[index].name, run.steps[index].prompt
+            );
+            let result = Box::pin(self.run_turn_internal(
+                &run.conversation_id,
+                Some(prompt),
+                ui_tx.clone(),
+                RunOptions {
+                    automation: true,
+                    skip_workflow: true,
+                    suppress_persistence: true,
+                    mcp_filter_override: run.steps[index].mcp_servers.clone(),
+                    local_tool_filter_override: run.steps[index].local_tools.clone(),
+                },
+            ))
+            .await?;
+            total_tool_calls += result.tool_calls;
+            run.steps[index].worker_output = Some(result.reply.clone());
+            run.steps[index].validation = Some(
+                self.supervisor_text(&format!(
+                    "Validate this workflow step output against the requested step. Reply with a concise verdict and any gaps.\n\nStep:\n{}\n\nOutput:\n{}",
+                    run.steps[index].prompt, result.reply
+                ))
+                .await
+                .unwrap_or_else(|err| format!("validation unavailable: {err:#}")),
+            );
+            run.steps[index].status = "completed".to_string();
+            run.updated_at = chrono::Utc::now();
+            collected.push(format!("## {}\n\n{}", run.steps[index].name, result.reply));
+            self.inner.store.save_workflow_run(&run)?;
+        }
+
+        let synthesis = self
+            .supervisor_text(&format!(
+                "Synthesize the final workflow answer from these step outputs. Preserve uncertainty and cite tool evidence ids if they appear in the outputs.\n\n{}",
+                collected.join("\n\n")
+            ))
+            .await
+            .unwrap_or_else(|_| collected.join("\n\n"));
+        Ok((run, synthesis, total_tool_calls))
+    }
+
+    async fn supervisor_text(&self, prompt: &str) -> Result<String> {
+        let completion = self
+            .inner
+            .llm
+            .chat_completion(
+                &[
+                    LlmMessage::System(
+                        "You are a tool-less workflow supervisor. Validate and synthesize only from the supplied text.".to_string(),
+                    ),
+                    LlmMessage::UserText(prompt.to_string()),
+                ],
+                &[],
+            )
+            .await?;
+        Ok(assistant_text_from_blocks(&completion.assistant_blocks)
+            .unwrap_or_else(|| "Supervisor returned no text.".to_string()))
     }
 
     async fn finish_turn(&self, ctx: FinishTurnContext<'_>) -> Result<RunTurnResult> {
@@ -715,22 +1164,34 @@ impl Orchestrator {
                 total_seconds,
             },
             tool_call_count: ctx.tool_call_count,
+            llm_usage: ctx.llm_usage.clone(),
+            evidence: ctx.evidence.clone(),
         };
 
-        convo.messages.push(crate::types::Message {
-            role: "assistant".to_string(),
-            content: ctx.final_reply.to_string(),
-            timestamp: chrono::Utc::now(),
-            metadata: Some(metadata),
-        });
-        convo.updated_at = chrono::Utc::now();
-        if ctx.recipe.is_some() && !ctx.automation {
-            convo.pending_recipe = None;
+        if !ctx.suppress_persistence {
+            convo.messages.push(crate::types::Message {
+                role: "assistant".to_string(),
+                content: ctx.final_reply.to_string(),
+                timestamp: chrono::Utc::now(),
+                metadata: Some(metadata),
+            });
+            convo.updated_at = chrono::Utc::now();
+            if ctx.recipe.is_some() && !ctx.automation {
+                convo.pending_recipe = None;
+            }
+            self.inner.store.save(&convo)?;
         }
-        self.inner.store.save(&convo)?;
         self.inner.store.append_log(
             ctx.conversation_id,
-            &format!("assistant reply stored ({} chars)", ctx.final_reply.len()),
+            &format!(
+                "assistant reply {} ({} chars)",
+                if ctx.suppress_persistence {
+                    "produced without message persistence"
+                } else {
+                    "stored"
+                },
+                ctx.final_reply.len()
+            ),
         )?;
         info!(
             conversation_id = %ctx.conversation_id,
@@ -764,19 +1225,26 @@ impl Orchestrator {
         local_executor: &LocalToolExecutor,
         agent_permissions: &AgentPermissions,
         advertised_mcp_tool_names: &HashSet<String>,
-    ) -> Result<String> {
-        self.inner.store.append_log(
-            conversation_id,
-            &format!(
-                "tool call started: {} args={} ",
-                tool_name,
-                serde_json::to_string(&arguments)?
-            ),
-        )?;
+    ) -> std::result::Result<ToolCallOutcome, ToolCallFailure> {
+        self.inner
+            .store
+            .append_log(
+                conversation_id,
+                &format!(
+                    "tool call started: {} args={} ",
+                    tool_name,
+                    serde_json::to_string(&arguments)
+                        .unwrap_or_else(|_| "<invalid-json>".to_string())
+                ),
+            )
+            .map_err(|error| ToolCallFailure {
+                error,
+                artifact: None,
+            })?;
         debug!(
             %conversation_id,
             tool = tool_name,
-            arguments = %serde_json::to_string(&arguments)?,
+            arguments = %serde_json::to_string(&arguments).unwrap_or_else(|_| "<invalid-json>".to_string()),
             "tool call started"
         );
 
@@ -785,33 +1253,41 @@ impl Orchestrator {
             let result = local_executor.execute(tool_name, arguments.clone()).await;
             match result {
                 Ok(output) => {
-                    self.inner.evidence.write_artifact(
-                        conversation_id,
-                        tool_name,
-                        &arguments,
-                        "success",
-                        &output,
-                    )?;
-                    self.inner.store.append_log(
-                        conversation_id,
-                        &format!("local tool call finished: {}", tool_name),
-                    )?;
-                    return Ok(output);
+                    let artifact = self
+                        .inner
+                        .evidence
+                        .write_artifact(conversation_id, tool_name, &arguments, "success", &output)
+                        .map_err(|error| ToolCallFailure {
+                            error,
+                            artifact: None,
+                        })?;
+                    self.inner
+                        .store
+                        .append_log(
+                            conversation_id,
+                            &format!("local tool call finished: {}", tool_name),
+                        )
+                        .map_err(|error| ToolCallFailure {
+                            error,
+                            artifact: Some(artifact.clone()),
+                        })?;
+                    return Ok(ToolCallOutcome { output, artifact });
                 }
                 Err(err) => {
                     let failure = format!("{err:#}");
-                    self.inner.evidence.write_artifact(
-                        conversation_id,
-                        tool_name,
-                        &arguments,
-                        "failure",
-                        &failure,
-                    )?;
-                    self.inner.store.append_log(
+                    let artifact = self
+                        .inner
+                        .evidence
+                        .write_artifact(conversation_id, tool_name, &arguments, "failure", &failure)
+                        .ok();
+                    let _ = self.inner.store.append_log(
                         conversation_id,
                         &format!("local tool call failed: {} error={}", tool_name, failure),
-                    )?;
-                    return Err(anyhow!(failure));
+                    );
+                    return Err(ToolCallFailure {
+                        error: anyhow!(failure),
+                        artifact,
+                    });
                 }
             }
         }
@@ -820,54 +1296,57 @@ impl Orchestrator {
             let failure = format!(
                 "local tool '{tool_name}' is disabled by the active recipe or conversation local tool filter. Enable it in Config.local_tools or reset the conversation local tool filter before retrying."
             );
-            self.inner.evidence.write_artifact(
-                conversation_id,
-                tool_name,
-                &arguments,
-                "failure",
-                &failure,
-            )?;
-            self.inner.store.append_log(
+            let artifact = self
+                .inner
+                .evidence
+                .write_artifact(conversation_id, tool_name, &arguments, "failure", &failure)
+                .ok();
+            let _ = self.inner.store.append_log(
                 conversation_id,
                 &format!("local tool call disabled: {} error={}", tool_name, failure),
-            )?;
-            return Err(anyhow!(failure));
+            );
+            return Err(ToolCallFailure {
+                error: anyhow!(failure),
+                artifact,
+            });
         }
 
         if !agent_permissions.allows_network() {
             let failure = format!(
                 "permission denied: MCP tool '{tool_name}' requires network access. Enable it with /permissions network on, or use /yolo on."
             );
-            self.inner.evidence.write_artifact(
-                conversation_id,
-                tool_name,
-                &arguments,
-                "failure",
-                &failure,
-            )?;
-            self.inner.store.append_log(
+            let artifact = self
+                .inner
+                .evidence
+                .write_artifact(conversation_id, tool_name, &arguments, "failure", &failure)
+                .ok();
+            let _ = self.inner.store.append_log(
                 conversation_id,
                 &format!("tool call denied: {} error={}", tool_name, failure),
-            )?;
-            return Err(anyhow!(failure));
+            );
+            return Err(ToolCallFailure {
+                error: anyhow!(failure),
+                artifact,
+            });
         }
 
         if !advertised_mcp_tool_names.contains(tool_name) {
             let failure = format!(
                 "MCP tool '{tool_name}' is not advertised for the current turn. Enable its server or narrow the request to one of the currently advertised tools before retrying."
             );
-            self.inner.evidence.write_artifact(
-                conversation_id,
-                tool_name,
-                &arguments,
-                "failure",
-                &failure,
-            )?;
-            self.inner.store.append_log(
+            let artifact = self
+                .inner
+                .evidence
+                .write_artifact(conversation_id, tool_name, &arguments, "failure", &failure)
+                .ok();
+            let _ = self.inner.store.append_log(
                 conversation_id,
                 &format!("tool call rejected: {} error={}", tool_name, failure),
-            )?;
-            return Err(anyhow!(failure));
+            );
+            return Err(ToolCallFailure {
+                error: anyhow!(failure),
+                artifact,
+            });
         }
 
         let result = {
@@ -877,35 +1356,43 @@ impl Orchestrator {
 
         match result {
             Ok(output) => {
-                self.inner.evidence.write_artifact(
-                    conversation_id,
-                    tool_name,
-                    &arguments,
-                    "success",
-                    &output,
-                )?;
-                self.inner.store.append_log(
-                    conversation_id,
-                    &format!("tool call finished: {}", tool_name),
-                )?;
+                let artifact = self
+                    .inner
+                    .evidence
+                    .write_artifact(conversation_id, tool_name, &arguments, "success", &output)
+                    .map_err(|error| ToolCallFailure {
+                        error,
+                        artifact: None,
+                    })?;
+                self.inner
+                    .store
+                    .append_log(
+                        conversation_id,
+                        &format!("tool call finished: {}", tool_name),
+                    )
+                    .map_err(|error| ToolCallFailure {
+                        error,
+                        artifact: Some(artifact.clone()),
+                    })?;
                 info!(%conversation_id, tool = tool_name, "tool call succeeded");
-                Ok(output)
+                Ok(ToolCallOutcome { output, artifact })
             }
             Err(err) => {
                 let failure = format!("{err:#}");
-                self.inner.evidence.write_artifact(
-                    conversation_id,
-                    tool_name,
-                    &arguments,
-                    "failure",
-                    &failure,
-                )?;
-                self.inner.store.append_log(
+                let artifact = self
+                    .inner
+                    .evidence
+                    .write_artifact(conversation_id, tool_name, &arguments, "failure", &failure)
+                    .ok();
+                let _ = self.inner.store.append_log(
                     conversation_id,
                     &format!("tool call failed: {} error={}", tool_name, failure),
-                )?;
+                );
                 warn!(%conversation_id, tool = tool_name, error = %failure, "tool call failed");
-                Err(anyhow!(failure))
+                Err(ToolCallFailure {
+                    error: anyhow!(failure),
+                    artifact,
+                })
             }
         }
     }
@@ -1075,6 +1562,61 @@ fn assistant_text_from_blocks(blocks: &[LlmAssistantBlock]) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     if text.is_empty() { None } else { Some(text) }
+}
+
+fn tool_result_with_evidence(output: &str, artifact: &ToolArtifact) -> String {
+    format!(
+        "{}\n\n[evidence]\nartifact_id: {}\npath: {}\nstatus: {}\npreview_bytes: {}",
+        output, artifact.artifact_id, artifact.relative_path, artifact.status, artifact.byte_count
+    )
+}
+
+fn workflow_steps_from_definition(
+    user_message: &str,
+    workflow: &WorkflowDefinition,
+) -> Vec<WorkflowStep> {
+    if workflow.workflow_type == "iterative_research" && workflow.steps.is_empty() {
+        return vec![WorkflowStep {
+            index: 0,
+            name: "Initial evidence collection".to_string(),
+            prompt: user_message.to_string(),
+            status: "pending".to_string(),
+            attempt: 0,
+            max_attempts: 1,
+            approval_required: false,
+            worker_output: None,
+            validation: None,
+            handoff: None,
+            local_tools: None,
+            mcp_servers: None,
+        }];
+    }
+
+    workflow
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| WorkflowStep {
+            index,
+            name: step
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("Step {}", index + 1)),
+            prompt: step
+                .prompt
+                .clone()
+                .unwrap_or_else(|| user_message.to_string()),
+            status: "pending".to_string(),
+            attempt: 0,
+            max_attempts: step.max_attempts.unwrap_or(1).max(1),
+            approval_required: step.approval_required,
+            worker_output: None,
+            validation: None,
+            handoff: None,
+            local_tools: step.local_tools.clone(),
+            mcp_servers: step.mcp_servers.clone(),
+        })
+        .collect()
 }
 
 fn build_automation_prompt(job: &RememberedJob) -> String {

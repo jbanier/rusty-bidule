@@ -15,6 +15,7 @@ use crate::config::{
     AppConfig, AzureAnthropicConfig, AzureOpenAiConfig, LlmProvider, OpenAiCompatibleConfig,
     OpenAiConfig,
 };
+use crate::types::LlmUsage;
 
 #[derive(Debug, Clone)]
 pub struct LlmTool {
@@ -63,6 +64,7 @@ pub enum LlmMessage {
 pub struct LlmCompletion {
     pub assistant_blocks: Vec<LlmAssistantBlock>,
     pub stop_reason: LlmStopReason,
+    pub usage: Option<LlmUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -819,7 +821,28 @@ fn parse_openai_chat_completion_payload(payload: &Value) -> Result<LlmCompletion
     Ok(LlmCompletion {
         stop_reason,
         assistant_blocks,
+        usage: parse_openai_usage(payload),
     })
+}
+
+fn parse_openai_usage(payload: &Value) -> Option<LlmUsage> {
+    let usage = payload.get("usage")?;
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(Value::as_u64);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(Value::as_u64);
+    let total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
+    let usage = LlmUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        ..Default::default()
+    };
+    (!usage.is_empty()).then_some(usage)
 }
 
 fn parse_openai_finish_reason(finish_reason: Option<&Value>) -> LlmStopReason {
@@ -989,7 +1012,25 @@ fn parse_anthropic_chat_completion_payload(payload: &Value) -> Result<LlmComplet
     Ok(LlmCompletion {
         assistant_blocks,
         stop_reason,
+        usage: parse_anthropic_usage(payload),
     })
+}
+
+fn parse_anthropic_usage(payload: &Value) -> Option<LlmUsage> {
+    let usage = payload.get("usage")?;
+    let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
+    let output_tokens = usage.get("output_tokens").and_then(Value::as_u64);
+    let total_tokens = match (input_tokens, output_tokens) {
+        (Some(input), Some(output)) => Some(input.saturating_add(output)),
+        _ => None,
+    };
+    let usage = LlmUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        ..Default::default()
+    };
+    (!usage.is_empty()).then_some(usage)
 }
 
 fn parse_anthropic_tool_use(block: &Value) -> Result<LlmAssistantBlock> {

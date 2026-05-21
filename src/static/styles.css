@@ -1703,6 +1703,9 @@ code {
 }
 
 .tools-content .schedules-panel,
+.tools-content .evidence-panel,
+.tools-content .workflow-panel,
+.tools-content .retention-panel,
 .tools-content .recipe-panel {
   margin-bottom: 16px;
 }
@@ -2282,7 +2285,7 @@ code {
 
 .schedule-form {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr 0.9fr 0.9fr auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-top: 8px;
 }
@@ -2306,7 +2309,7 @@ code {
 }
 
 .schedule-form textarea {
-  grid-column: 1 / -2;
+  grid-column: 1 / -1;
   resize: vertical;
 }
 

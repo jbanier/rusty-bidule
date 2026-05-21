@@ -1,16 +1,19 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::types::{
-    ActivatedSkill, AgentPermissions, Conversation, ConversationSummary, FindingRecord,
-    InvestigationMemory, Message, MessageMetadata, RememberedJob, SearchResult,
+    ActivatedSkill, AgentPermissions, AuditEvent, Conversation, ConversationSummary, FindingRecord,
+    InvestigationMemory, Message, MessageMetadata, RememberedJob, RetentionBlockedItem,
+    RetentionItem, RetentionPolicy, RetentionPreview, ScheduleRecord, SearchResult, ToolArtifact,
+    WorkflowRun,
 };
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -57,6 +60,9 @@ impl ConversationStore {
             enabled_mcp_servers: None,
             active_compaction: None,
             enabled_local_tools: None,
+            active_workflow: None,
+            pinned: false,
+            legal_hold: false,
             agent_permissions: self.default_agent_permissions.clone(),
             messages: Vec::new(),
         };
@@ -106,6 +112,8 @@ impl ConversationStore {
                 pending_recipe: conversation.pending_recipe,
                 active_compaction: conversation.active_compaction,
                 enabled_mcp_servers: conversation.enabled_mcp_servers,
+                pinned: conversation.pinned,
+                legal_hold: conversation.legal_hold,
             });
         }
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
@@ -185,6 +193,68 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub fn append_audit_event(
+        &self,
+        conversation_id: Option<&str>,
+        kind: &str,
+        message: &str,
+        metadata: Value,
+    ) -> Result<AuditEvent> {
+        self.init()?;
+        let event = AuditEvent {
+            event_id: generate_prefixed_id("audit"),
+            created_at: Utc::now(),
+            conversation_id: conversation_id.map(str::to_string),
+            kind: kind.to_string(),
+            message: message.to_string(),
+            metadata,
+        };
+        if let Some(conversation_id) = conversation_id {
+            self.ensure_layout(conversation_id)?;
+            let path = self.audit_log_path(conversation_id)?;
+            append_json_line(&path, &event)?;
+        }
+        let global_path = self.data_root.join("audit.jsonl");
+        append_json_line(&global_path, &event)?;
+        Ok(event)
+    }
+
+    pub fn append_tool_artifact(&self, artifact: &ToolArtifact) -> Result<()> {
+        self.ensure_layout(&artifact.conversation_id)?;
+        let path = self.tool_artifact_index_path(&artifact.conversation_id)?;
+        append_json_line(&path, artifact)
+    }
+
+    pub fn load_tool_artifacts(&self, conversation_id: &str) -> Result<Vec<ToolArtifact>> {
+        self.ensure_layout(conversation_id)?;
+        let path = self.tool_artifact_index_path(conversation_id)?;
+        read_json_lines(&path)
+    }
+
+    pub fn get_tool_artifact(
+        &self,
+        conversation_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<ToolArtifact>> {
+        Ok(self
+            .load_tool_artifacts(conversation_id)?
+            .into_iter()
+            .find(|artifact| artifact.artifact_id == artifact_id))
+    }
+
+    pub fn resolve_artifact_path(&self, artifact: &ToolArtifact) -> Result<PathBuf> {
+        let base = self.conversation_dir(&artifact.conversation_id)?;
+        let path = base.join(&artifact.relative_path);
+        let canonical_base = fs::canonicalize(&base)
+            .with_context(|| format!("failed to canonicalize {}", base.display()))?;
+        let canonical_path = fs::canonicalize(&path)
+            .with_context(|| format!("failed to canonicalize {}", path.display()))?;
+        if !canonical_path.starts_with(canonical_base) {
+            bail!("artifact path escapes conversation directory");
+        }
+        Ok(canonical_path)
+    }
+
     pub fn conversation_dir(&self, conversation_id: &str) -> Result<PathBuf> {
         validate_conversation_id(conversation_id)?;
         Ok(self.root.join(conversation_id))
@@ -195,6 +265,7 @@ impl ConversationStore {
         fs::create_dir_all(dir.join("tool_output"))?;
         fs::create_dir_all(dir.join("logs"))?;
         fs::create_dir_all(dir.join("compactions"))?;
+        fs::create_dir_all(dir.join("workflow_runs"))?;
         Ok(())
     }
 
@@ -202,6 +273,26 @@ impl ConversationStore {
         Ok(self
             .conversation_dir(conversation_id)?
             .join("job_state.json"))
+    }
+
+    fn tool_artifact_index_path(&self, conversation_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .conversation_dir(conversation_id)?
+            .join("tool_output/index.jsonl"))
+    }
+
+    fn audit_log_path(&self, conversation_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .conversation_dir(conversation_id)?
+            .join("logs/audit.jsonl"))
+    }
+
+    fn workflow_run_path(&self, conversation_id: &str, workflow_id: &str) -> Result<PathBuf> {
+        validate_resource_id(workflow_id, "workflow id")?;
+        Ok(self
+            .conversation_dir(conversation_id)?
+            .join("workflow_runs")
+            .join(format!("{workflow_id}.json")))
     }
 
     fn legacy_jobs_path(&self, conversation_id: &str) -> Result<PathBuf> {
@@ -232,6 +323,21 @@ impl ConversationStore {
 
     fn export_root(&self) -> PathBuf {
         self.data_root.join("exports")
+    }
+
+    fn schedules_path(&self) -> PathBuf {
+        self.data_root.join("schedules.json")
+    }
+
+    fn retention_preview_dir(&self) -> PathBuf {
+        self.data_root.join("retention_previews")
+    }
+
+    fn retention_preview_path(&self, preview_id: &str) -> Result<PathBuf> {
+        validate_resource_id(preview_id, "retention preview id")?;
+        Ok(self
+            .retention_preview_dir()
+            .join(format!("{preview_id}.json")))
     }
 
     pub fn load_scratchpad(&self, conversation_id: &str) -> Result<String> {
@@ -456,6 +562,24 @@ impl ConversationStore {
         Ok(conversation)
     }
 
+    pub fn set_conversation_protection(
+        &self,
+        conversation_id: &str,
+        pinned: Option<bool>,
+        legal_hold: Option<bool>,
+    ) -> Result<Conversation> {
+        let mut conversation = self.load(conversation_id)?;
+        if let Some(value) = pinned {
+            conversation.pinned = value;
+        }
+        if let Some(value) = legal_hold {
+            conversation.legal_hold = value;
+        }
+        conversation.updated_at = Utc::now();
+        self.save(&conversation)?;
+        Ok(conversation)
+    }
+
     pub fn export_conversation_summary(&self, conversation_id: &str) -> Result<PathBuf> {
         let conversation = self.load(conversation_id)?;
         let scratchpad = self.load_scratchpad(conversation_id)?;
@@ -509,6 +633,154 @@ impl ConversationStore {
         fs::write(&export_path, payload)
             .with_context(|| format!("failed to write {}", export_path.display()))?;
         Ok(export_path)
+    }
+
+    pub fn create_retention_preview(&self, policy: RetentionPolicy) -> Result<RetentionPreview> {
+        self.init()?;
+        let now = Utc::now();
+        let cutoff = policy
+            .older_than_days
+            .map(|days| now - chrono::Duration::days(days.max(0)));
+        let schedule_conversations = self
+            .load_schedules()?
+            .into_iter()
+            .map(|schedule| schedule.conversation_id)
+            .collect::<std::collections::HashSet<_>>();
+
+        let mut preview = RetentionPreview {
+            preview_id: generate_prefixed_id("retention"),
+            created_at: now,
+            policy: policy.clone(),
+            items: Vec::new(),
+            blocked: Vec::new(),
+        };
+
+        for summary in self.list_conversations_with_archived(true)? {
+            let conversation = self.load(&summary.conversation_id)?;
+            let conversation_dir = self.conversation_dir(&summary.conversation_id)?;
+            let age_ok = cutoff
+                .map(|cutoff| conversation.updated_at <= cutoff)
+                .unwrap_or(true);
+            let is_archived = conversation.archived_at.is_some();
+            let protected_reason = if conversation.pinned {
+                Some("conversation is pinned")
+            } else if conversation.legal_hold {
+                Some("conversation has a legal hold")
+            } else if conversation.active_workflow.is_some() {
+                Some("conversation has an active workflow")
+            } else if schedule_conversations.contains(&conversation.conversation_id) {
+                Some("conversation is owned by a schedule")
+            } else {
+                None
+            };
+
+            if let Some(reason) = protected_reason {
+                preview.blocked.push(RetentionBlockedItem {
+                    kind: "conversation".to_string(),
+                    path: conversation_dir.display().to_string(),
+                    conversation_id: Some(conversation.conversation_id),
+                    reason: reason.to_string(),
+                });
+                continue;
+            }
+
+            let selected = age_ok
+                && ((is_archived && policy.include_archived)
+                    || (!is_archived && policy.include_active && policy.force));
+            if selected {
+                preview.items.push(RetentionItem {
+                    kind: "conversation".to_string(),
+                    path: conversation_dir.display().to_string(),
+                    conversation_id: Some(conversation.conversation_id),
+                    byte_count: dir_size(&conversation_dir).unwrap_or(0),
+                    reason: if is_archived {
+                        "archived conversation matched retention policy".to_string()
+                    } else {
+                        "active conversation matched forced retention policy".to_string()
+                    },
+                });
+            }
+        }
+
+        if policy.include_exports {
+            let export_root = self.export_root();
+            if export_root.exists() {
+                for entry in fs::read_dir(&export_root)
+                    .with_context(|| format!("failed to read {}", export_root.display()))?
+                {
+                    let entry = entry?;
+                    if entry.file_type()?.is_file() {
+                        preview.items.push(RetentionItem {
+                            kind: "export".to_string(),
+                            path: entry.path().display().to_string(),
+                            conversation_id: None,
+                            byte_count: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                            reason: "export matched retention policy".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        fs::create_dir_all(self.retention_preview_dir())?;
+        let path = self.retention_preview_path(&preview.preview_id)?;
+        fs::write(&path, serde_json::to_string_pretty(&preview)?)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        self.append_audit_event(
+            None,
+            "retention_preview",
+            "retention preview created",
+            json!({"preview_id": preview.preview_id, "item_count": preview.items.len(), "blocked_count": preview.blocked.len()}),
+        )?;
+        Ok(preview)
+    }
+
+    pub fn load_retention_preview(&self, preview_id: &str) -> Result<RetentionPreview> {
+        let path = self.retention_preview_path(preview_id)?;
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    pub fn apply_retention_preview(&self, preview_id: &str, force: bool) -> Result<Vec<String>> {
+        let preview = self.load_retention_preview(preview_id)?;
+        if !force && !preview.policy.force {
+            bail!("retention apply requires force=true");
+        }
+        let mut deleted = Vec::new();
+        for item in preview.items {
+            let path = PathBuf::from(&item.path);
+            match item.kind.as_str() {
+                "conversation" => {
+                    if let Some(conversation_id) = item.conversation_id.as_deref() {
+                        self.delete(conversation_id)?;
+                        deleted.push(path.display().to_string());
+                    }
+                }
+                "export" => {
+                    let export_root = self.export_root();
+                    let canonical_root = fs::canonicalize(&export_root).with_context(|| {
+                        format!("failed to canonicalize {}", export_root.display())
+                    })?;
+                    let canonical_path = fs::canonicalize(&path)
+                        .with_context(|| format!("failed to canonicalize {}", path.display()))?;
+                    if canonical_path.starts_with(canonical_root) {
+                        fs::remove_file(&canonical_path).with_context(|| {
+                            format!("failed to remove {}", canonical_path.display())
+                        })?;
+                        deleted.push(canonical_path.display().to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.append_audit_event(
+            None,
+            "retention_apply",
+            "retention preview applied",
+            json!({"preview_id": preview_id, "deleted": deleted}),
+        )?;
+        Ok(deleted)
     }
 
     pub fn search_local(&self, query: &str) -> Result<Vec<SearchResult>> {
@@ -705,6 +977,62 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub fn save_workflow_run(&self, run: &WorkflowRun) -> Result<()> {
+        self.ensure_layout(&run.conversation_id)?;
+        let path = self.workflow_run_path(&run.conversation_id, &run.workflow_id)?;
+        let payload = serde_json::to_string_pretty(run)?;
+        fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
+        let mut conversation = self.load(&run.conversation_id)?;
+        conversation.active_workflow = match run.status.as_str() {
+            "completed" | "failed" | "cancelled" => None,
+            _ => Some(run.workflow_id.clone()),
+        };
+        self.save(&conversation)?;
+        Ok(())
+    }
+
+    pub fn load_workflow_run(
+        &self,
+        conversation_id: &str,
+        workflow_id: &str,
+    ) -> Result<WorkflowRun> {
+        let path = self.workflow_run_path(conversation_id, workflow_id)?;
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    pub fn list_workflow_runs(&self, conversation_id: Option<&str>) -> Result<Vec<WorkflowRun>> {
+        self.init()?;
+        let mut runs = Vec::new();
+        let summaries = self.list_conversations_with_archived(true)?;
+        for summary in summaries {
+            if conversation_id.is_some_and(|id| id != summary.conversation_id) {
+                continue;
+            }
+            let dir = self
+                .conversation_dir(&summary.conversation_id)?
+                .join("workflow_runs");
+            if !dir.exists() {
+                continue;
+            }
+            for entry in
+                fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))?
+            {
+                let entry = entry?;
+                if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
+                let raw = fs::read_to_string(entry.path())?;
+                if let Ok(run) = serde_json::from_str::<WorkflowRun>(&raw) {
+                    runs.push(run);
+                }
+            }
+        }
+        runs.sort_by_key(|run| std::cmp::Reverse(run.updated_at));
+        Ok(runs)
+    }
+
     pub fn list_due_jobs(
         &self,
         now: chrono::DateTime<Utc>,
@@ -719,6 +1047,129 @@ impl ConversationStore {
             }
         }
         Ok(due)
+    }
+
+    pub fn load_schedules(&self) -> Result<Vec<ScheduleRecord>> {
+        self.init()?;
+        let path = self.schedules_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    pub fn save_schedules(&self, schedules: &[ScheduleRecord]) -> Result<()> {
+        self.init()?;
+        let path = self.schedules_path();
+        let payload = serde_json::to_string_pretty(schedules)?;
+        fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    pub fn upsert_schedule(&self, schedule: ScheduleRecord) -> Result<ScheduleRecord> {
+        let mut schedules = self.load_schedules()?;
+        schedules.retain(|existing| existing.id != schedule.id);
+        schedules.push(schedule.clone());
+        schedules.sort_by_key(|schedule| schedule.name.clone());
+        self.save_schedules(&schedules)?;
+        Ok(schedule)
+    }
+
+    pub fn get_schedule(&self, schedule_id: &str) -> Result<Option<ScheduleRecord>> {
+        validate_resource_id(schedule_id, "schedule id")?;
+        Ok(self
+            .load_schedules()?
+            .into_iter()
+            .find(|schedule| schedule.id == schedule_id))
+    }
+
+    pub fn delete_schedule(&self, schedule_id: &str) -> Result<bool> {
+        validate_resource_id(schedule_id, "schedule id")?;
+        let mut schedules = self.load_schedules()?;
+        let original_len = schedules.len();
+        schedules.retain(|schedule| schedule.id != schedule_id);
+        if schedules.len() == original_len {
+            return Ok(false);
+        }
+        self.save_schedules(&schedules)?;
+        Ok(true)
+    }
+
+    pub fn list_due_schedules(&self, now: chrono::DateTime<Utc>) -> Result<Vec<ScheduleRecord>> {
+        Ok(self
+            .load_schedules()?
+            .into_iter()
+            .filter(|schedule| {
+                schedule.enabled
+                    && schedule.next_run_at <= now
+                    && schedule
+                        .lease_expires_at
+                        .map(|lease| lease <= now)
+                        .unwrap_or(true)
+            })
+            .collect())
+    }
+
+    pub fn claim_schedule(
+        &self,
+        schedule_id: &str,
+        now: chrono::DateTime<Utc>,
+        lease_seconds: i64,
+        force: bool,
+    ) -> Result<Option<ScheduleRecord>> {
+        validate_resource_id(schedule_id, "schedule id")?;
+        let mut schedules = self.load_schedules()?;
+        let Some(schedule) = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == schedule_id)
+        else {
+            return Ok(None);
+        };
+        if !force
+            && (!schedule.enabled
+                || schedule.next_run_at > now
+                || schedule
+                    .lease_expires_at
+                    .map(|lease| lease > now)
+                    .unwrap_or(false))
+        {
+            return Ok(None);
+        }
+        schedule.lease_expires_at = Some(now + chrono::Duration::seconds(lease_seconds));
+        schedule.last_status = Some("running".to_string());
+        schedule.last_error = None;
+        schedule.updated_at = now;
+        let claimed = schedule.clone();
+        self.save_schedules(&schedules)?;
+        Ok(Some(claimed))
+    }
+
+    pub fn release_schedule(
+        &self,
+        schedule_id: &str,
+        status: &str,
+        error: Option<String>,
+        next_run_at: chrono::DateTime<Utc>,
+    ) -> Result<Option<ScheduleRecord>> {
+        validate_resource_id(schedule_id, "schedule id")?;
+        let mut schedules = self.load_schedules()?;
+        let Some(schedule) = schedules
+            .iter_mut()
+            .find(|schedule| schedule.id == schedule_id)
+        else {
+            return Ok(None);
+        };
+        let now = Utc::now();
+        schedule.lease_expires_at = None;
+        schedule.last_status = Some(status.to_string());
+        schedule.last_error = error;
+        schedule.last_run_at = Some(now);
+        schedule.next_run_at = next_run_at;
+        schedule.updated_at = now;
+        let updated = schedule.clone();
+        self.save_schedules(&schedules)?;
+        Ok(Some(updated))
     }
 
     /// Save a compaction summary and update `active_compaction` in conversation.json.
@@ -772,18 +1223,22 @@ impl ConversationStore {
 }
 
 fn validate_conversation_id(conversation_id: &str) -> Result<()> {
-    if conversation_id.is_empty() {
-        bail!("conversation id must not be empty");
+    validate_resource_id(conversation_id, "conversation id")
+}
+
+fn validate_resource_id(value: &str, label: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{label} must not be empty");
     }
-    if conversation_id.len() > 128 {
-        bail!("conversation id is too long");
+    if value.len() > 128 {
+        bail!("{label} is too long");
     }
-    if !conversation_id
+    if !value
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     {
         bail!(
-            "invalid conversation id '{conversation_id}'; allowed characters are ASCII letters, digits, '-' and '_'"
+            "invalid {label} '{value}'; allowed characters are ASCII letters, digits, '-' and '_'"
         );
     }
     Ok(())
@@ -792,6 +1247,68 @@ fn validate_conversation_id(conversation_id: &str) -> Result<()> {
 fn generate_conversation_id(now: chrono::DateTime<Utc>) -> String {
     let suffix = rand::random::<u32>();
     format!("convo-{}-{suffix:08x}", now.format("%Y%m%d%H%M%S"))
+}
+
+fn generate_prefixed_id(prefix: &str) -> String {
+    let suffix = rand::random::<u32>();
+    format!(
+        "{}-{}-{suffix:08x}",
+        prefix,
+        Utc::now().format("%Y%m%d%H%M%S")
+    )
+}
+
+fn append_json_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    writeln!(file, "{}", serde_json::to_string(value)?)?;
+    Ok(())
+}
+
+fn read_json_lines<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut values = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        values.push(
+            serde_json::from_str(&line)
+                .with_context(|| format!("failed to parse JSON line in {}", path.display()))?,
+        );
+    }
+    Ok(values)
+}
+
+fn dir_size(path: &Path) -> Result<u64> {
+    if path.is_file() {
+        return Ok(path.metadata()?.len());
+    }
+    let mut total = 0u64;
+    if !path.exists() {
+        return Ok(total);
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            total = total.saturating_add(dir_size(&path)?);
+        } else if path.is_file() {
+            total = total.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(total)
 }
 
 fn summarize_match(text: &str, query: &str) -> String {
@@ -879,7 +1396,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::types::{AgentPermissions, InvestigationMemory};
+    use crate::types::{
+        AgentPermissions, InvestigationMemory, RetentionPolicy, ScheduleCadence,
+        ScheduleIntervalUnit, ScheduleRecord, ToolArtifact,
+    };
 
     use super::ConversationStore;
 
@@ -985,6 +1505,110 @@ mod tests {
         assert_eq!(loaded.title.as_deref(), Some("Malware triage"));
         let summary = store.list_conversations().unwrap().pop().unwrap();
         assert_eq!(summary.title.as_deref(), Some("Malware triage"));
+    }
+
+    #[test]
+    fn tool_artifact_index_round_trips() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let artifact = ToolArtifact {
+            artifact_id: "artifact-demo".to_string(),
+            conversation_id: conversation.conversation_id.clone(),
+            tool_name: "local__time".to_string(),
+            status: "success".to_string(),
+            created_at: chrono::Utc::now(),
+            relative_path: "tool_output/demo.txt".to_string(),
+            byte_count: 4,
+            arguments_redacted: json!({"token": "[REDACTED]"}),
+            preview: "demo".to_string(),
+        };
+
+        store.append_tool_artifact(&artifact).unwrap();
+
+        let artifacts = store
+            .load_tool_artifacts(&conversation.conversation_id)
+            .unwrap();
+        assert_eq!(artifacts, vec![artifact.clone()]);
+        assert_eq!(
+            store
+                .get_tool_artifact(&conversation.conversation_id, "artifact-demo")
+                .unwrap(),
+            Some(artifact)
+        );
+    }
+
+    #[test]
+    fn schedule_claim_and_release_round_trip() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let now = chrono::Utc::now();
+        let schedule = ScheduleRecord {
+            id: "schedule-demo".to_string(),
+            name: "Demo".to_string(),
+            title: None,
+            run_type: "prompt".to_string(),
+            recipe_name: None,
+            prompt: Some("hello".to_string()),
+            conversation_id: conversation.conversation_id,
+            cadence: ScheduleCadence::Interval {
+                every: 15,
+                unit: ScheduleIntervalUnit::Minutes,
+            },
+            enabled: true,
+            next_run_at: now - chrono::Duration::minutes(1),
+            last_run_at: None,
+            last_status: None,
+            last_error: None,
+            lease_expires_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        store.upsert_schedule(schedule).unwrap();
+        let claimed = store
+            .claim_schedule("schedule-demo", now, 60, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.last_status.as_deref(), Some("running"));
+        assert!(claimed.lease_expires_at.is_some());
+
+        let next = now + chrono::Duration::minutes(15);
+        let released = store
+            .release_schedule("schedule-demo", "done", None, next)
+            .unwrap()
+            .unwrap();
+        assert_eq!(released.last_status.as_deref(), Some("done"));
+        assert_eq!(released.next_run_at, next);
+        assert!(released.lease_expires_at.is_none());
+    }
+
+    #[test]
+    fn retention_preview_blocks_protected_conversations() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let pinned = store.create_conversation().unwrap();
+        store
+            .set_conversation_protection(&pinned.conversation_id, Some(true), None)
+            .unwrap();
+        store.archive_conversation(&pinned.conversation_id).unwrap();
+
+        let preview = store
+            .create_retention_preview(RetentionPolicy {
+                older_than_days: Some(0),
+                include_archived: true,
+                include_active: false,
+                include_exports: false,
+                force: true,
+            })
+            .unwrap();
+
+        assert!(preview.items.is_empty());
+        assert!(preview.blocked.iter().any(|item| {
+            item.conversation_id.as_deref() == Some(pinned.conversation_id.as_str())
+                && item.reason.contains("pinned")
+        }));
     }
 
     #[test]

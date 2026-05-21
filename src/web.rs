@@ -20,7 +20,11 @@ use crate::{
     paths::discover_project_root,
     prompt_expansion::expand_prompt_file_references,
     recipes::RecipeRegistry,
-    types::{ConversationSummary, FilesystemAccess, ProgressEvent, RunTurnResult, UiEvent},
+    schedules::{ScheduleCreateRequest, build_schedule_record, run_schedule_by_id},
+    types::{
+        ConversationSummary, FilesystemAccess, ProgressEvent, RetentionPolicy, RunTurnResult,
+        UiEvent,
+    },
 };
 
 static INDEX_HTML: &str = include_str!("static/index.html");
@@ -76,6 +80,8 @@ struct ConvoSummaryResponse {
     pending_recipe: Option<String>,
     active_compaction: Option<String>,
     enabled_mcp_servers: Option<Vec<String>>,
+    pinned: bool,
+    legal_hold: bool,
 }
 
 impl From<ConversationSummary> for ConvoSummaryResponse {
@@ -90,6 +96,8 @@ impl From<ConversationSummary> for ConvoSummaryResponse {
             pending_recipe: s.pending_recipe,
             active_compaction: s.active_compaction,
             enabled_mcp_servers: s.enabled_mcp_servers,
+            pinned: s.pinned,
+            legal_hold: s.legal_hold,
         }
     }
 }
@@ -138,6 +146,12 @@ struct ConversationTitleBody {
 }
 
 #[derive(Deserialize)]
+struct ConversationProtectionBody {
+    pinned: Option<bool>,
+    legal_hold: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct PermissionsUpdateBody {
     allow_network: Option<bool>,
     filesystem: Option<FilesystemAccess>,
@@ -169,6 +183,12 @@ struct FindingBody {
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
+}
+
+#[derive(Deserialize)]
+struct RetentionApplyBody {
+    preview_id: String,
+    force: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +321,20 @@ async fn put_conversation_title(
         .orchestrator
         .store()
         .set_conversation_title(&id, body.title.as_deref())?;
+    Ok(axum::Json(serde_json::to_value(&conversation)?))
+}
+
+async fn put_conversation_protection(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<ConversationProtectionBody>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let conversation = state.orchestrator.store().set_conversation_protection(
+        &id,
+        body.pinned,
+        body.legal_hold,
+    )?;
     Ok(axum::Json(serde_json::to_value(&conversation)?))
 }
 
@@ -521,6 +555,96 @@ async fn list_recipes(
     Ok(axum::Json(json!(recipes)))
 }
 
+async fn list_schedules(
+    State(state): State<WebAppState>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    let schedules = state.orchestrator.store().load_schedules()?;
+    Ok(axum::Json(serde_json::to_value(schedules)?))
+}
+
+async fn create_schedule(
+    State(state): State<WebAppState>,
+    axum::Json(body): axum::Json<ScheduleCreateRequest>,
+) -> AppResult<(StatusCode, axum::Json<serde_json::Value>)> {
+    let conversation = state.orchestrator.store().create_conversation()?;
+    if !body.name.trim().is_empty() {
+        let _ = state
+            .orchestrator
+            .store()
+            .set_conversation_title(&conversation.conversation_id, Some(body.name.trim()))?;
+    }
+    let schedule = build_schedule_record(body, conversation.conversation_id)?;
+    let schedule = state.orchestrator.store().upsert_schedule(schedule)?;
+    state.orchestrator.store().append_audit_event(
+        Some(&schedule.conversation_id),
+        "schedule_create",
+        "schedule created",
+        json!({"schedule_id": schedule.id, "name": schedule.name}),
+    )?;
+    Ok((
+        StatusCode::CREATED,
+        axum::Json(serde_json::to_value(schedule)?),
+    ))
+}
+
+async fn run_schedule(
+    State(state): State<WebAppState>,
+    Path(schedule_id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&schedule_id, "schedule")?;
+    let schedule = run_schedule_by_id(state.orchestrator.clone(), &schedule_id, true).await?;
+    Ok(axum::Json(json!({
+        "status": schedule.last_status.clone().unwrap_or_else(|| "done".to_string()),
+        "schedule": schedule,
+    })))
+}
+
+async fn pause_schedule(
+    State(state): State<WebAppState>,
+    Path(schedule_id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    update_schedule_enabled(state, &schedule_id, false)
+}
+
+async fn resume_schedule(
+    State(state): State<WebAppState>,
+    Path(schedule_id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    update_schedule_enabled(state, &schedule_id, true)
+}
+
+fn update_schedule_enabled(
+    state: WebAppState,
+    schedule_id: &str,
+    enabled: bool,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(schedule_id, "schedule")?;
+    let mut schedule = state
+        .orchestrator
+        .store()
+        .get_schedule(schedule_id)?
+        .ok_or_else(|| anyhow::anyhow!("schedule '{schedule_id}' not found"))?;
+    schedule.enabled = enabled;
+    schedule.updated_at = Utc::now();
+    if enabled && schedule.next_run_at < Utc::now() {
+        schedule.next_run_at = crate::schedules::next_run_after(&schedule.cadence, Utc::now())?;
+    }
+    let schedule = state.orchestrator.store().upsert_schedule(schedule)?;
+    Ok(axum::Json(serde_json::to_value(schedule)?))
+}
+
+async fn delete_schedule(
+    State(state): State<WebAppState>,
+    Path(schedule_id): Path<String>,
+) -> AppResult<StatusCode> {
+    validate_resource_id(&schedule_id, "schedule")?;
+    if state.orchestrator.store().delete_schedule(&schedule_id)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(anyhow::anyhow!("schedule '{schedule_id}' not found").into())
+    }
+}
+
 async fn use_recipe(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
@@ -621,6 +745,141 @@ async fn list_conversation_jobs(
     validate_resource_id(&id, "conversation")?;
     let jobs = state.orchestrator.store().load_job_state(&id)?;
     Ok(axum::Json(json!(jobs)))
+}
+
+async fn list_conversation_evidence(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let artifacts = state.orchestrator.store().load_tool_artifacts(&id)?;
+    Ok(axum::Json(serde_json::to_value(artifacts)?))
+}
+
+async fn get_conversation_evidence(
+    State(state): State<WebAppState>,
+    Path((id, artifact_id)): Path<(String, String)>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    validate_resource_id(&artifact_id, "artifact")?;
+    let artifact = state
+        .orchestrator
+        .store()
+        .get_tool_artifact(&id, &artifact_id)?
+        .ok_or_else(|| anyhow::anyhow!("artifact '{artifact_id}' not found"))?;
+    Ok(axum::Json(serde_json::to_value(artifact)?))
+}
+
+async fn download_conversation_evidence(
+    State(state): State<WebAppState>,
+    Path((id, artifact_id)): Path<(String, String)>,
+) -> AppResult<Response> {
+    validate_resource_id(&id, "conversation")?;
+    validate_resource_id(&artifact_id, "artifact")?;
+    let store = state.orchestrator.store();
+    let artifact = store
+        .get_tool_artifact(&id, &artifact_id)?
+        .ok_or_else(|| anyhow::anyhow!("artifact '{artifact_id}' not found"))?;
+    let path = store.resolve_artifact_path(&artifact)?;
+    let body = std::fs::read_to_string(&path)
+        .map_err(|err| anyhow::anyhow!("failed to read artifact '{}': {err}", path.display()))?;
+    Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
+}
+
+async fn list_conversation_workflows(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let runs = state.orchestrator.store().list_workflow_runs(Some(&id))?;
+    Ok(axum::Json(serde_json::to_value(runs)?))
+}
+
+async fn list_workflows(
+    State(state): State<WebAppState>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    let runs = state.orchestrator.store().list_workflow_runs(None)?;
+    Ok(axum::Json(serde_json::to_value(runs)?))
+}
+
+async fn get_conversation_workflow(
+    State(state): State<WebAppState>,
+    Path((id, workflow_id)): Path<(String, String)>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    validate_resource_id(&workflow_id, "workflow")?;
+    let run = state
+        .orchestrator
+        .store()
+        .load_workflow_run(&id, &workflow_id)?;
+    Ok(axum::Json(serde_json::to_value(run)?))
+}
+
+async fn approve_conversation_workflow(
+    State(state): State<WebAppState>,
+    Path((id, workflow_id)): Path<(String, String)>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    validate_resource_id(&workflow_id, "workflow")?;
+    let (ui_tx, _ui_rx) = unbounded_channel::<UiEvent>();
+    let result = state
+        .orchestrator
+        .continue_workflow(&id, &workflow_id, ui_tx)
+        .await?;
+    Ok(axum::Json(serde_json::to_value(result)?))
+}
+
+async fn retry_conversation_workflow(
+    State(state): State<WebAppState>,
+    Path((id, workflow_id)): Path<(String, String)>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    validate_resource_id(&workflow_id, "workflow")?;
+    let (ui_tx, _ui_rx) = unbounded_channel::<UiEvent>();
+    let result = state
+        .orchestrator
+        .retry_workflow(&id, &workflow_id, ui_tx)
+        .await?;
+    Ok(axum::Json(serde_json::to_value(result)?))
+}
+
+async fn reject_conversation_workflow(
+    State(state): State<WebAppState>,
+    Path((id, workflow_id)): Path<(String, String)>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    update_workflow_status(state, &id, &workflow_id, "rejected")
+}
+
+async fn cancel_conversation_workflow(
+    State(state): State<WebAppState>,
+    Path((id, workflow_id)): Path<(String, String)>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    update_workflow_status(state, &id, &workflow_id, "cancelled")
+}
+
+fn update_workflow_status(
+    state: WebAppState,
+    conversation_id: &str,
+    workflow_id: &str,
+    status: &str,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(conversation_id, "conversation")?;
+    validate_resource_id(workflow_id, "workflow")?;
+    let mut run = state
+        .orchestrator
+        .store()
+        .load_workflow_run(conversation_id, workflow_id)?;
+    run.status = status.to_string();
+    run.pause_reason = None;
+    run.updated_at = Utc::now();
+    for approval in &mut run.approvals {
+        if approval.status == "pending" {
+            approval.status = status.to_string();
+            approval.decided_at = Some(Utc::now());
+        }
+    }
+    state.orchestrator.store().save_workflow_run(&run)?;
+    Ok(axum::Json(serde_json::to_value(run)?))
 }
 
 async fn get_scratchpad(
@@ -729,6 +988,32 @@ async fn search_local(
     }
     let results = state.orchestrator.store().search_local(needle)?;
     Ok(axum::Json(serde_json::to_value(results)?))
+}
+
+async fn create_retention_preview(
+    State(state): State<WebAppState>,
+    axum::Json(policy): axum::Json<RetentionPolicy>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    let preview = state
+        .orchestrator
+        .store()
+        .create_retention_preview(policy)?;
+    Ok(axum::Json(serde_json::to_value(preview)?))
+}
+
+async fn apply_retention_preview(
+    State(state): State<WebAppState>,
+    axum::Json(body): axum::Json<RetentionApplyBody>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&body.preview_id, "retention preview")?;
+    let deleted = state
+        .orchestrator
+        .store()
+        .apply_retention_preview(&body.preview_id, body.force.unwrap_or(false))?;
+    Ok(axum::Json(json!({
+        "preview_id": body.preview_id,
+        "deleted": deleted,
+    })))
 }
 
 async fn get_config(State(state): State<WebAppState>) -> AppResult<axum::Json<serde_json::Value>> {
@@ -889,6 +1174,10 @@ pub async fn run_web_server(
             get(get_conversation_permissions).put(put_conversation_permissions),
         )
         .route(
+            "/api/conversations/{id}/protection",
+            post(put_conversation_protection),
+        )
+        .route(
             "/api/conversations/{id}/archive",
             post(archive_conversation),
         )
@@ -921,6 +1210,42 @@ pub async fn run_web_server(
         )
         .route("/api/conversations/{id}/jobs", get(list_conversation_jobs))
         .route(
+            "/api/conversations/{id}/evidence",
+            get(list_conversation_evidence),
+        )
+        .route(
+            "/api/conversations/{id}/evidence/{artifact_id}",
+            get(get_conversation_evidence),
+        )
+        .route(
+            "/api/conversations/{id}/evidence/{artifact_id}/raw",
+            get(download_conversation_evidence),
+        )
+        .route(
+            "/api/conversations/{id}/workflows",
+            get(list_conversation_workflows),
+        )
+        .route(
+            "/api/conversations/{id}/workflows/{workflow_id}",
+            get(get_conversation_workflow),
+        )
+        .route(
+            "/api/conversations/{id}/workflows/{workflow_id}/approve",
+            post(approve_conversation_workflow),
+        )
+        .route(
+            "/api/conversations/{id}/workflows/{workflow_id}/retry",
+            post(retry_conversation_workflow),
+        )
+        .route(
+            "/api/conversations/{id}/workflows/{workflow_id}/reject",
+            post(reject_conversation_workflow),
+        )
+        .route(
+            "/api/conversations/{id}/workflows/{workflow_id}/cancel",
+            post(cancel_conversation_workflow),
+        )
+        .route(
             "/api/conversations/{id}/scratchpad",
             get(get_scratchpad).put(put_scratchpad),
         )
@@ -933,12 +1258,23 @@ pub async fn run_web_server(
             axum::routing::delete(delete_finding).put(update_finding),
         )
         .route("/api/search", get(search_local))
+        .route("/api/workflows", get(list_workflows))
+        .route("/api/retention/preview", post(create_retention_preview))
+        .route("/api/retention/apply", post(apply_retention_preview))
         .route("/api/mcp/oauth-servers", get(list_oauth_servers))
         .route(
             "/api/mcp/oauth-servers/{server_name}/start",
             post(start_oauth_server),
         )
         .route("/api/recipes", get(list_recipes))
+        .route("/api/schedules", get(list_schedules).post(create_schedule))
+        .route("/api/schedules/{schedule_id}/run", post(run_schedule))
+        .route("/api/schedules/{schedule_id}/pause", post(pause_schedule))
+        .route("/api/schedules/{schedule_id}/resume", post(resume_schedule))
+        .route(
+            "/api/schedules/{schedule_id}",
+            axum::routing::delete(delete_schedule),
+        )
         .route("/api/jobs/{job_id}", get(get_job).delete(delete_job))
         .with_state(state);
 

@@ -11,11 +11,14 @@ mod orchestrator;
 mod paths;
 mod prompt_expansion;
 mod recipes;
+mod redaction;
+mod schedules;
 mod skills;
 mod tool_evidence;
 mod types;
 mod ui;
 mod web;
+mod workflows;
 
 use anyhow::{Result, bail};
 use auto_pull::AutoPullRuntime;
@@ -64,6 +67,7 @@ async fn main() -> Result<()> {
         Interface::Web => {
             info!("launching web interface");
             AutoPullRuntime::new(orchestrator.clone()).start();
+            schedules::ScheduleRuntime::new(orchestrator.clone()).start();
             let recipes = orchestrator.recipes().clone();
             web::run_web_server(orchestrator, recipes, &options.host, options.port).await
         }
@@ -74,6 +78,7 @@ async fn main() -> Result<()> {
             } else {
                 info!("launching interactive TUI");
                 AutoPullRuntime::new(orchestrator.clone()).start();
+                schedules::ScheduleRuntime::new(orchestrator.clone()).start();
                 let app = App::new(orchestrator).await?;
                 app.run().await
             }

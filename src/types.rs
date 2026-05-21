@@ -135,6 +135,15 @@ pub struct Conversation {
     /// Per-conversation allowlist for local tools. `None` means all built-in local tools are active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_local_tools: Option<Vec<String>>,
+    /// Workflow run currently associated with this conversation, if one is active or paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workflow: Option<String>,
+    /// Protect this conversation from retention cleanup.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+    /// Stronger cleanup protection for cases under legal or operational hold.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub legal_hold: bool,
     #[serde(default)]
     pub agent_permissions: AgentPermissions,
     pub messages: Vec<Message>,
@@ -157,6 +166,10 @@ pub struct MessageMetadata {
     pub assistant_index: usize,
     pub timing: MessageTiming,
     pub tool_call_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_usage: Option<LlmUsage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<ToolArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +203,240 @@ pub struct ConversationSummary {
     pub pending_recipe: Option<String>,
     pub active_compaction: Option<String>,
     pub enabled_mcp_servers: Option<Vec<String>>,
+    pub pinned: bool,
+    pub legal_hold: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LlmUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_currency: Option<String>,
+}
+
+impl LlmUsage {
+    pub fn add_assign(&mut self, other: &Self) {
+        self.input_tokens = add_optional_u64(self.input_tokens, other.input_tokens);
+        self.output_tokens = add_optional_u64(self.output_tokens, other.output_tokens);
+        self.total_tokens = add_optional_u64(self.total_tokens, other.total_tokens);
+        self.estimated_cost_micros =
+            add_optional_u64(self.estimated_cost_micros, other.estimated_cost_micros);
+        if self.estimated_cost_currency.is_none() {
+            self.estimated_cost_currency = other.estimated_cost_currency.clone();
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.total_tokens.is_none()
+            && self.estimated_cost_micros.is_none()
+            && self.estimated_cost_currency.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolArtifact {
+    pub artifact_id: String,
+    pub conversation_id: String,
+    pub tool_name: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub relative_path: String,
+    pub byte_count: u64,
+    #[serde(default)]
+    pub arguments_redacted: Value,
+    #[serde(default)]
+    pub preview: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuditEvent {
+    pub event_id: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    pub kind: String,
+    pub message: String,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleCadence {
+    Interval {
+        every: u64,
+        unit: ScheduleIntervalUnit,
+    },
+    Daily {
+        time: String,
+    },
+    Weekdays {
+        time: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleIntervalUnit {
+    Minutes,
+    Hours,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScheduleRecord {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub run_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    pub conversation_id: String,
+    pub cadence: ScheduleCadence,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub next_run_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowRun {
+    pub workflow_id: String,
+    pub conversation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_name: Option<String>,
+    pub workflow_type: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<WorkflowStep>,
+    #[serde(default)]
+    pub approvals: Vec<ApprovalRequest>,
+    #[serde(default)]
+    pub artifacts: Vec<ToolArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_answer: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowStep {
+    pub index: usize,
+    pub name: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub attempt: usize,
+    #[serde(default)]
+    pub max_attempts: usize,
+    #[serde(default)]
+    pub approval_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApprovalRequest {
+    pub approval_id: String,
+    pub workflow_id: String,
+    pub step_index: usize,
+    pub status: String,
+    pub prompt: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetentionPolicy {
+    #[serde(default)]
+    pub older_than_days: Option<i64>,
+    #[serde(default)]
+    pub include_archived: bool,
+    #[serde(default)]
+    pub include_active: bool,
+    #[serde(default)]
+    pub include_exports: bool,
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            older_than_days: Some(30),
+            include_archived: true,
+            include_active: false,
+            include_exports: false,
+            force: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetentionPreview {
+    pub preview_id: String,
+    pub created_at: DateTime<Utc>,
+    pub policy: RetentionPolicy,
+    #[serde(default)]
+    pub items: Vec<RetentionItem>,
+    #[serde(default)]
+    pub blocked: Vec<RetentionBlockedItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetentionItem {
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub byte_count: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetentionBlockedItem {
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -461,6 +708,22 @@ fn validate_poll_interval_seconds(value: u64) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn add_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]

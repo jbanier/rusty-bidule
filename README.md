@@ -318,6 +318,7 @@ local_tools:
   manage durable case carry-over state
 - `local__exec_cli` does not invoke a shell, and does not support pipes, redirects, or path-based commands
 - Web posture recipes use the web assessment skills and keep destructive, brute-force, DoS, OOB, and WAF-evasion testing disabled unless scope explicitly authorizes it
+- On Ubuntu, install the supporting web assessment binaries with `bash scripts/setup-web-assessment-tools.sh`; use `--apt-only` if upstream Go/npm/gem installs are not allowed.
 
 ### MCP Runtime
 

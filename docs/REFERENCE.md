@@ -330,6 +330,10 @@ recipes are authorized-only: active requests, destructive tests, OOB callbacks,
 brute force, DoS, and WAF evasion remain disabled unless the captured scope
 explicitly permits them.
 
+On Ubuntu, `scripts/setup-web-assessment-tools.sh` installs the supporting
+assessment binaries. It uses apt for packaged tools and, unless `--apt-only` is
+set, fills common Ubuntu package gaps with upstream Go/npm/gem installers.
+
 ## MCP
 
 MCP servers are configured in `mcp_servers`. Network permission must be enabled before MCP discovery or tool calls happen. The orchestrator advertises a ranked subset of local and MCP tools to stay under the provider tool limit. The active provider block's `max_advertised_tools` setting controls that budget and defaults to 128.

@@ -23,6 +23,33 @@ Config:
     - local__get_investigation_memory
     - local__update_investigation_memory
     - local__exec_cli
+  max_agent_iterations: 7
+  continuation_increment: 4
+
+Workflow:
+  type: supervised_steps
+  steps:
+    - name: Load validated scope
+      prompt: |
+        Read investigation memory and confirm validated passive or low-impact scope. If scope is missing or active authorization is unclear, summarize the gap and direct the operator to web-app-scope-intake.
+      local_tools:
+        - local__get_investigation_memory
+    - name: HTTP baseline
+      prompt: |
+        Activate and run web-http-baseline for scoped targets where authorization is clear. Summarize only header, cookie, redirect, CORS, cache, TLS, and exposure observations with evidence references.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__get_investigation_memory
+    - name: Recon plan and inventory
+      prompt: |
+        Activate and run web-discovery-recon for scoped recon planning and installed tool inventory. Use local CLI only for allowed low-impact commands. Update investigation memory with durable targets, observations, and gaps.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__exec_cli
+        - local__get_investigation_memory
+        - local__update_investigation_memory
 
 Initial Prompt:
 Run passive and low-impact reconnaissance for the scoped web application targets.
@@ -31,4 +58,3 @@ Response Template:
 ## {{ recipe_title }}
 
 {{ response }}
-

@@ -28,6 +28,26 @@ Config:
     - local__run_skill
     - local__update_investigation_memory
     - local__get_investigation_memory
+  max_agent_iterations: 6
+  continuation_increment: 4
+
+Workflow:
+  type: supervised_steps
+  steps:
+    - name: Collect scope and constraints
+      prompt: |
+        Collect or confirm target URLs, allowed hosts, authorization, credentials and roles, rate limits, blackout windows, exclusions, OOB/destructive authorization, and reporting needs. If required details are missing, ask only for the missing items and stop.
+      local_tools:
+        - local__get_investigation_memory
+        - local__update_investigation_memory
+    - name: Validate and persist scope
+      prompt: |
+        When enough details are available, activate and run web-scope-guard with tool_slug="validate-scope". Store any investigation_memory_patch with local__update_investigation_memory. Summarize validated scope, exclusions, unresolved approvals, and the next safe recipe.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__get_investigation_memory
+        - local__update_investigation_memory
 
 Initial Prompt:
 Set up an authorized web application posture assessment. I will provide target URLs, allowed hosts, credentials or roles, rate limits, exclusions, and reporting requirements.
@@ -36,4 +56,3 @@ Response Template:
 ## {{ recipe_title }}
 
 {{ response }}
-

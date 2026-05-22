@@ -37,11 +37,20 @@ impl Recipe {
     }
 
     pub fn prompt_guidance(&self) -> String {
+        self.prompt_guidance_with_workflow(true)
+    }
+
+    pub fn prompt_guidance_without_workflow(&self) -> String {
+        self.prompt_guidance_with_workflow(false)
+    }
+
+    fn prompt_guidance_with_workflow(&self, include_workflow: bool) -> String {
         let mut parts = Vec::new();
         if !self.instructions.trim().is_empty() {
             parts.push(format!("Instructions:\n{}", self.instructions.trim()));
         }
-        if let Some(workflow) = self.workflow.as_deref().map(str::trim)
+        if include_workflow
+            && let Some(workflow) = self.workflow.as_deref().map(str::trim)
             && !workflow.is_empty()
         {
             parts.push(format!(
@@ -233,6 +242,8 @@ fn yaml_usize(value: Option<&serde_yaml::Value>) -> Option<usize> {
 mod tests {
     use tempfile::tempdir;
 
+    use crate::workflows::parse_workflow_definition;
+
     use super::{RecipeRegistry, parse_recipe_md};
 
     #[test]
@@ -347,7 +358,7 @@ Workflow:
     }
 
     #[test]
-    fn bundled_web_assessment_recipes_load_with_local_tool_filters() {
+    fn bundled_web_assessment_recipes_load_as_supervised_workflows() {
         let recipes_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("recipes");
         let registry = RecipeRegistry::load(&recipes_dir).unwrap();
         let expected = [
@@ -374,6 +385,42 @@ Workflow:
                 .unwrap_or_else(|| panic!("{name} missing local tool filter"));
             assert!(local_tools.contains(&"local__activate_skill".to_string()));
             assert!(local_tools.contains(&"local__run_skill".to_string()));
+
+            assert!(
+                recipe.config_max_agent_iterations.is_some(),
+                "{name} missing recipe iteration budget"
+            );
+            assert!(
+                recipe.config_continuation_increment.is_some(),
+                "{name} missing continuation increment"
+            );
+
+            let workflow_raw = recipe
+                .workflow
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name} missing workflow"));
+            let workflow = parse_workflow_definition(workflow_raw)
+                .unwrap_or_else(|| panic!("{name} workflow should be parseable"));
+            assert_eq!(workflow.workflow_type, "supervised_steps");
+            assert!(!workflow.steps.is_empty(), "{name} workflow has no steps");
+            for step in workflow.steps {
+                assert!(
+                    step.name.as_deref().is_some_and(|value| !value.is_empty()),
+                    "{name} workflow step missing name"
+                );
+                assert!(
+                    step.prompt
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty()),
+                    "{name} workflow step missing prompt"
+                );
+                assert!(
+                    step.local_tools
+                        .as_ref()
+                        .is_some_and(|tools| !tools.is_empty()),
+                    "{name} workflow step missing local tool filter"
+                );
+            }
         }
     }
 }

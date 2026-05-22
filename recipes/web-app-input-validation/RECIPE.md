@@ -17,6 +17,34 @@ Config:
     - local__exec_cli
     - local__get_investigation_memory
     - local__update_investigation_memory
+  max_agent_iterations: 8
+  continuation_increment: 5
+
+Workflow:
+  type: supervised_steps
+  steps:
+    - name: Confirm input-testing authorization
+      prompt: |
+        Read scope and authorization from memory. Confirm active testing, OOB callback, destructive payload, data extraction, and rate-limit boundaries. If unclear, activate web-scope-guard to validate only the ambiguous boundaries.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__get_investigation_memory
+        - local__update_investigation_memory
+    - name: Parameter and context probe plan
+      prompt: |
+        Activate and run web-input-probe to build a parameter/context checklist for SQLi, NoSQLi, XSS, DOM XSS, command injection, path traversal, SSTI, XXE, SSRF, prototype pollution, and deserialization. Keep checks benign and scoped.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__exec_cli
+        - local__get_investigation_memory
+    - name: Evidence and gaps summary
+      prompt: |
+        Summarize scoped checks performed or planned, confirmed findings, blocked checks, and required approvals. Update investigation memory with durable parameter inventory, findings, and unresolved gaps.
+      local_tools:
+        - local__get_investigation_memory
+        - local__update_investigation_memory
 
 Initial Prompt:
 Plan and execute a scoped input-validation review for the authorized web app.

@@ -20,6 +20,37 @@ Config:
     - local__exec_cli
     - local__get_investigation_memory
     - local__update_investigation_memory
+  max_agent_iterations: 8
+  continuation_increment: 5
+
+Workflow:
+  type: supervised_steps
+  steps:
+    - name: Upload and download handling
+      prompt: |
+        Read scope, credentials, and file-feature boundaries from memory. Activate and run web-upload-content for upload/download checklist planning using only benign test files and authorized accounts. Summarize validation, storage, retrieval, and gap observations.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__get_investigation_memory
+        - local__update_investigation_memory
+    - name: Headers, CORS, cache, and framing
+      prompt: |
+        Activate and run web-http-baseline for scoped headers, CORS, frame controls, and cache hints. Summarize posture observations and evidence references without pasting full raw responses.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__exec_cli
+        - local__get_investigation_memory
+    - name: Host, cache, and path probe plan
+      prompt: |
+        Activate and run web-input-probe for path traversal, host-header, cache poisoning, and cache deception planning within authorized boundaries. Summarize confirmed vs planned checks and update investigation memory.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__exec_cli
+        - local__get_investigation_memory
+        - local__update_investigation_memory
 
 Initial Prompt:
 Assess file handling, cache behavior, CORS, clickjacking, and host-header posture for the scoped web app.

@@ -24,6 +24,36 @@ Config:
     - local__update_investigation_memory
     - local__write_file
     - local__exec_cli
+  max_agent_iterations: 8
+  continuation_increment: 5
+
+Workflow:
+  type: supervised_steps
+  steps:
+    - name: Confirm active authorization
+      prompt: |
+        Read investigation memory and confirm active testing authorization, allowed hosts, rate limits, blackout windows, and exclusions. If active authorization is missing, stop with the exact missing approvals.
+      local_tools:
+        - local__get_investigation_memory
+        - local__update_investigation_memory
+    - name: Crawl inventory
+      prompt: |
+        Activate and run web-crawler-inventory for bounded same-scope crawling. Persist any useful endpoint or parameter inventory as evidence or memory, and summarize only discovered surfaces and crawl gaps.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__get_investigation_memory
+        - local__update_investigation_memory
+        - local__write_file
+    - name: Safe scanner plan
+      prompt: |
+        Activate web-discovery-recon and web-scanner-safe as needed to produce conservative scanner and command plans. Do not run destructive templates or evasion. Summarize leads, unsafe checks excluded, and next validation work.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__exec_cli
+        - local__get_investigation_memory
+        - local__update_investigation_memory
 
 Initial Prompt:
 Build a bounded active baseline for the authorized web application targets.
@@ -32,4 +62,3 @@ Response Template:
 ## {{ recipe_title }}
 
 {{ response }}
-

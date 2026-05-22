@@ -592,7 +592,9 @@ impl Orchestrator {
 
         // Skills capability summary
         let capability_summary = self.inner.skills.capability_summary();
-        let recipe_guidance = recipe.as_ref().map(|r| r.prompt_guidance());
+        let recipe_guidance = recipe
+            .as_ref()
+            .map(|r| recipe_guidance_for_turn(r, options.workflow_ref.is_some()));
         let budget = effective_agent_budget(
             &self.inner.config,
             &conversation.agent_budget,
@@ -1562,7 +1564,7 @@ impl Orchestrator {
             self.inner.store.save_workflow_run(&run)?;
 
             let prompt = format!(
-                "Workflow step '{}':\n{}\n\nReturn only the evidence-grounded result for this step.",
+                "Workflow step '{}':\n{}\n\nReturn only a compact, evidence-grounded result for this step. Do not paste raw tool output. Prefer concise bullets for findings or observations, evidence ids or sources, gaps or assumptions, and recommended next action.",
                 run.steps[index].name, run.steps[index].prompt
             );
             let result = Box::pin(self.run_turn_internal(
@@ -2385,6 +2387,20 @@ fn build_tool_selection_query(
     parts.join("\n")
 }
 
+fn recipe_guidance_for_turn(recipe: &crate::recipes::Recipe, workflow_worker_turn: bool) -> String {
+    if workflow_worker_turn
+        && recipe
+            .workflow
+            .as_deref()
+            .and_then(parse_workflow_definition)
+            .is_some()
+    {
+        recipe.prompt_guidance_without_workflow()
+    } else {
+        recipe.prompt_guidance()
+    }
+}
+
 fn advertised_mcp_tools<'a>(llm_tools: &[LlmTool], mcp_tools: &'a [McpTool]) -> Vec<&'a McpTool> {
     let advertised_names = llm_tools
         .iter()
@@ -2575,7 +2591,8 @@ mod tests {
     use super::{
         ConversationTurnLocks, MessageBuildContext, PINNED_LOCAL_TOOL_NAMES, build_llm_tools,
         build_messages, build_ranked_llm_tools_with_local, effective_agent_budget,
-        estimate_context_chars, sanitize_tool_schema, summarize_advertised_mcp_tools,
+        estimate_context_chars, recipe_guidance_for_turn, sanitize_tool_schema,
+        summarize_advertised_mcp_tools,
     };
 
     #[test]
@@ -2643,6 +2660,86 @@ mod tests {
         assert_eq!(budget.max_iterations_per_turn, 12);
         assert_eq!(budget.continuation_increment, 6);
         assert_eq!(budget.max_total_iterations_per_turn, 50);
+    }
+
+    #[test]
+    fn workflow_worker_guidance_omits_parseable_workflow_yaml() {
+        let recipe = Recipe {
+            name: "workflow".to_string(),
+            title: None,
+            description: None,
+            keywords: Vec::new(),
+            instructions: "Stay scoped.".to_string(),
+            initial_prompt: None,
+            config_mcp_servers: None,
+            config_local_tools: None,
+            config_max_agent_iterations: None,
+            config_continuation_increment: None,
+            workflow: Some(
+                r#"
+type: supervised_steps
+steps:
+  - name: collect
+    prompt: Collect evidence
+"#
+                .to_string(),
+            ),
+            response_template: None,
+        };
+
+        let normal_guidance = recipe_guidance_for_turn(&recipe, false);
+        let worker_guidance = recipe_guidance_for_turn(&recipe, true);
+
+        assert!(normal_guidance.contains("Workflow guidance"));
+        assert!(normal_guidance.contains("type: supervised_steps"));
+        assert!(worker_guidance.contains("Stay scoped."));
+        assert!(!worker_guidance.contains("Workflow guidance"));
+        assert!(!worker_guidance.contains("type: supervised_steps"));
+
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let permissions = AgentPermissions::default();
+        let messages = build_messages(MessageBuildContext {
+            prompt: None,
+            history: &[],
+            mcp_error: None,
+            recipe_instructions: Some(worker_guidance.as_str()),
+            capability_summary: None,
+            mcp_capability_summary: None,
+            agent_permissions: &permissions,
+            store: &store,
+            conversation_id: "convo_test",
+            user_message_override: Some("Run the step."),
+        });
+        let LlmMessage::System(system_prompt) = &messages[0] else {
+            panic!("first message should be system");
+        };
+        assert!(system_prompt.contains("Stay scoped."));
+        assert!(!system_prompt.contains("Workflow guidance"));
+        assert!(!system_prompt.contains("type: supervised_steps"));
+    }
+
+    #[test]
+    fn workflow_worker_guidance_keeps_nonparseable_workflow_text() {
+        let recipe = Recipe {
+            name: "guidance".to_string(),
+            title: None,
+            description: None,
+            keywords: Vec::new(),
+            instructions: "Stay scoped.".to_string(),
+            initial_prompt: None,
+            config_mcp_servers: None,
+            config_local_tools: None,
+            config_max_agent_iterations: None,
+            config_continuation_increment: None,
+            workflow: Some("Run these steps manually as guidance.".to_string()),
+            response_template: None,
+        };
+
+        let worker_guidance = recipe_guidance_for_turn(&recipe, true);
+
+        assert!(worker_guidance.contains("Workflow guidance"));
+        assert!(worker_guidance.contains("Run these steps manually as guidance."));
     }
 
     #[test]

@@ -30,6 +30,10 @@ use crate::{
 };
 
 const ITERATION_BUDGET_WARNING: &str = "You are on the last available agent iteration for this run. If you have enough evidence, produce the final answer now. If more tool work is required, stop cleanly; the operator can continue from a saved checkpoint.";
+const OUTPUT_TOKEN_CONTINUATION_INSTRUCTION: &str = "The prior assistant response stopped at the provider output-token limit. Continue from that exact point. Do not repeat text already produced. Finish with a compact evidence-grounded answer using concise bullets for findings, evidence ids, gaps, and next action. Do not paste raw tool output, JSON, headers, or logs.";
+const MAX_MODEL_VISIBLE_TOOL_RESULT_CHARS: usize = 12_000;
+const MAX_WORKFLOW_WORKER_OUTPUT_CHARS: usize = 8_000;
+const MAX_WORKFLOW_SYNTHESIS_INPUT_CHARS: usize = 32_000;
 const PINNED_LOCAL_TOOL_NAMES: &[&str] = &[
     "local__configure_mcp_servers",
     "local__list_directory",
@@ -74,6 +78,34 @@ struct FinishTurnContext<'a> {
     recipe: Option<&'a crate::recipes::Recipe>,
     needs_continuation: Option<ContinuationPause>,
     ui_tx: &'a UnboundedSender<UiEvent>,
+}
+
+struct ContinuationTurnContext<'a> {
+    conversation_id: &'a str,
+    reason: ContinuationPauseReason,
+    provider_label: &'static str,
+    messages: Vec<LlmMessage>,
+    continuation: Option<&'a TurnContinuation>,
+    recipe: Option<&'a crate::recipes::Recipe>,
+    workflow_ref: Option<WorkflowContinuationRef>,
+    iterations_used: usize,
+    max_total_iterations: usize,
+    default_continuation_increment: usize,
+    turn_start: std::time::Instant,
+    tool_seconds: f64,
+    llm_seconds: f64,
+    tool_call_count: usize,
+    evidence: Vec<ToolArtifact>,
+    llm_usage: Option<LlmUsage>,
+    automation: bool,
+    suppress_persistence: bool,
+    ui_tx: &'a UnboundedSender<UiEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinuationPauseReason {
+    IterationBudget,
+    OutputTokenLimit,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -897,7 +929,10 @@ impl Orchestrator {
                 continue;
             }
 
-            let reply = assistant_text_from_blocks(&completion.assistant_blocks)
+            let assistant_reply = assistant_text_from_blocks(&completion.assistant_blocks)
+                .filter(|value| !value.trim().is_empty());
+            let reply = assistant_reply
+                .clone()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "The model returned an empty response.".to_string());
 
@@ -909,24 +944,34 @@ impl Orchestrator {
                     ));
                 }
                 LlmStopReason::MaxTokens => {
-                    let reply = format!(
-                        "{} stopped at the output token limit before completing the response.",
-                        self.inner.llm.provider_label()
-                    );
+                    if assistant_reply.is_some() {
+                        messages.push(LlmMessage::Assistant {
+                            blocks: completion.assistant_blocks.clone(),
+                        });
+                    }
+                    messages.push(LlmMessage::UserText(
+                        OUTPUT_TOKEN_CONTINUATION_INSTRUCTION.to_string(),
+                    ));
                     return self
-                        .finish_turn(FinishTurnContext {
+                        .pause_turn_for_continuation(ContinuationTurnContext {
                             conversation_id,
-                            final_reply: &reply,
+                            reason: ContinuationPauseReason::OutputTokenLimit,
+                            provider_label: self.inner.llm.provider_label(),
+                            messages,
+                            continuation: continuation.as_ref(),
+                            recipe: recipe.as_ref(),
+                            workflow_ref: options.workflow_ref.clone(),
+                            iterations_used,
+                            max_total_iterations,
+                            default_continuation_increment: budget.continuation_increment,
                             turn_start,
                             tool_seconds,
                             llm_seconds,
                             tool_call_count,
-                            evidence: evidence.clone(),
-                            llm_usage: have_llm_usage.then_some(llm_usage.clone()),
+                            evidence,
+                            llm_usage: have_llm_usage.then_some(llm_usage),
                             automation: options.automation,
                             suppress_persistence: options.suppress_persistence,
-                            recipe: recipe.as_ref(),
-                            needs_continuation: None,
                             ui_tx: &ui_tx,
                         })
                         .await;
@@ -946,10 +991,11 @@ impl Orchestrator {
             }
 
             // Apply recipe response template if set
+            let combined_reply = output_token_continuation_reply(continuation.as_ref(), &reply);
             let final_reply = if let Some(r) = &recipe {
-                r.apply_template(&reply)
+                r.apply_template(&combined_reply)
             } else {
-                reply.clone()
+                combined_reply
             };
             return self
                 .finish_turn(FinishTurnContext {
@@ -993,57 +1039,17 @@ impl Orchestrator {
                 .await;
         }
 
-        let now = chrono::Utc::now();
-        let continuation_id = continuation
-            .as_ref()
-            .map(|state| state.continuation_id.clone())
-            .unwrap_or_else(new_continuation_id);
-        let continuation_increment = continuation
-            .as_ref()
-            .map(|state| state.continuation_increment)
-            .unwrap_or(budget.continuation_increment)
-            .max(1);
-        let continuation_state = TurnContinuation {
-            continuation_id: continuation_id.clone(),
-            conversation_id: conversation_id.to_string(),
-            status: "needs_continuation".to_string(),
-            recipe_name: recipe.as_ref().map(|recipe| recipe.name.clone()),
-            workflow: options.workflow_ref.clone(),
+        self.pause_turn_for_continuation(ContinuationTurnContext {
+            conversation_id,
+            reason: ContinuationPauseReason::IterationBudget,
+            provider_label: self.inner.llm.provider_label(),
             messages,
+            continuation: continuation.as_ref(),
+            recipe: recipe.as_ref(),
+            workflow_ref: options.workflow_ref.clone(),
             iterations_used,
             max_total_iterations,
-            continuation_increment,
-            tool_seconds,
-            llm_seconds,
-            tool_call_count,
-            llm_usage: have_llm_usage.then_some(llm_usage.clone()),
-            evidence: evidence.clone(),
-            automation: options.automation,
-            suppress_persistence: options.suppress_persistence,
-            created_at: continuation
-                .as_ref()
-                .map(|state| state.created_at)
-                .unwrap_or(now),
-            updated_at: now,
-        };
-        self.inner
-            .store
-            .save_turn_continuation(&continuation_state)?;
-        self.emit(
-            &ui_tx,
-            "needs_continuation",
-            &format!(
-                "Agent paused after {iterations_used} iterations. Continue +{continuation_increment} to resume from checkpoint {continuation_id}."
-            ),
-            None,
-            Some(tool_call_count),
-        );
-        let reply = format!(
-            "I paused after {iterations_used} agent iterations and saved continuation `{continuation_id}`.\n\nContinue +{continuation_increment} to resume from the saved checkpoint without restarting the recipe."
-        );
-        self.finish_turn(FinishTurnContext {
-            conversation_id,
-            final_reply: &reply,
+            default_continuation_increment: budget.continuation_increment,
             turn_start,
             tool_seconds,
             llm_seconds,
@@ -1052,12 +1058,83 @@ impl Orchestrator {
             llm_usage: have_llm_usage.then_some(llm_usage),
             automation: options.automation,
             suppress_persistence: options.suppress_persistence,
-            recipe: recipe.as_ref(),
+            ui_tx: &ui_tx,
+        })
+        .await
+    }
+
+    async fn pause_turn_for_continuation(
+        &self,
+        ctx: ContinuationTurnContext<'_>,
+    ) -> Result<RunTurnResult> {
+        let now = chrono::Utc::now();
+        let continuation_id = ctx
+            .continuation
+            .map(|state| state.continuation_id.clone())
+            .unwrap_or_else(new_continuation_id);
+        let continuation_increment = ctx
+            .continuation
+            .map(|state| state.continuation_increment)
+            .unwrap_or(ctx.default_continuation_increment)
+            .max(1);
+        let continuation_state = TurnContinuation {
+            continuation_id: continuation_id.clone(),
+            conversation_id: ctx.conversation_id.to_string(),
+            status: "needs_continuation".to_string(),
+            recipe_name: ctx.recipe.map(|recipe| recipe.name.clone()),
+            workflow: ctx.workflow_ref.clone(),
+            messages: ctx.messages,
+            iterations_used: ctx.iterations_used,
+            max_total_iterations: ctx.max_total_iterations,
+            continuation_increment,
+            tool_seconds: ctx.tool_seconds,
+            llm_seconds: ctx.llm_seconds,
+            tool_call_count: ctx.tool_call_count,
+            llm_usage: ctx.llm_usage.clone(),
+            evidence: ctx.evidence.clone(),
+            automation: ctx.automation,
+            suppress_persistence: ctx.suppress_persistence,
+            created_at: ctx
+                .continuation
+                .map(|state| state.created_at)
+                .unwrap_or(now),
+            updated_at: now,
+        };
+        self.inner
+            .store
+            .save_turn_continuation(&continuation_state)?;
+
+        let (event_message, reply) = continuation_pause_messages(
+            ctx.reason,
+            ctx.provider_label,
+            ctx.iterations_used,
+            &continuation_id,
+            continuation_increment,
+        );
+        self.emit(
+            ctx.ui_tx,
+            "needs_continuation",
+            &event_message,
+            None,
+            Some(ctx.tool_call_count),
+        );
+        self.finish_turn(FinishTurnContext {
+            conversation_id: ctx.conversation_id,
+            final_reply: &reply,
+            turn_start: ctx.turn_start,
+            tool_seconds: ctx.tool_seconds,
+            llm_seconds: ctx.llm_seconds,
+            tool_call_count: ctx.tool_call_count,
+            evidence: ctx.evidence,
+            llm_usage: ctx.llm_usage,
+            automation: ctx.automation,
+            suppress_persistence: ctx.suppress_persistence,
+            recipe: ctx.recipe,
             needs_continuation: Some(ContinuationPause {
                 continuation_id,
                 continuation_increment,
             }),
-            ui_tx: &ui_tx,
+            ui_tx: ctx.ui_tx,
         })
         .await
     }
@@ -1387,22 +1464,7 @@ impl Orchestrator {
         let mut total_tool_calls = result.tool_calls;
 
         if result.status == "needs_continuation" {
-            run.steps[step_index].status = "paused_continuation".to_string();
-            run.steps[step_index].handoff =
-                result.continuation_id.as_ref().map(|continuation_id| {
-                    json!({
-                        "kind": "turn_continuation",
-                        "continuation_id": continuation_id,
-                        "continuation_increment": result.continuation_increment
-                    })
-                });
-            run.status = "paused".to_string();
-            run.pause_reason = result.continuation_id.as_ref().map(|continuation_id| {
-                format!(
-                    "Step '{}' needs continuation '{}'",
-                    run.steps[step_index].name, continuation_id
-                )
-            });
+            pause_workflow_step_for_continuation(&mut run, step_index, &result);
             run.updated_at = chrono::Utc::now();
             self.inner.store.save_workflow_run(&run)?;
             let pause = result
@@ -1433,11 +1495,12 @@ impl Orchestrator {
                 .await;
         }
 
-        run.steps[step_index].worker_output = Some(result.reply.clone());
+        let compact_reply = compact_workflow_output(&result.reply);
+        run.steps[step_index].worker_output = Some(compact_reply.clone());
         run.steps[step_index].validation = Some(
             self.supervisor_text(&format!(
                 "Validate this workflow step output against the requested step. Reply with a concise verdict and any gaps.\n\nStep:\n{}\n\nOutput:\n{}",
-                run.steps[step_index].prompt, result.reply
+                run.steps[step_index].prompt, compact_reply
             ))
             .await
             .unwrap_or_else(|err| format!("validation unavailable: {err:#}")),
@@ -1520,9 +1583,9 @@ impl Orchestrator {
             .iter()
             .take(start_index)
             .filter_map(|step| {
-                step.worker_output
-                    .as_ref()
-                    .map(|output| format!("## {}\n\n{}", step.name, output))
+                step.worker_output.as_ref().map(|output| {
+                    format!("## {}\n\n{}", step.name, compact_workflow_output(output))
+                })
             })
             .collect::<Vec<_>>();
         for index in start_index..run.steps.len() {
@@ -1564,7 +1627,7 @@ impl Orchestrator {
             self.inner.store.save_workflow_run(&run)?;
 
             let prompt = format!(
-                "Workflow step '{}':\n{}\n\nReturn only a compact, evidence-grounded result for this step. Do not paste raw tool output. Prefer concise bullets for findings or observations, evidence ids or sources, gaps or assumptions, and recommended next action.",
+                "Workflow step '{}':\n{}\n\nReturn only a compact, evidence-grounded result for this step. Stay under 60 lines. Do not paste raw tool output, JSON, headers, or logs. Prefer concise bullets for findings or observations, evidence ids or sources, gaps or assumptions, and recommended next action.",
                 run.steps[index].name, run.steps[index].prompt
             );
             let result = Box::pin(self.run_turn_internal(
@@ -1587,56 +1650,35 @@ impl Orchestrator {
             .await?;
             total_tool_calls += result.tool_calls;
             if result.status == "needs_continuation" {
-                run.steps[index].status = "paused_continuation".to_string();
-                run.steps[index].handoff = result.continuation_id.as_ref().map(|continuation_id| {
-                    json!({
-                        "kind": "turn_continuation",
-                        "continuation_id": continuation_id,
-                        "continuation_increment": result.continuation_increment
-                    })
-                });
-                run.status = "paused".to_string();
-                run.pause_reason = result
-                    .continuation_id
-                    .as_ref()
-                    .map(|continuation_id| {
-                        format!(
-                            "Step '{}' needs continuation '{}'",
-                            run.steps[index].name, continuation_id
-                        )
-                    })
-                    .or_else(|| {
-                        Some(format!(
-                            "Step '{}' needs continuation",
-                            run.steps[index].name
-                        ))
-                    });
+                pause_workflow_step_for_continuation(&mut run, index, &result);
                 run.updated_at = chrono::Utc::now();
                 self.inner.store.save_workflow_run(&run)?;
                 return Ok((run, result.reply, total_tool_calls));
             }
-            run.steps[index].worker_output = Some(result.reply.clone());
+            let compact_reply = compact_workflow_output(&result.reply);
+            run.steps[index].worker_output = Some(compact_reply.clone());
             run.steps[index].validation = Some(
                 self.supervisor_text(&format!(
                     "Validate this workflow step output against the requested step. Reply with a concise verdict and any gaps.\n\nStep:\n{}\n\nOutput:\n{}",
-                    run.steps[index].prompt, result.reply
+                    run.steps[index].prompt, compact_reply
                 ))
                 .await
                 .unwrap_or_else(|err| format!("validation unavailable: {err:#}")),
             );
             run.steps[index].status = "completed".to_string();
             run.updated_at = chrono::Utc::now();
-            collected.push(format!("## {}\n\n{}", run.steps[index].name, result.reply));
+            collected.push(format!("## {}\n\n{}", run.steps[index].name, compact_reply));
             self.inner.store.save_workflow_run(&run)?;
         }
 
+        let synthesis_input = compact_workflow_synthesis_input(&collected.join("\n\n"));
         let synthesis = self
             .supervisor_text(&format!(
-                "Synthesize the final workflow answer from these step outputs. Preserve uncertainty and cite tool evidence ids if they appear in the outputs.\n\n{}",
-                collected.join("\n\n")
+                "Synthesize the final workflow answer from these step outputs. Preserve uncertainty and cite tool evidence ids if they appear in the outputs. Keep the answer concise and do not paste raw tool output.\n\n{}",
+                synthesis_input
             ))
             .await
-            .unwrap_or_else(|_| collected.join("\n\n"));
+            .unwrap_or(synthesis_input);
         Ok((run, synthesis, total_tool_calls))
     }
 
@@ -1647,7 +1689,7 @@ impl Orchestrator {
             .chat_completion(
                 &[
                     LlmMessage::System(
-                        "You are a tool-less workflow supervisor. Validate and synthesize only from the supplied text.".to_string(),
+                        "You are a tool-less workflow supervisor. Validate and synthesize only from the supplied text. Keep responses concise and never paste raw tool output.".to_string(),
                     ),
                     LlmMessage::UserText(prompt.to_string()),
                 ],
@@ -2116,6 +2158,40 @@ fn workflow_step_continuation_id(step: &WorkflowStep) -> Option<String> {
         .map(str::to_string)
 }
 
+fn pause_workflow_step_for_continuation(
+    run: &mut WorkflowRun,
+    step_index: usize,
+    result: &RunTurnResult,
+) {
+    if let Some(step) = run.steps.get_mut(step_index) {
+        step.status = "paused_continuation".to_string();
+        step.handoff = result.continuation_id.as_ref().map(|continuation_id| {
+            json!({
+                "kind": "turn_continuation",
+                "continuation_id": continuation_id,
+                "continuation_increment": result.continuation_increment
+            })
+        });
+    }
+    run.status = "paused".to_string();
+    run.pause_reason = run
+        .steps
+        .get(step_index)
+        .and_then(|step| {
+            result.continuation_id.as_ref().map(|continuation_id| {
+                format!(
+                    "Step '{}' needs continuation '{}'",
+                    step.name, continuation_id
+                )
+            })
+        })
+        .or_else(|| {
+            run.steps
+                .get(step_index)
+                .map(|step| format!("Step '{}' needs continuation", step.name))
+        });
+}
+
 fn workflow_step_continuation_pause(step: &WorkflowStep) -> Option<ContinuationPause> {
     let handoff = step.handoff.as_ref()?;
     if handoff.get("kind").and_then(Value::as_str) != Some("turn_continuation") {
@@ -2182,11 +2258,133 @@ fn assistant_text_from_blocks(blocks: &[LlmAssistantBlock]) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
+fn continuation_pause_messages(
+    reason: ContinuationPauseReason,
+    provider_label: &str,
+    iterations_used: usize,
+    continuation_id: &str,
+    continuation_increment: usize,
+) -> (String, String) {
+    match reason {
+        ContinuationPauseReason::IterationBudget => (
+            format!(
+                "Agent paused after {iterations_used} iterations. Continue +{continuation_increment} to resume from checkpoint {continuation_id}."
+            ),
+            format!(
+                "I paused after {iterations_used} agent iterations and saved continuation `{continuation_id}`.\n\nContinue +{continuation_increment} to resume from the saved checkpoint without restarting the recipe."
+            ),
+        ),
+        ContinuationPauseReason::OutputTokenLimit => (
+            format!(
+                "{provider_label} hit the output token limit after {iterations_used} iterations. Continue +{continuation_increment} to resume from checkpoint {continuation_id}."
+            ),
+            format!(
+                "I paused because {provider_label} hit the output token limit and saved continuation `{continuation_id}`.\n\nContinue +{continuation_increment} to finish from the saved partial response without restarting the recipe."
+            ),
+        ),
+    }
+}
+
+fn output_token_continuation_reply(
+    continuation: Option<&TurnContinuation>,
+    current_reply: &str,
+) -> String {
+    let Some(continuation) = continuation else {
+        return current_reply.to_string();
+    };
+    let Some(partial) = output_token_partial_text(&continuation.messages) else {
+        return current_reply.to_string();
+    };
+    let partial = partial.trim_end();
+    let current = current_reply.trim_start();
+    if partial.is_empty() || current.starts_with(partial) {
+        current_reply.to_string()
+    } else if current.is_empty() {
+        partial.to_string()
+    } else {
+        format!("{partial}\n{current}")
+    }
+}
+
+fn output_token_partial_text(messages: &[LlmMessage]) -> Option<String> {
+    let mut partials = Vec::new();
+    for window in messages.windows(2) {
+        let [
+            LlmMessage::Assistant { blocks },
+            LlmMessage::UserText(instruction),
+        ] = window
+        else {
+            continue;
+        };
+        if instruction != OUTPUT_TOKEN_CONTINUATION_INSTRUCTION {
+            continue;
+        }
+        if let Some(text) = assistant_text_from_blocks(blocks)
+            && !text.trim().is_empty()
+        {
+            partials.push(text);
+        }
+    }
+    if partials.is_empty() {
+        None
+    } else {
+        Some(partials.join("\n"))
+    }
+}
+
 fn tool_result_with_evidence(output: &str, artifact: &ToolArtifact) -> String {
+    let (visible_output, truncated) =
+        truncate_for_model(output, MAX_MODEL_VISIBLE_TOOL_RESULT_CHARS);
+    let truncation_note = if truncated {
+        format!(
+            "\n\n[truncation]\nmodel_visible_output_truncated: true\nshown_chars: {MAX_MODEL_VISIBLE_TOOL_RESULT_CHARS}\nfull_output: see evidence artifact {} at {}",
+            artifact.artifact_id, artifact.relative_path
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{}\n\n[evidence]\nartifact_id: {}\npath: {}\nstatus: {}\npreview_bytes: {}",
-        output, artifact.artifact_id, artifact.relative_path, artifact.status, artifact.byte_count
+        "{}{}\n\n[evidence]\nartifact_id: {}\npath: {}\nstatus: {}\npreview_bytes: {}",
+        visible_output,
+        truncation_note,
+        artifact.artifact_id,
+        artifact.relative_path,
+        artifact.status,
+        artifact.byte_count
     )
+}
+
+fn compact_workflow_output(output: &str) -> String {
+    let (visible_output, truncated) = truncate_for_model(output, MAX_WORKFLOW_WORKER_OUTPUT_CHARS);
+    if truncated {
+        format!(
+            "{visible_output}\n\n[workflow_output_truncated]\nmodel_visible_output_truncated: true\nshown_chars: {MAX_WORKFLOW_WORKER_OUTPUT_CHARS}"
+        )
+    } else {
+        visible_output
+    }
+}
+
+fn compact_workflow_synthesis_input(input: &str) -> String {
+    let (visible_input, truncated) = truncate_for_model(input, MAX_WORKFLOW_SYNTHESIS_INPUT_CHARS);
+    if truncated {
+        format!(
+            "{visible_input}\n\n[workflow_synthesis_input_truncated]\nmodel_visible_input_truncated: true\nshown_chars: {MAX_WORKFLOW_SYNTHESIS_INPUT_CHARS}"
+        )
+    } else {
+        visible_input
+    }
+}
+
+fn truncate_for_model(value: &str, max_chars: usize) -> (String, bool) {
+    if value.chars().count() <= max_chars {
+        return (value.to_string(), false);
+    }
+    let mut output = String::new();
+    for ch in value.chars().take(max_chars) {
+        output.push(ch);
+    }
+    (output, true)
 }
 
 fn workflow_steps_from_definition(
@@ -2569,10 +2767,12 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         fs,
+        path::PathBuf,
     };
 
     use serde_json::json;
     use tempfile::tempdir;
+    use tokio::sync::mpsc::unbounded_channel;
     use tokio::time::{Duration, timeout};
 
     use crate::{
@@ -2585,15 +2785,42 @@ mod tests {
         local_tools::LocalToolExecutor,
         mcp_runtime::McpTool,
         recipes::Recipe,
-        types::{ActivatedSkill, AgentBudgetOverride, AgentPermissions, FilesystemAccess},
+        types::{
+            ActivatedSkill, AgentBudgetOverride, AgentPermissions, FilesystemAccess, RunTurnResult,
+            ToolArtifact, WorkflowContinuationRef, WorkflowRun, WorkflowStep,
+        },
     };
 
     use super::{
-        ConversationTurnLocks, MessageBuildContext, PINNED_LOCAL_TOOL_NAMES, build_llm_tools,
-        build_messages, build_ranked_llm_tools_with_local, effective_agent_budget,
-        estimate_context_chars, recipe_guidance_for_turn, sanitize_tool_schema,
-        summarize_advertised_mcp_tools,
+        ContinuationPauseReason, ContinuationTurnContext, ConversationTurnLocks,
+        MAX_MODEL_VISIBLE_TOOL_RESULT_CHARS, MAX_WORKFLOW_WORKER_OUTPUT_CHARS, MessageBuildContext,
+        OUTPUT_TOKEN_CONTINUATION_INSTRUCTION, PINNED_LOCAL_TOOL_NAMES, build_llm_tools,
+        build_messages, build_ranked_llm_tools_with_local, compact_workflow_output,
+        effective_agent_budget, estimate_context_chars, output_token_continuation_reply,
+        output_token_partial_text, pause_workflow_step_for_continuation, recipe_guidance_for_turn,
+        sanitize_tool_schema, summarize_advertised_mcp_tools, tool_result_with_evidence,
     };
+
+    fn test_app_config(data_dir: PathBuf) -> AppConfig {
+        AppConfig {
+            prompt: None,
+            data_dir: Some(data_dir),
+            llm_provider: None,
+            azure_openai: None,
+            openai: None,
+            azure_anthropic: None,
+            openai_compatible: None,
+            adk: None,
+            agent_permissions: AgentPermissions::default(),
+            local_tools: LocalToolsConfig::default(),
+            tool_environment: Default::default(),
+            agent: Default::default(),
+            skills: SkillsConfig::default(),
+            mcp_runtime: McpRuntimeConfig::default(),
+            mcp_servers: Vec::new(),
+            tracing: None,
+        }
+    }
 
     #[test]
     fn estimates_context_chars_from_nested_messages() {
@@ -2660,6 +2887,223 @@ mod tests {
         assert_eq!(budget.max_iterations_per_turn, 12);
         assert_eq!(budget.continuation_increment, 6);
         assert_eq!(budget.max_total_iterations_per_turn, 50);
+    }
+
+    #[tokio::test]
+    async fn output_token_pause_saves_needs_continuation_checkpoint() {
+        let dir = tempdir().unwrap();
+        let orchestrator = super::Orchestrator::new(test_app_config(dir.path().to_path_buf()))
+            .expect("orchestrator should build without an active provider");
+        let store = orchestrator.store();
+        let conversation = store.create_conversation().unwrap();
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let workflow_ref = WorkflowContinuationRef {
+            workflow_id: "workflow-1".to_string(),
+            step_index: 2,
+        };
+
+        let result = orchestrator
+            .pause_turn_for_continuation(ContinuationTurnContext {
+                conversation_id: &conversation.conversation_id,
+                reason: ContinuationPauseReason::OutputTokenLimit,
+                provider_label: "Azure Anthropic",
+                messages: vec![
+                    LlmMessage::UserText("start".to_string()),
+                    LlmMessage::Assistant {
+                        blocks: vec![LlmAssistantBlock::Text {
+                            text: "partial answer".to_string(),
+                        }],
+                    },
+                    LlmMessage::UserText(OUTPUT_TOKEN_CONTINUATION_INSTRUCTION.to_string()),
+                ],
+                continuation: None,
+                recipe: None,
+                workflow_ref: Some(workflow_ref.clone()),
+                iterations_used: 1,
+                max_total_iterations: 50,
+                default_continuation_increment: 10,
+                turn_start: std::time::Instant::now(),
+                tool_seconds: 0.25,
+                llm_seconds: 0.5,
+                tool_call_count: 3,
+                evidence: Vec::new(),
+                llm_usage: None,
+                automation: true,
+                suppress_persistence: true,
+                ui_tx: &ui_tx,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, "needs_continuation");
+        assert!(result.reply.contains("output token limit"));
+        let continuation_id = result.continuation_id.as_deref().unwrap();
+        let saved = store
+            .load_turn_continuation(&conversation.conversation_id, continuation_id)
+            .unwrap();
+        assert_eq!(saved.status, "needs_continuation");
+        assert_eq!(saved.workflow, Some(workflow_ref));
+        assert_eq!(saved.tool_call_count, 3);
+        assert_eq!(
+            output_token_partial_text(&saved.messages).as_deref(),
+            Some("partial answer")
+        );
+    }
+
+    #[test]
+    fn output_token_continuation_reply_combines_saved_partials() {
+        let now = chrono::Utc::now();
+        let continuation = crate::types::TurnContinuation {
+            continuation_id: "cont-1".to_string(),
+            conversation_id: "convo-1".to_string(),
+            status: "needs_continuation".to_string(),
+            recipe_name: None,
+            workflow: None,
+            messages: vec![
+                LlmMessage::Assistant {
+                    blocks: vec![LlmAssistantBlock::Text {
+                        text: "first partial".to_string(),
+                    }],
+                },
+                LlmMessage::UserText(OUTPUT_TOKEN_CONTINUATION_INSTRUCTION.to_string()),
+                LlmMessage::Assistant {
+                    blocks: vec![LlmAssistantBlock::Text {
+                        text: "second partial".to_string(),
+                    }],
+                },
+                LlmMessage::UserText(OUTPUT_TOKEN_CONTINUATION_INSTRUCTION.to_string()),
+            ],
+            iterations_used: 2,
+            max_total_iterations: 50,
+            continuation_increment: 10,
+            tool_seconds: 0.0,
+            llm_seconds: 0.0,
+            tool_call_count: 0,
+            llm_usage: None,
+            evidence: Vec::new(),
+            automation: false,
+            suppress_persistence: false,
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert_eq!(
+            output_token_partial_text(&continuation.messages).as_deref(),
+            Some("first partial\nsecond partial")
+        );
+        assert_eq!(
+            output_token_continuation_reply(Some(&continuation), "final tail"),
+            "first partial\nsecond partial\nfinal tail"
+        );
+    }
+
+    #[test]
+    fn tool_result_with_evidence_truncates_model_visible_output() {
+        let artifact = ToolArtifact {
+            artifact_id: "artifact-1".to_string(),
+            conversation_id: "convo-1".to_string(),
+            tool_name: "local__run_skill".to_string(),
+            status: "success".to_string(),
+            created_at: chrono::Utc::now(),
+            relative_path: "conversations/convo-1/evidence/artifact-1.json".to_string(),
+            byte_count: 42_000,
+            arguments_redacted: json!({}),
+            preview: String::new(),
+        };
+        let output = format!(
+            "{}END_SHOULD_NOT_BE_VISIBLE",
+            "a".repeat(MAX_MODEL_VISIBLE_TOOL_RESULT_CHARS + 100)
+        );
+
+        let rendered = tool_result_with_evidence(&output, &artifact);
+
+        assert!(rendered.contains("model_visible_output_truncated: true"));
+        assert!(rendered.contains("artifact_id: artifact-1"));
+        assert!(rendered.contains("path: conversations/convo-1/evidence/artifact-1.json"));
+        assert!(rendered.contains("status: success"));
+        assert!(!rendered.contains("END_SHOULD_NOT_BE_VISIBLE"));
+    }
+
+    #[test]
+    fn compact_workflow_output_marks_truncated_worker_output() {
+        let output = "x".repeat(MAX_WORKFLOW_WORKER_OUTPUT_CHARS + 1);
+
+        let compact = compact_workflow_output(&output);
+
+        assert!(compact.contains("workflow_output_truncated"));
+        assert!(compact.contains("model_visible_output_truncated: true"));
+    }
+
+    #[test]
+    fn workflow_continuation_pause_marks_active_step_without_advancing() {
+        let now = chrono::Utc::now();
+        let mut run = WorkflowRun {
+            workflow_id: "workflow-1".to_string(),
+            conversation_id: "convo-1".to_string(),
+            recipe_name: Some("web-app-passive-recon".to_string()),
+            workflow_type: "supervised_steps".to_string(),
+            status: "running".to_string(),
+            current_step: Some(1),
+            pause_reason: None,
+            steps: vec![
+                WorkflowStep {
+                    index: 0,
+                    name: "done".to_string(),
+                    prompt: "done".to_string(),
+                    status: "completed".to_string(),
+                    attempt: 1,
+                    max_attempts: 1,
+                    approval_required: false,
+                    worker_output: Some("ok".to_string()),
+                    validation: None,
+                    handoff: None,
+                    local_tools: None,
+                    mcp_servers: None,
+                },
+                WorkflowStep {
+                    index: 1,
+                    name: "recon".to_string(),
+                    prompt: "run recon".to_string(),
+                    status: "running".to_string(),
+                    attempt: 1,
+                    max_attempts: 1,
+                    approval_required: false,
+                    worker_output: None,
+                    validation: None,
+                    handoff: None,
+                    local_tools: Some(vec!["local__run_skill".to_string()]),
+                    mcp_servers: None,
+                },
+            ],
+            approvals: Vec::new(),
+            artifacts: Vec::new(),
+            final_answer: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let result = RunTurnResult::needs_continuation("paused", 2, "cont-1".to_string(), 4);
+
+        pause_workflow_step_for_continuation(&mut run, 1, &result);
+
+        assert_eq!(run.status, "paused");
+        assert_eq!(run.current_step, Some(1));
+        assert_eq!(run.steps[1].status, "paused_continuation");
+        assert_eq!(
+            run.steps[1]
+                .handoff
+                .as_ref()
+                .and_then(|handoff| handoff.get("continuation_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("cont-1")
+        );
+        assert_eq!(
+            run.steps[1]
+                .handoff
+                .as_ref()
+                .and_then(|handoff| handoff.get("continuation_increment"))
+                .and_then(serde_json::Value::as_u64),
+            Some(4)
+        );
     }
 
     #[test]

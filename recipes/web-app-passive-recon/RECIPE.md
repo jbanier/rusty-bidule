@@ -36,14 +36,22 @@ Workflow:
         - local__get_investigation_memory
     - name: HTTP baseline
       prompt: |
-        Activate and run web-http-baseline for scoped targets where authorization is clear. Summarize only header, cookie, redirect, CORS, cache, TLS, and exposure observations with evidence references.
+        Activate and run web-http-baseline for scoped targets where authorization is clear. Summarize only header, cookie, redirect, CORS, cache, TLS, and exposure observations with evidence references. Keep output under 60 lines; do not paste raw JSON, headers, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill
         - local__get_investigation_memory
-    - name: Recon plan and inventory
+    - name: Recon tool inventory
       prompt: |
-        Activate and run web-discovery-recon for scoped recon planning and installed tool inventory. Use local CLI only for allowed low-impact commands. Update investigation memory with durable targets, observations, and gaps.
+        Activate and run web-discovery-recon for scoped discovery planning, but summarize only target scope, tool availability, and evidence references. Update investigation memory with durable target and tool-inventory facts. Keep output under 60 lines; do not paste raw JSON, full command lists, command output, or logs.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__get_investigation_memory
+        - local__update_investigation_memory
+    - name: Bounded recon command plan
+      prompt: |
+        Activate and run web-discovery-recon as needed to produce a bounded recon command plan for validated scope. Use local CLI only for explicitly allowed low-impact commands. Summarize command phases, safety constraints, and gaps; do not expand every command argument unless it is the next action. Keep output under 60 lines and update investigation memory.
       local_tools:
         - local__activate_skill
         - local__run_skill

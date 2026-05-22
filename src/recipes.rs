@@ -403,6 +403,15 @@ Workflow:
                 .unwrap_or_else(|| panic!("{name} workflow should be parseable"));
             assert_eq!(workflow.workflow_type, "supervised_steps");
             assert!(!workflow.steps.is_empty(), "{name} workflow has no steps");
+            if name == "web-app-passive-recon" {
+                let step_names = workflow
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.name.as_deref())
+                    .collect::<Vec<_>>();
+                assert!(step_names.contains(&"Recon tool inventory"));
+                assert!(step_names.contains(&"Bounded recon command plan"));
+            }
             for step in workflow.steps {
                 assert!(
                     step.name.as_deref().is_some_and(|value| !value.is_empty()),

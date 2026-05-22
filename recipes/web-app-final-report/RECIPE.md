@@ -35,7 +35,7 @@ Workflow:
         - local__search_conversation_memories
     - name: Generate report draft
       prompt: |
-        Activate and run web-evidence-report with the confirmed findings and available evidence. Write a report artifact only if the operator requested a file path or durable report file.
+        Activate and run web-evidence-report with the confirmed findings and available evidence. Write a report artifact only if the operator requested a file path or durable report file. Keep output under 60 lines in the step result; do not paste raw JSON, evidence files, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill

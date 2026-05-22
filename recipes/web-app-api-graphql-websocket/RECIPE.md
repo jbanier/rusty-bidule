@@ -29,7 +29,7 @@ Workflow:
   steps:
     - name: API and GraphQL review
       prompt: |
-        Read scope and endpoint notes from memory. Activate and run web-api-graphql for scoped OpenAPI, REST, and GraphQL review, using local__read_file for provided specs only. Summarize exposed surfaces, auth assumptions, and evidence references.
+        Read scope and endpoint notes from memory. Activate and run web-api-graphql for scoped OpenAPI, REST, and GraphQL review, using local__read_file for provided specs only. Summarize exposed surfaces, auth assumptions, and evidence references. Keep output under 60 lines; do not paste raw JSON, specs, responses, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill
@@ -38,7 +38,7 @@ Workflow:
         - local__update_investigation_memory
     - name: WebSocket review
       prompt: |
-        Activate and run web-websocket for scoped WebSocket endpoints. Summarize connection requirements, message types, auth/replay/tamper checks, and gaps without dumping raw frames.
+        Activate and run web-websocket for scoped WebSocket endpoints. Summarize connection requirements, message types, auth/replay/tamper checks, and gaps without dumping raw frames. Keep output under 60 lines; do not paste raw JSON, frames, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill

@@ -28,7 +28,7 @@ Workflow:
   steps:
     - name: Upload and download handling
       prompt: |
-        Read scope, credentials, and file-feature boundaries from memory. Activate and run web-upload-content for upload/download checklist planning using only benign test files and authorized accounts. Summarize validation, storage, retrieval, and gap observations.
+        Read scope, credentials, and file-feature boundaries from memory. Activate and run web-upload-content for upload/download checklist planning using only benign test files and authorized accounts. Summarize validation, storage, retrieval, and gap observations. Keep output under 60 lines; do not paste raw JSON, file contents, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill

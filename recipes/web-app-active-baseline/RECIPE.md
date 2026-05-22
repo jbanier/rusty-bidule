@@ -38,7 +38,7 @@ Workflow:
         - local__update_investigation_memory
     - name: Crawl inventory
       prompt: |
-        Activate and run web-crawler-inventory for bounded same-scope crawling. Persist any useful endpoint or parameter inventory as evidence or memory, and summarize only discovered surfaces and crawl gaps.
+        Activate and run web-crawler-inventory for bounded same-scope crawling. Persist any useful endpoint or parameter inventory as evidence or memory, and summarize only discovered surfaces and crawl gaps. Keep output under 60 lines; do not paste raw JSON, headers, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill
@@ -47,7 +47,7 @@ Workflow:
         - local__write_file
     - name: Safe scanner plan
       prompt: |
-        Activate web-discovery-recon and web-scanner-safe as needed to produce conservative scanner and command plans. Do not run destructive templates or evasion. Summarize leads, unsafe checks excluded, and next validation work.
+        Activate web-discovery-recon and web-scanner-safe as needed to produce conservative scanner and command plans. Do not run destructive templates or evasion. Summarize leads, unsafe checks excluded, and next validation work. Keep output under 60 lines; do not paste raw JSON, full command lists, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill

@@ -33,7 +33,7 @@ Workflow:
         - local__update_investigation_memory
     - name: CMS tooling plan
       prompt: |
-        Activate and run web-discovery-recon for CMS and WordPress command planning and installed tool inventory. Use wpscan only when scope and rate limits explicitly allow it; do not brute force credentials.
+        Activate and run web-discovery-recon for CMS and WordPress command planning and installed tool inventory. Use wpscan only when scope and rate limits explicitly allow it; do not brute force credentials. Keep output under 60 lines; do not paste raw JSON, full command lists, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill

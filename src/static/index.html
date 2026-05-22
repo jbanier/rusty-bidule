@@ -141,6 +141,11 @@
         <button id="send-button" disabled title="Send with Ctrl/Cmd+Enter">Send</button>
       </div>
       <p id="composer-hint" class="composer-hint">Select or start a conversation to begin.</p>
+      <section id="continuation-panel" class="continuation-panel hidden" aria-label="Turn continuation">
+        <span id="continuation-label" class="status-message">Turn continuation available.</span>
+        <input id="continuation-rounds" type="number" min="1" step="1" placeholder="+10" title="Additional agent iterations" />
+        <button id="continue-turn" class="control-button" type="button">Continue +10</button>
+      </section>
     </main>
   </div>
 
@@ -548,6 +553,10 @@
   const applyRetentionButtonEl = document.getElementById('apply-retention');
   const retentionSummaryEl = document.getElementById('retention-summary');
   const activeRunIndicatorEl = document.getElementById('active-run-indicator');
+  const continuationPanelEl = document.getElementById('continuation-panel');
+  const continuationLabelEl = document.getElementById('continuation-label');
+  const continuationRoundsEl = document.getElementById('continuation-rounds');
+  const continueTurnButtonEl = document.getElementById('continue-turn');
   const toastContainerEl = document.getElementById('toast-container');
   const openToolsButton = document.getElementById('open-tools');
   const closeToolsButton = document.getElementById('close-tools');
@@ -646,6 +655,8 @@
   scheduleRunTypeEl.addEventListener('change', renderScheduleFormState);
   scheduleCadenceKindEl.addEventListener('change', renderScheduleFormState);
   compactConversationButtonEl.addEventListener('click', compactConversation);
+  continueTurnButtonEl.addEventListener('click', continueTurn);
+  continuationRoundsEl.addEventListener('input', updateActionState);
   permissionNetworkButtonEl.addEventListener('click', () => {
     const permissions = normalizePermissions(state.activeConversation && state.activeConversation.agent_permissions);
     setConversationPermissions({ allow_network: !permissions.allow_network });
@@ -1732,6 +1743,44 @@
     pollJob();
   }
 
+  function activeContinuationId() {
+    return state.activeConversation && state.activeConversation.active_continuation
+      ? String(state.activeConversation.active_continuation)
+      : '';
+  }
+
+  function renderContinuationState() {
+    const continuationId = activeContinuationId();
+    const hasContinuation = Boolean(continuationId);
+    continuationPanelEl.classList.toggle('hidden', !hasContinuation);
+    if (!hasContinuation) return;
+    const rounds = Number(continuationRoundsEl.value || 10);
+    const safeRounds = Number.isFinite(rounds) && rounds > 0 ? Math.floor(rounds) : 10;
+    continuationLabelEl.textContent = `Saved turn checkpoint ${continuationId}`;
+    continueTurnButtonEl.textContent = `Continue +${safeRounds}`;
+  }
+
+  async function continueTurn() {
+    const continuationId = activeContinuationId();
+    if (!state.activeConversationId || !continuationId) return;
+    const rounds = Number(continuationRoundsEl.value || 10);
+    const safeRounds = Number.isFinite(rounds) && rounds > 0 ? Math.floor(rounds) : 10;
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/continuations/${encodeURIComponent(continuationId)}/continue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rounds: safeRounds }),
+    });
+    const payload = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setRunStatus('error', payload.error || 'Continuation failed.');
+      updateActionState();
+      return;
+    }
+    state.activeJobId = payload.job_id;
+    updateActionState();
+    pollJob();
+  }
+
   async function refreshOAuthServers() {
     const response = await fetch('/api/mcp/oauth-servers');
     if (!response.ok) return;
@@ -2576,6 +2625,7 @@
     const jobRunning = Boolean(state.activeJobId);
     const hasRecipeSelection = Boolean(recipeSelectEl.value);
     const hasPendingRecipe = Boolean(state.activeConversation && state.activeConversation.pending_recipe);
+    const hasContinuation = Boolean(activeContinuationId());
     const canSend = hasConversation && !jobRunning && messageInputEl.value.trim().length > 0;
 
     deleteButtonEl.disabled = !hasConversation || jobRunning;
@@ -2583,6 +2633,8 @@
     compactConversationButtonEl.disabled = !hasConversation || jobRunning;
     applyRecipeButtonEl.disabled = !hasConversation || !hasRecipeSelection || jobRunning;
     clearRecipeButtonEl.disabled = !hasConversation || !hasPendingRecipe || jobRunning;
+    continueTurnButtonEl.disabled = !hasConversation || !hasContinuation || jobRunning;
+    continuationRoundsEl.disabled = !hasConversation || !hasContinuation || jobRunning;
     resetMcpButtonEl.disabled = !hasConversation || jobRunning;
     sendButtonEl.disabled = !canSend;
     sendButtonEl.textContent = jobRunning ? 'Working…' : 'Send';
@@ -2593,6 +2645,7 @@
       setConversationActionsMenuOpen(false);
     }
     renderPermissionControls(state.activeConversation && state.activeConversation.agent_permissions);
+    renderContinuationState();
 
     messageInputEl.disabled = !hasConversation || jobRunning;
     if (!hasConversation) {

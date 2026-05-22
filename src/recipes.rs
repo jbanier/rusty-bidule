@@ -18,6 +18,8 @@ pub struct Recipe {
     pub initial_prompt: Option<String>,
     pub config_mcp_servers: Option<Vec<String>>,
     pub config_local_tools: Option<Vec<String>>,
+    pub config_max_agent_iterations: Option<usize>,
+    pub config_continuation_increment: Option<usize>,
     pub workflow: Option<String>,
     pub response_template: Option<String>,
 }
@@ -136,7 +138,7 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
     let response_template = non_empty_section(&doc, "Response Template");
     let workflow = non_empty_section(&doc, "Workflow");
 
-    let (config_mcp_servers, config_local_tools) = parse_config_section(&doc);
+    let config = parse_config_section(&doc);
 
     Ok(Recipe {
         name,
@@ -145,8 +147,10 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
         keywords,
         instructions,
         initial_prompt,
-        config_mcp_servers,
-        config_local_tools,
+        config_mcp_servers: config.mcp_servers,
+        config_local_tools: config.local_tools,
+        config_max_agent_iterations: config.max_agent_iterations,
+        config_continuation_increment: config.continuation_increment,
         workflow,
         response_template,
     })
@@ -173,19 +177,30 @@ fn parse_keywords(yaml: &serde_yaml::Value) -> Vec<String> {
     }
 }
 
-fn parse_config_section(doc: &ParsedMarkdownDoc) -> (Option<Vec<String>>, Option<Vec<String>>) {
+#[derive(Debug, Default)]
+struct RecipeConfig {
+    mcp_servers: Option<Vec<String>>,
+    local_tools: Option<Vec<String>>,
+    max_agent_iterations: Option<usize>,
+    continuation_increment: Option<usize>,
+}
+
+fn parse_config_section(doc: &ParsedMarkdownDoc) -> RecipeConfig {
     let Some(config_text) = doc.section("Config") else {
-        return (None, None);
+        return RecipeConfig::default();
     };
 
     let yaml: serde_yaml::Value = match serde_yaml::from_str(config_text) {
         Ok(v) => v,
-        Err(_) => return (None, None),
+        Err(_) => return RecipeConfig::default(),
     };
 
-    let mcp_servers = yaml_string_list(yaml.get("mcp_servers"));
-    let local_tools = yaml_string_list(yaml.get("local_tools"));
-    (mcp_servers, local_tools)
+    RecipeConfig {
+        mcp_servers: yaml_string_list(yaml.get("mcp_servers")),
+        local_tools: yaml_string_list(yaml.get("local_tools")),
+        max_agent_iterations: yaml_usize(yaml.get("max_agent_iterations")),
+        continuation_increment: yaml_usize(yaml.get("continuation_increment")),
+    }
 }
 
 fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
@@ -202,6 +217,14 @@ fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
                 .map(str::to_string)
                 .collect(),
         ),
+        _ => None,
+    }
+}
+
+fn yaml_usize(value: Option<&serde_yaml::Value>) -> Option<usize> {
+    match value {
+        Some(serde_yaml::Value::Number(number)) => number.as_u64().map(|value| value as usize),
+        Some(serde_yaml::Value::String(value)) => value.trim().parse::<usize>().ok(),
         _ => None,
     }
 }
@@ -296,6 +319,8 @@ Config:
     - local__time
     - local__run_skill
   mcp_servers: csirt, splunk
+  max_agent_iterations: 20
+  continuation_increment: 7
 
 Workflow:
   type: guided_collection
@@ -316,6 +341,8 @@ Workflow:
             recipe.config_mcp_servers,
             Some(vec!["csirt".to_string(), "splunk".to_string()])
         );
+        assert_eq!(recipe.config_max_agent_iterations, Some(20));
+        assert_eq!(recipe.config_continuation_increment, Some(7));
         assert!(recipe.prompt_guidance().contains("Workflow guidance"));
     }
 

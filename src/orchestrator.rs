@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard, mpsc::UnboundedSender};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, DEFAULT_CONTINUATION_INCREMENT},
     conversation_store::ConversationStore,
     llm::{
         LlmAssistantBlock, LlmClient, LlmMessage, LlmStopReason, LlmTool, LlmToolResult,
@@ -22,14 +22,14 @@ use crate::{
     skills::SkillRegistry,
     tool_evidence::ToolEvidenceWriter,
     types::{
-        AgentPermissions, ApprovalRequest, LlmUsage, MessageMetadata, MessageTiming, ProgressEvent,
-        RememberedJob, RunTurnResult, ToolArtifact, UiEvent, WorkflowRun, WorkflowStep,
-        permission_denied_user_prompt,
+        AgentBudgetOverride, AgentPermissions, ApprovalRequest, LlmUsage, MessageMetadata,
+        MessageTiming, ProgressEvent, RememberedJob, RunTurnResult, ToolArtifact, TurnContinuation,
+        UiEvent, WorkflowContinuationRef, WorkflowRun, WorkflowStep, permission_denied_user_prompt,
     },
     workflows::{WorkflowDefinition, parse_workflow_definition},
 };
 
-const MAX_AGENT_ITERATIONS: usize = 10;
+const ITERATION_BUDGET_WARNING: &str = "You are on the last available agent iteration for this run. If you have enough evidence, produce the final answer now. If more tool work is required, stop cleanly; the operator can continue from a saved checkpoint.";
 const PINNED_LOCAL_TOOL_NAMES: &[&str] = &[
     "local__configure_mcp_servers",
     "local__list_directory",
@@ -72,6 +72,7 @@ struct FinishTurnContext<'a> {
     automation: bool,
     suppress_persistence: bool,
     recipe: Option<&'a crate::recipes::Recipe>,
+    needs_continuation: Option<ContinuationPause>,
     ui_tx: &'a UnboundedSender<UiEvent>,
 }
 
@@ -82,6 +83,22 @@ struct RunOptions {
     suppress_persistence: bool,
     mcp_filter_override: Option<Vec<String>>,
     local_tool_filter_override: Option<Vec<String>>,
+    continuation: Option<TurnContinuation>,
+    continuation_rounds: Option<usize>,
+    workflow_ref: Option<WorkflowContinuationRef>,
+}
+
+#[derive(Debug, Clone)]
+struct ContinuationPause {
+    continuation_id: String,
+    continuation_increment: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EffectiveAgentBudget {
+    max_iterations_per_turn: usize,
+    continuation_increment: usize,
+    max_total_iterations_per_turn: usize,
 }
 
 #[derive(Debug)]
@@ -335,6 +352,46 @@ impl Orchestrator {
         .await
     }
 
+    pub async fn continue_turn(
+        &self,
+        conversation_id: &str,
+        continuation_id: &str,
+        additional_iterations: Option<usize>,
+        ui_tx: UnboundedSender<UiEvent>,
+    ) -> Result<RunTurnResult> {
+        let continuation = self
+            .inner
+            .store
+            .load_turn_continuation(conversation_id, continuation_id)?;
+        if continuation.status != "needs_continuation" {
+            bail!("continuation '{continuation_id}' is not waiting for continuation");
+        }
+        if continuation.workflow.is_some() {
+            return self
+                .continue_workflow_continuation(
+                    conversation_id,
+                    continuation,
+                    additional_iterations,
+                    ui_tx,
+                )
+                .await;
+        }
+        self.run_turn_internal(
+            conversation_id,
+            None,
+            ui_tx,
+            RunOptions {
+                automation: continuation.automation,
+                skip_workflow: true,
+                suppress_persistence: continuation.suppress_persistence,
+                continuation: Some(continuation),
+                continuation_rounds: additional_iterations,
+                ..RunOptions::default()
+            },
+        )
+        .await
+    }
+
     pub async fn run_automation_turn(
         &self,
         conversation_id: &str,
@@ -423,7 +480,11 @@ impl Orchestrator {
         let enabled_mcp_servers = conversation.enabled_mcp_servers.clone();
         let enabled_local_tools = conversation.enabled_local_tools.clone();
         let agent_permissions = conversation.agent_permissions.clone();
-        let pending_recipe_name = conversation.pending_recipe.clone();
+        let continuation = options.continuation.clone();
+        let pending_recipe_name = continuation
+            .as_ref()
+            .and_then(|state| state.recipe_name.clone())
+            .or_else(|| conversation.pending_recipe.clone());
 
         // Load recipe if pending
         let recipe = pending_recipe_name
@@ -431,7 +492,8 @@ impl Orchestrator {
             .and_then(|name| self.inner.recipes.find(name))
             .cloned();
 
-        if !options.skip_workflow
+        if continuation.is_none()
+            && !options.skip_workflow
             && let Some(recipe) = recipe.as_ref()
             && let Some(workflow_raw) = recipe.workflow.as_deref()
             && let Some(workflow) = parse_workflow_definition(workflow_raw)
@@ -531,31 +593,66 @@ impl Orchestrator {
         // Skills capability summary
         let capability_summary = self.inner.skills.capability_summary();
         let recipe_guidance = recipe.as_ref().map(|r| r.prompt_guidance());
+        let budget = effective_agent_budget(
+            &self.inner.config,
+            &conversation.agent_budget,
+            recipe.as_ref(),
+        );
 
-        let mut messages = build_messages(MessageBuildContext {
-            prompt: self.inner.config.prompt.as_deref(),
-            history: &history,
-            mcp_error: mcp_error.as_deref(),
-            recipe_instructions: recipe_guidance.as_deref(),
-            capability_summary: if capability_summary.is_empty() {
-                None
-            } else {
-                Some(capability_summary.as_str())
-            },
-            mcp_capability_summary: if mcp_capability_summary.is_empty() {
-                None
-            } else {
-                Some(mcp_capability_summary.as_str())
-            },
-            agent_permissions: &agent_permissions,
-            store: &self.inner.store,
-            conversation_id,
-            user_message_override: if options.automation {
-                user_message.as_deref()
-            } else {
-                None
-            },
-        });
+        let mut messages = if let Some(state) = continuation.as_ref() {
+            state.messages.clone()
+        } else {
+            build_messages(MessageBuildContext {
+                prompt: self.inner.config.prompt.as_deref(),
+                history: &history,
+                mcp_error: mcp_error.as_deref(),
+                recipe_instructions: recipe_guidance.as_deref(),
+                capability_summary: if capability_summary.is_empty() {
+                    None
+                } else {
+                    Some(capability_summary.as_str())
+                },
+                mcp_capability_summary: if mcp_capability_summary.is_empty() {
+                    None
+                } else {
+                    Some(mcp_capability_summary.as_str())
+                },
+                agent_permissions: &agent_permissions,
+                store: &self.inner.store,
+                conversation_id,
+                user_message_override: if options.automation {
+                    user_message.as_deref()
+                } else {
+                    None
+                },
+            })
+        };
+
+        let mut iterations_used = continuation
+            .as_ref()
+            .map(|state| state.iterations_used)
+            .unwrap_or(0);
+        let max_total_iterations = continuation
+            .as_ref()
+            .map(|state| state.max_total_iterations)
+            .unwrap_or(budget.max_total_iterations_per_turn)
+            .max(1);
+        let iteration_allowance = if continuation.is_some() {
+            options
+                .continuation_rounds
+                .unwrap_or_else(|| {
+                    continuation
+                        .as_ref()
+                        .map(|state| state.continuation_increment)
+                        .unwrap_or(budget.continuation_increment)
+                })
+                .max(1)
+        } else {
+            budget.max_iterations_per_turn
+        };
+        let target_iterations = iterations_used
+            .saturating_add(iteration_allowance)
+            .min(max_total_iterations);
 
         // Create local tool executor
         let local_executor = LocalToolExecutor::new(
@@ -570,12 +667,32 @@ impl Orchestrator {
         .with_tool_environment(&self.inner.config.tool_environment)
         .with_local_tools_config(&self.inner.config.local_tools);
 
-        let mut tool_call_count = 0usize;
-        let mut evidence = Vec::<ToolArtifact>::new();
-        let mut llm_usage = LlmUsage::default();
-        let mut have_llm_usage = false;
+        let mut tool_call_count = continuation
+            .as_ref()
+            .map(|state| state.tool_call_count)
+            .unwrap_or(0);
+        let mut evidence = continuation
+            .as_ref()
+            .map(|state| state.evidence.clone())
+            .unwrap_or_default();
+        let mut llm_usage = continuation
+            .as_ref()
+            .and_then(|state| state.llm_usage.clone())
+            .unwrap_or_default();
+        let mut have_llm_usage = continuation
+            .as_ref()
+            .and_then(|state| state.llm_usage.as_ref())
+            .is_some();
+        if let Some(state) = continuation.as_ref() {
+            tool_seconds = state.tool_seconds;
+            llm_seconds = state.llm_seconds;
+        }
 
-        for iteration in 0..MAX_AGENT_ITERATIONS {
+        while iterations_used < target_iterations {
+            if target_iterations.saturating_sub(iterations_used) == 1 {
+                messages.push(LlmMessage::UserText(ITERATION_BUDGET_WARNING.to_string()));
+            }
+            let iteration = iterations_used;
             let context_chars = estimate_context_chars(&messages);
             debug!(
                 %conversation_id,
@@ -646,6 +763,7 @@ impl Orchestrator {
                                 automation: options.automation,
                                 suppress_persistence: options.suppress_persistence,
                                 recipe: recipe.as_ref(),
+                                needs_continuation: None,
                                 ui_tx: &ui_tx,
                             })
                             .await;
@@ -655,6 +773,7 @@ impl Orchestrator {
                 }
             };
             llm_seconds += llm_start.elapsed().as_secs_f64();
+            iterations_used = iterations_used.saturating_add(1);
             if let Some(usage) = &completion.usage {
                 llm_usage.add_assign(usage);
                 have_llm_usage = true;
@@ -740,6 +859,7 @@ impl Orchestrator {
                                         automation: options.automation,
                                         suppress_persistence: options.suppress_persistence,
                                         recipe: recipe.as_ref(),
+                                        needs_continuation: None,
                                         ui_tx: &ui_tx,
                                     })
                                     .await;
@@ -804,6 +924,7 @@ impl Orchestrator {
                             automation: options.automation,
                             suppress_persistence: options.suppress_persistence,
                             recipe: recipe.as_ref(),
+                            needs_continuation: None,
                             ui_tx: &ui_tx,
                         })
                         .await;
@@ -841,15 +962,102 @@ impl Orchestrator {
                     automation: options.automation,
                     suppress_persistence: options.suppress_persistence,
                     recipe: recipe.as_ref(),
+                    needs_continuation: None,
                     ui_tx: &ui_tx,
                 })
                 .await;
         }
 
-        bail!(
-            "agent exceeded the {}-iteration safety limit",
-            MAX_AGENT_ITERATIONS
-        )
+        if iterations_used >= max_total_iterations {
+            let reply = format!(
+                "The agent reached the maximum total iteration budget ({max_total_iterations}) before completing. Increase `agent.max_total_iterations_per_turn` in the runtime config, then retry if this investigation needs a larger safety cap."
+            );
+            return self
+                .finish_turn(FinishTurnContext {
+                    conversation_id,
+                    final_reply: &reply,
+                    turn_start,
+                    tool_seconds,
+                    llm_seconds,
+                    tool_call_count,
+                    evidence,
+                    llm_usage: have_llm_usage.then_some(llm_usage),
+                    automation: options.automation,
+                    suppress_persistence: options.suppress_persistence,
+                    recipe: recipe.as_ref(),
+                    needs_continuation: None,
+                    ui_tx: &ui_tx,
+                })
+                .await;
+        }
+
+        let now = chrono::Utc::now();
+        let continuation_id = continuation
+            .as_ref()
+            .map(|state| state.continuation_id.clone())
+            .unwrap_or_else(new_continuation_id);
+        let continuation_increment = continuation
+            .as_ref()
+            .map(|state| state.continuation_increment)
+            .unwrap_or(budget.continuation_increment)
+            .max(1);
+        let continuation_state = TurnContinuation {
+            continuation_id: continuation_id.clone(),
+            conversation_id: conversation_id.to_string(),
+            status: "needs_continuation".to_string(),
+            recipe_name: recipe.as_ref().map(|recipe| recipe.name.clone()),
+            workflow: options.workflow_ref.clone(),
+            messages,
+            iterations_used,
+            max_total_iterations,
+            continuation_increment,
+            tool_seconds,
+            llm_seconds,
+            tool_call_count,
+            llm_usage: have_llm_usage.then_some(llm_usage.clone()),
+            evidence: evidence.clone(),
+            automation: options.automation,
+            suppress_persistence: options.suppress_persistence,
+            created_at: continuation
+                .as_ref()
+                .map(|state| state.created_at)
+                .unwrap_or(now),
+            updated_at: now,
+        };
+        self.inner
+            .store
+            .save_turn_continuation(&continuation_state)?;
+        self.emit(
+            &ui_tx,
+            "needs_continuation",
+            &format!(
+                "Agent paused after {iterations_used} iterations. Continue +{continuation_increment} to resume from checkpoint {continuation_id}."
+            ),
+            None,
+            Some(tool_call_count),
+        );
+        let reply = format!(
+            "I paused after {iterations_used} agent iterations and saved continuation `{continuation_id}`.\n\nContinue +{continuation_increment} to resume from the saved checkpoint without restarting the recipe."
+        );
+        self.finish_turn(FinishTurnContext {
+            conversation_id,
+            final_reply: &reply,
+            turn_start,
+            tool_seconds,
+            llm_seconds,
+            tool_call_count,
+            evidence,
+            llm_usage: have_llm_usage.then_some(llm_usage),
+            automation: options.automation,
+            suppress_persistence: options.suppress_persistence,
+            recipe: recipe.as_ref(),
+            needs_continuation: Some(ContinuationPause {
+                continuation_id,
+                continuation_increment,
+            }),
+            ui_tx: &ui_tx,
+        })
+        .await
     }
 
     async fn run_recipe_workflow(
@@ -903,6 +1111,10 @@ impl Orchestrator {
         let final_reply = recipe.apply_template(&result.1);
         if run.status == "paused" {
             self.inner.store.save_workflow_run(&run)?;
+            let pause = run
+                .current_step
+                .and_then(|index| run.steps.get(index))
+                .and_then(workflow_step_continuation_pause);
             return self
                 .finish_turn(FinishTurnContext {
                     conversation_id,
@@ -916,6 +1128,7 @@ impl Orchestrator {
                     automation: false,
                     suppress_persistence: false,
                     recipe: Some(recipe),
+                    needs_continuation: pause,
                     ui_tx: &ui_tx,
                 })
                 .await;
@@ -942,6 +1155,7 @@ impl Orchestrator {
             automation: false,
             suppress_persistence: false,
             recipe: Some(recipe),
+            needs_continuation: None,
             ui_tx: &ui_tx,
         })
         .await
@@ -957,6 +1171,14 @@ impl Orchestrator {
             .inner
             .store
             .load_workflow_run(conversation_id, workflow_id)?;
+        if let Some(index) = run.current_step
+            && let Some(continuation_id) =
+                run.steps.get(index).and_then(workflow_step_continuation_id)
+        {
+            return self
+                .continue_turn(conversation_id, &continuation_id, None, ui_tx)
+                .await;
+        }
         for approval in &mut run.approvals {
             if approval.status == "pending" {
                 approval.status = "approved".to_string();
@@ -979,6 +1201,30 @@ impl Orchestrator {
             .execute_workflow_run(run.clone(), 1, ui_tx.clone())
             .await?;
         let mut run = result.0;
+        if run.status == "paused" {
+            self.inner.store.save_workflow_run(&run)?;
+            let pause = run
+                .current_step
+                .and_then(|index| run.steps.get(index))
+                .and_then(workflow_step_continuation_pause);
+            return self
+                .finish_turn(FinishTurnContext {
+                    conversation_id,
+                    final_reply: &result.1,
+                    turn_start,
+                    tool_seconds: 0.0,
+                    llm_seconds: 0.0,
+                    tool_call_count: result.2,
+                    evidence: Vec::new(),
+                    llm_usage: None,
+                    automation: false,
+                    suppress_persistence: false,
+                    recipe: None,
+                    needs_continuation: pause,
+                    ui_tx: &ui_tx,
+                })
+                .await;
+        }
         run.status = "completed".to_string();
         run.final_answer = Some(result.1.clone());
         run.updated_at = chrono::Utc::now();
@@ -995,6 +1241,7 @@ impl Orchestrator {
             automation: false,
             suppress_persistence: false,
             recipe: None,
+            needs_continuation: None,
             ui_tx: &ui_tx,
         })
         .await
@@ -1044,6 +1291,30 @@ impl Orchestrator {
             .execute_workflow_run(run.clone(), 1, ui_tx.clone())
             .await?;
         let mut run = result.0;
+        if run.status == "paused" {
+            self.inner.store.save_workflow_run(&run)?;
+            let pause = run
+                .current_step
+                .and_then(|index| run.steps.get(index))
+                .and_then(workflow_step_continuation_pause);
+            return self
+                .finish_turn(FinishTurnContext {
+                    conversation_id,
+                    final_reply: &result.1,
+                    turn_start,
+                    tool_seconds: 0.0,
+                    llm_seconds: 0.0,
+                    tool_call_count: result.2,
+                    evidence: Vec::new(),
+                    llm_usage: None,
+                    automation: false,
+                    suppress_persistence: false,
+                    recipe: None,
+                    needs_continuation: pause,
+                    ui_tx: &ui_tx,
+                })
+                .await;
+        }
         run.status = "completed".to_string();
         run.final_answer = Some(result.1.clone());
         run.updated_at = chrono::Utc::now();
@@ -1060,6 +1331,175 @@ impl Orchestrator {
             automation: false,
             suppress_persistence: false,
             recipe: None,
+            needs_continuation: None,
+            ui_tx: &ui_tx,
+        })
+        .await
+    }
+
+    async fn continue_workflow_continuation(
+        &self,
+        conversation_id: &str,
+        continuation: TurnContinuation,
+        additional_iterations: Option<usize>,
+        ui_tx: UnboundedSender<UiEvent>,
+    ) -> Result<RunTurnResult> {
+        let workflow_ref = continuation
+            .workflow
+            .clone()
+            .ok_or_else(|| anyhow!("continuation has no workflow reference"))?;
+        let mut run = self
+            .inner
+            .store
+            .load_workflow_run(conversation_id, &workflow_ref.workflow_id)?;
+        if run.conversation_id != conversation_id {
+            bail!("workflow continuation belongs to a different conversation");
+        }
+        let step_index = workflow_ref.step_index;
+        if step_index >= run.steps.len() {
+            bail!("workflow continuation step index is out of range");
+        }
+        let recipe = run
+            .recipe_name
+            .as_deref()
+            .and_then(|name| self.inner.recipes.find(name))
+            .cloned();
+        let turn_start = std::time::Instant::now();
+
+        let result = self
+            .run_turn_internal(
+                conversation_id,
+                None,
+                ui_tx.clone(),
+                RunOptions {
+                    automation: continuation.automation,
+                    skip_workflow: true,
+                    suppress_persistence: true,
+                    continuation: Some(continuation),
+                    continuation_rounds: additional_iterations,
+                    workflow_ref: Some(workflow_ref.clone()),
+                    ..RunOptions::default()
+                },
+            )
+            .await?;
+        let mut total_tool_calls = result.tool_calls;
+
+        if result.status == "needs_continuation" {
+            run.steps[step_index].status = "paused_continuation".to_string();
+            run.steps[step_index].handoff =
+                result.continuation_id.as_ref().map(|continuation_id| {
+                    json!({
+                        "kind": "turn_continuation",
+                        "continuation_id": continuation_id,
+                        "continuation_increment": result.continuation_increment
+                    })
+                });
+            run.status = "paused".to_string();
+            run.pause_reason = result.continuation_id.as_ref().map(|continuation_id| {
+                format!(
+                    "Step '{}' needs continuation '{}'",
+                    run.steps[step_index].name, continuation_id
+                )
+            });
+            run.updated_at = chrono::Utc::now();
+            self.inner.store.save_workflow_run(&run)?;
+            let pause = result
+                .continuation_id
+                .clone()
+                .map(|continuation_id| ContinuationPause {
+                    continuation_id,
+                    continuation_increment: result
+                        .continuation_increment
+                        .unwrap_or(DEFAULT_CONTINUATION_INCREMENT),
+                });
+            return self
+                .finish_turn(FinishTurnContext {
+                    conversation_id,
+                    final_reply: &result.reply,
+                    turn_start,
+                    tool_seconds: 0.0,
+                    llm_seconds: 0.0,
+                    tool_call_count: total_tool_calls,
+                    evidence: Vec::new(),
+                    llm_usage: None,
+                    automation: false,
+                    suppress_persistence: false,
+                    recipe: recipe.as_ref(),
+                    needs_continuation: pause,
+                    ui_tx: &ui_tx,
+                })
+                .await;
+        }
+
+        run.steps[step_index].worker_output = Some(result.reply.clone());
+        run.steps[step_index].validation = Some(
+            self.supervisor_text(&format!(
+                "Validate this workflow step output against the requested step. Reply with a concise verdict and any gaps.\n\nStep:\n{}\n\nOutput:\n{}",
+                run.steps[step_index].prompt, result.reply
+            ))
+            .await
+            .unwrap_or_else(|err| format!("validation unavailable: {err:#}")),
+        );
+        run.steps[step_index].status = "completed".to_string();
+        run.steps[step_index].handoff = None;
+        run.current_step = Some(step_index.saturating_add(1));
+        run.status = "running".to_string();
+        run.pause_reason = None;
+        run.updated_at = chrono::Utc::now();
+        self.inner.store.save_workflow_run(&run)?;
+
+        let (mut run, reply, additional_tool_calls) =
+            self.execute_workflow_run(run, 1, ui_tx.clone()).await?;
+        total_tool_calls = total_tool_calls.saturating_add(additional_tool_calls);
+        let final_reply = recipe
+            .as_ref()
+            .map(|recipe| recipe.apply_template(&reply))
+            .unwrap_or(reply);
+        if run.status == "paused" {
+            self.inner.store.save_workflow_run(&run)?;
+            let pause = run
+                .current_step
+                .and_then(|index| run.steps.get(index))
+                .and_then(workflow_step_continuation_id)
+                .map(|continuation_id| ContinuationPause {
+                    continuation_id,
+                    continuation_increment: DEFAULT_CONTINUATION_INCREMENT,
+                });
+            return self
+                .finish_turn(FinishTurnContext {
+                    conversation_id,
+                    final_reply: &final_reply,
+                    turn_start,
+                    tool_seconds: 0.0,
+                    llm_seconds: 0.0,
+                    tool_call_count: total_tool_calls,
+                    evidence: Vec::new(),
+                    llm_usage: None,
+                    automation: false,
+                    suppress_persistence: false,
+                    recipe: recipe.as_ref(),
+                    needs_continuation: pause,
+                    ui_tx: &ui_tx,
+                })
+                .await;
+        }
+        run.status = "completed".to_string();
+        run.final_answer = Some(final_reply.clone());
+        run.updated_at = chrono::Utc::now();
+        self.inner.store.save_workflow_run(&run)?;
+        self.finish_turn(FinishTurnContext {
+            conversation_id,
+            final_reply: &final_reply,
+            turn_start,
+            tool_seconds: 0.0,
+            llm_seconds: 0.0,
+            tool_call_count: total_tool_calls,
+            evidence: Vec::new(),
+            llm_usage: None,
+            automation: false,
+            suppress_persistence: false,
+            recipe: recipe.as_ref(),
+            needs_continuation: None,
             ui_tx: &ui_tx,
         })
         .await
@@ -1135,10 +1575,44 @@ impl Orchestrator {
                     suppress_persistence: true,
                     mcp_filter_override: run.steps[index].mcp_servers.clone(),
                     local_tool_filter_override: run.steps[index].local_tools.clone(),
+                    workflow_ref: Some(WorkflowContinuationRef {
+                        workflow_id: run.workflow_id.clone(),
+                        step_index: index,
+                    }),
+                    ..RunOptions::default()
                 },
             ))
             .await?;
             total_tool_calls += result.tool_calls;
+            if result.status == "needs_continuation" {
+                run.steps[index].status = "paused_continuation".to_string();
+                run.steps[index].handoff = result.continuation_id.as_ref().map(|continuation_id| {
+                    json!({
+                        "kind": "turn_continuation",
+                        "continuation_id": continuation_id,
+                        "continuation_increment": result.continuation_increment
+                    })
+                });
+                run.status = "paused".to_string();
+                run.pause_reason = result
+                    .continuation_id
+                    .as_ref()
+                    .map(|continuation_id| {
+                        format!(
+                            "Step '{}' needs continuation '{}'",
+                            run.steps[index].name, continuation_id
+                        )
+                    })
+                    .or_else(|| {
+                        Some(format!(
+                            "Step '{}' needs continuation",
+                            run.steps[index].name
+                        ))
+                    });
+                run.updated_at = chrono::Utc::now();
+                self.inner.store.save_workflow_run(&run)?;
+                return Ok((run, result.reply, total_tool_calls));
+            }
             run.steps[index].worker_output = Some(result.reply.clone());
             run.steps[index].validation = Some(
                 self.supervisor_text(&format!(
@@ -1203,6 +1677,7 @@ impl Orchestrator {
             evidence: ctx.evidence.clone(),
         };
 
+        let mut should_save_conversation = false;
         if !ctx.suppress_persistence {
             convo.messages.push(crate::types::Message {
                 role: "assistant".to_string(),
@@ -1211,9 +1686,35 @@ impl Orchestrator {
                 metadata: Some(metadata),
             });
             convo.updated_at = chrono::Utc::now();
-            if ctx.recipe.is_some() && !ctx.automation {
+            if ctx.recipe.is_some() && !ctx.automation && ctx.needs_continuation.is_none() {
                 convo.pending_recipe = None;
             }
+            should_save_conversation = true;
+        }
+        match &ctx.needs_continuation {
+            Some(pause) => {
+                convo.active_continuation = Some(pause.continuation_id.clone());
+                convo.updated_at = chrono::Utc::now();
+                should_save_conversation = true;
+            }
+            None if convo.active_continuation.is_some() => {
+                if let Some(continuation_id) = convo.active_continuation.clone()
+                    && let Ok(mut continuation) = self
+                        .inner
+                        .store
+                        .load_turn_continuation(ctx.conversation_id, &continuation_id)
+                {
+                    continuation.status = "completed".to_string();
+                    continuation.updated_at = chrono::Utc::now();
+                    self.inner.store.save_turn_continuation(&continuation)?;
+                }
+                convo.active_continuation = None;
+                convo.updated_at = chrono::Utc::now();
+                should_save_conversation = true;
+            }
+            None => {}
+        }
+        if should_save_conversation {
             self.inner.store.save(&convo)?;
         }
         self.inner.store.append_log(
@@ -1246,9 +1747,14 @@ impl Orchestrator {
             None,
             Some(ctx.tool_call_count),
         );
-        Ok(RunTurnResult {
-            reply: ctx.final_reply.to_string(),
-            tool_calls: ctx.tool_call_count,
+        Ok(match &ctx.needs_continuation {
+            Some(pause) => RunTurnResult::needs_continuation(
+                ctx.final_reply,
+                ctx.tool_call_count,
+                pause.continuation_id.clone(),
+                pause.continuation_increment,
+            ),
+            None => RunTurnResult::completed(ctx.final_reply, ctx.tool_call_count),
         })
     }
 
@@ -1560,6 +2066,70 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
         messages.push(LlmMessage::UserText(user_message.to_string()));
     }
     messages
+}
+
+fn effective_agent_budget(
+    config: &AppConfig,
+    conversation_budget: &Option<AgentBudgetOverride>,
+    recipe: Option<&crate::recipes::Recipe>,
+) -> EffectiveAgentBudget {
+    let recipe_max = recipe.and_then(|recipe| recipe.config_max_agent_iterations);
+    let recipe_increment = recipe.and_then(|recipe| recipe.config_continuation_increment);
+    let conversation_max = conversation_budget
+        .as_ref()
+        .and_then(|budget| budget.max_iterations_per_turn);
+    let conversation_increment = conversation_budget
+        .as_ref()
+        .and_then(|budget| budget.continuation_increment);
+    let max_iterations_per_turn = conversation_max
+        .or(recipe_max)
+        .unwrap_or_else(|| config.effective_agent_max_iterations())
+        .max(1);
+    let continuation_increment = conversation_increment
+        .or(recipe_increment)
+        .unwrap_or_else(|| config.effective_continuation_increment())
+        .max(1);
+    let max_total_iterations_per_turn = config.effective_agent_max_total_iterations().max(1);
+    EffectiveAgentBudget {
+        max_iterations_per_turn,
+        continuation_increment,
+        max_total_iterations_per_turn,
+    }
+}
+
+fn new_continuation_id() -> String {
+    format!(
+        "turn-{}-{:08x}",
+        chrono::Utc::now().format("%Y%m%d%H%M%S"),
+        rand::random::<u32>()
+    )
+}
+
+fn workflow_step_continuation_id(step: &WorkflowStep) -> Option<String> {
+    step.handoff
+        .as_ref()
+        .filter(|handoff| handoff.get("kind").and_then(Value::as_str) == Some("turn_continuation"))
+        .and_then(|handoff| handoff.get("continuation_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn workflow_step_continuation_pause(step: &WorkflowStep) -> Option<ContinuationPause> {
+    let handoff = step.handoff.as_ref()?;
+    if handoff.get("kind").and_then(Value::as_str) != Some("turn_continuation") {
+        return None;
+    }
+    let continuation_id = handoff.get("continuation_id")?.as_str()?.to_string();
+    let continuation_increment = handoff
+        .get("continuation_increment")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_CONTINUATION_INCREMENT)
+        .max(1);
+    Some(ContinuationPause {
+        continuation_id,
+        continuation_increment,
+    })
 }
 
 fn activated_skills_context(store: &ConversationStore, conversation_id: &str) -> Option<String> {
@@ -1998,13 +2568,14 @@ mod tests {
         llm::{LlmAssistantBlock, LlmMessage, LlmTool},
         local_tools::LocalToolExecutor,
         mcp_runtime::McpTool,
-        types::{ActivatedSkill, AgentPermissions, FilesystemAccess},
+        recipes::Recipe,
+        types::{ActivatedSkill, AgentBudgetOverride, AgentPermissions, FilesystemAccess},
     };
 
     use super::{
         ConversationTurnLocks, MessageBuildContext, PINNED_LOCAL_TOOL_NAMES, build_llm_tools,
-        build_messages, build_ranked_llm_tools_with_local, estimate_context_chars,
-        sanitize_tool_schema, summarize_advertised_mcp_tools,
+        build_messages, build_ranked_llm_tools_with_local, effective_agent_budget,
+        estimate_context_chars, sanitize_tool_schema, summarize_advertised_mcp_tools,
     };
 
     #[test]
@@ -2023,6 +2594,55 @@ mod tests {
         let chars = estimate_context_chars(&messages);
 
         assert!(chars >= "hello1demox1".chars().count());
+    }
+
+    #[test]
+    fn effective_budget_prefers_conversation_over_recipe_over_config() {
+        let mut config = AppConfig {
+            prompt: None,
+            data_dir: None,
+            llm_provider: None,
+            azure_openai: None,
+            openai: None,
+            azure_anthropic: None,
+            openai_compatible: None,
+            adk: None,
+            agent_permissions: AgentPermissions::default(),
+            local_tools: LocalToolsConfig::default(),
+            tool_environment: Default::default(),
+            agent: Default::default(),
+            skills: SkillsConfig::default(),
+            mcp_runtime: McpRuntimeConfig::default(),
+            mcp_servers: Vec::new(),
+            tracing: None,
+        };
+        config.agent.max_iterations_per_turn = 10;
+        config.agent.continuation_increment = 10;
+        config.agent.max_total_iterations_per_turn = 50;
+        let recipe = Recipe {
+            name: "heavy".to_string(),
+            title: None,
+            description: None,
+            keywords: Vec::new(),
+            instructions: String::new(),
+            initial_prompt: None,
+            config_mcp_servers: None,
+            config_local_tools: None,
+            config_max_agent_iterations: Some(18),
+            config_continuation_increment: Some(8),
+            workflow: None,
+            response_template: None,
+        };
+        let conversation_budget = Some(AgentBudgetOverride {
+            max_iterations_per_turn: Some(12),
+            continuation_increment: Some(6),
+        });
+
+        let budget = effective_agent_budget(&config, &conversation_budget, Some(&recipe));
+
+        assert_eq!(budget.max_iterations_per_turn, 12);
+        assert_eq!(budget.continuation_increment, 6);
+        assert_eq!(budget.max_total_iterations_per_turn, 50);
     }
 
     #[test]
@@ -2462,6 +3082,7 @@ mod tests {
             agent_permissions: permissions.clone(),
             local_tools: LocalToolsConfig::default(),
             tool_environment: Default::default(),
+            agent: Default::default(),
             skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: vec![McpServerConfig {

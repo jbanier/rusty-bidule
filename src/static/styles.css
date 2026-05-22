@@ -1636,6 +1636,22 @@ code {
   font-size: 0.8rem;
 }
 
+.continuation-panel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.continuation-panel.hidden {
+  display: none;
+}
+
+.continuation-panel input {
+  width: 84px;
+  min-height: 34px;
+}
+
 .history-panel,
 .settings-panel,
 .tools-panel {

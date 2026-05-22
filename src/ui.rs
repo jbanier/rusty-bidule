@@ -1513,6 +1513,73 @@ impl App {
                         .push("Recipe list opened in transcript.".to_string());
                 }
             }
+            "/continue" => {
+                let rounds = parts
+                    .next()
+                    .map(|value| value.parse::<usize>())
+                    .transpose()
+                    .map_err(|err| anyhow::anyhow!("invalid continuation round count: {err}"))?;
+                if rounds == Some(0) {
+                    self.activities
+                        .push("Continuation round count must be greater than zero.".to_string());
+                    return Ok(());
+                }
+                let conversation = self
+                    .orchestrator
+                    .store()
+                    .load(&self.current_conversation_id)?;
+                let Some(continuation_id) = conversation.active_continuation else {
+                    self.activities
+                        .push("No active continuation for this conversation.".to_string());
+                    return Ok(());
+                };
+                self.inflight = true;
+                self.status = "Continuing saved turn".to_string();
+                let orchestrator = self.orchestrator.clone();
+                let ui_tx = self.ui_tx.clone();
+                let conversation_id = self.current_conversation_id.clone();
+                tokio::spawn(async move {
+                    let result = orchestrator
+                        .continue_turn(&conversation_id, &continuation_id, rounds, ui_tx.clone())
+                        .await
+                        .map_err(|err| format!("{err:#}"));
+                    let _ = ui_tx.send(UiEvent::Finished(result));
+                });
+            }
+            "/budget" => {
+                let sub = parts.next().unwrap_or_default();
+                let store = self.orchestrator.store();
+                let mut convo = store.load(&self.current_conversation_id)?;
+                match sub {
+                    "set" => {
+                        let value = parts
+                            .next()
+                            .ok_or_else(|| anyhow::anyhow!("Usage: /budget set <rounds>"))?
+                            .parse::<usize>()
+                            .map_err(|err| anyhow::anyhow!("invalid budget value: {err}"))?;
+                        if value == 0 {
+                            self.activities
+                                .push("Agent budget must be greater than zero.".to_string());
+                            return Ok(());
+                        }
+                        let mut budget = convo.agent_budget.unwrap_or_default();
+                        budget.max_iterations_per_turn = Some(value);
+                        convo.agent_budget = Some(budget);
+                        store.save(&convo)?;
+                        self.activities
+                            .push(format!("Agent iteration budget set to {value}."));
+                    }
+                    "reset" => {
+                        convo.agent_budget = None;
+                        store.save(&convo)?;
+                        self.activities.push("Agent budget reset.".to_string());
+                    }
+                    _ => {
+                        self.activities
+                            .push("Usage: /budget set <rounds> | /budget reset".to_string());
+                    }
+                }
+            }
             "/recipe" => {
                 let sub = parts.next().unwrap_or_default();
                 match sub {
@@ -1967,6 +2034,8 @@ fn build_help_markdown() -> String {
         "- `/export [id]`: Export a local JSON session summary",
         "- `/delete <id>`: Delete a conversation",
         "- `/compact`: Compact the current conversation",
+        "- `/continue [rounds]`: Resume an active turn continuation",
+        "- `/budget set <rounds>` / `/budget reset`: Override the conversation iteration budget",
         "- `/jobs`: Show remembered jobs for the current conversation",
         "- `/scratch [show|set|append|clear]`: Manage the local scratchpad for this conversation",
         "- `/findings [list|add|update|remove]`: Manage structured findings for this conversation",
@@ -2616,6 +2685,7 @@ mod tests {
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
             tool_environment: Default::default(),
+            agent: Default::default(),
             skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: mcp_servers

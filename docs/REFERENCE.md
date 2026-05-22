@@ -57,12 +57,13 @@ For each normal turn:
 2. Conversation permissions, pending recipe, MCP filters, local-tool filters, skills, and durable memory are loaded.
 3. MCP tools are discovered only when network permission is active.
 4. Local tools and a ranked subset of MCP tools are advertised to the model.
-5. The model may call tools for up to 10 agent iterations.
+5. The model may call tools up to the effective agent iteration budget.
 6. Tool outputs are saved as evidence.
-7. The final assistant reply is stored with timing and tool-call metadata.
-8. A pending recipe is cleared after a non-automation turn.
+7. If the budget is exhausted before completion, a turn continuation is stored under `turn_continuations/` and the user can resume it explicitly.
+8. The final assistant reply is stored with timing and tool-call metadata.
+9. A pending recipe is cleared after a completed non-automation turn.
 
-Recipes are prompt guidance and configuration overlays. They are not executable scripts or deterministic workflow engines.
+Recipes are prompt guidance and configuration overlays. Structured `supervised_steps` and `iterative_research` workflow sections are executed by the workflow runner; other workflow sections remain model guidance.
 
 ## Configuration
 
@@ -80,10 +81,11 @@ The config model is defined in `src/config.rs`. Main top-level keys:
 | `mcp_servers` | Remote MCP server definitions. |
 | `mcp_runtime` | MCP connection timeout and parallelism settings. |
 | `local_tools` | Local execution timeout, file tool caps, and allowed CLI binaries. |
+| `agent` | Agent iteration budgets and continuation increment defaults. |
 | `agent_permissions` | Default per-conversation network/filesystem/scope/yolo permissions. |
 | `tracing` | Log path and filtering settings. |
 
-Per-conversation permissions can differ from defaults and are stored in each conversation record.
+Per-conversation permissions and agent budget overrides can differ from defaults and are stored in each conversation record. The TUI exposes `/budget set <rounds>`, `/budget reset`, and `/continue [rounds]`; the web API exposes `PUT/DELETE /api/conversations/{id}/agent-budget` and `POST /api/conversations/{id}/continuations/{continuation_id}/continue`.
 
 ## Persistence
 
@@ -97,6 +99,7 @@ job_state.json
 logs/conversation.log
 tool_output/
 compactions/
+turn_continuations/
 ```
 
 The store also keeps:
@@ -314,12 +317,12 @@ Response Template:
 Supported recipe sections:
 
 - `Instructions:` - prompt guidance injected into the system prompt.
-- `Config:` - optional `local_tools` and `mcp_servers` filters for the turn.
-- `Workflow:` - preserved as model guidance, not executed deterministically.
+- `Config:` - optional `local_tools`, `mcp_servers`, `max_agent_iterations`, and `continuation_increment` settings for the turn.
+- `Workflow:` - structured workflow YAML for supported workflow types, otherwise preserved as model guidance.
 - `Initial Prompt:` - loaded into the TUI input when a recipe is selected.
 - `Response Template:` - simple `{{ recipe_title }}` and `{{ response }}` replacement.
 
-If a recipe restricts `local_tools`, only those local tools are advertised for the turn.
+If a recipe restricts `local_tools`, only those local tools are advertised for the turn. If it sets `max_agent_iterations`, that budget is used unless the conversation has a `/budget set` override. Exhausted recipe turns save a continuation checkpoint instead of restarting.
 
 Bundled web application posture recipes are provided under `web-app-*`. They
 activate script-backed web assessment skills for scope intake, passive recon,

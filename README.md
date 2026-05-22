@@ -256,6 +256,22 @@ MCP tools by relevance to the current prompt, recent history, and active recipe.
 Tune it downward for providers with smaller function/tool limits, or upward for
 gateways/models that accept larger tool inventories.
 
+Agent iteration budgets are configured separately:
+
+```yaml
+agent:
+  max_iterations_per_turn: 10
+  continuation_increment: 10
+  max_total_iterations_per_turn: 50
+```
+
+When a turn reaches `max_iterations_per_turn`, the agent saves a continuation
+checkpoint instead of failing. Use `/continue [rounds]` in the TUI or the web
+Continue button to grant more iterations without restarting the recipe.
+Conversation overrides can be set with `/budget set <rounds>` and cleared with
+`/budget reset`; recipe `Config:` blocks may set `max_agent_iterations` and
+`continuation_increment` for heavier playbooks.
+
 ### Agent Permissions
 
 The app applies default tool permissions from config to every new conversation:
@@ -521,8 +537,8 @@ Skills are exposed as a compact catalog, `local__activate_skill` loads the full
 conversation and re-injected after compaction.
 
 Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`. They let you preload
-instructions, an initial prompt, workflow guidance, and local-tool/MCP filters
-for a conversation.
+instructions, an initial prompt, supported structured workflows, local-tool/MCP
+filters, and optional agent iteration budgets for a conversation.
 
 ## Persistence, Logging, And Evidence
 
@@ -549,6 +565,7 @@ cargo test
 - This is not yet a hardened production client
 - MCP filtering and permission checks are application-level controls
 - Tool advertising is truncated when inventories exceed `max_advertised_tools`
+- Turn continuations are explicit operator actions and stop at `max_total_iterations_per_turn`
 - Some MCP schemas need normalization for provider tool compatibility
 - The browser UI is intentionally lightweight compared to the TUI
 

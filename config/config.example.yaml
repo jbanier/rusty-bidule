@@ -57,6 +57,11 @@ agent_permissions:
   filesystem_scope: workspace
   yolo: false
 
+agent:
+  max_iterations_per_turn: 10
+  continuation_increment: 10
+  max_total_iterations_per_turn: 50
+
 # Optional child-process environment for skills, allowed CLI tools, and stdio
 # MCP servers. `pass_through` requires the variable to exist in this process
 # environment. `variables` supports env:NAME references. `path_prepend` is

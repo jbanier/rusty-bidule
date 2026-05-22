@@ -16,6 +16,7 @@ use reqwest::{
     Client as HttpClient,
     header::{CONTENT_TYPE, HeaderMap, HeaderValue},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, error, warn};
 
@@ -32,7 +33,7 @@ pub struct LlmTool {
     pub parameters: Value,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LlmAssistantBlock {
     Text {
         text: String,
@@ -44,7 +45,7 @@ pub enum LlmAssistantBlock {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmToolResult {
     pub tool_use_id: String,
     pub content: String,
@@ -60,7 +61,7 @@ pub enum LlmStopReason {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LlmMessage {
     System(String),
     UserText(String),
@@ -1702,6 +1703,7 @@ mod tests {
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
             tool_environment: Default::default(),
+            agent: Default::default(),
             skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: Vec::new(),
@@ -1742,6 +1744,7 @@ mod tests {
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
             tool_environment: Default::default(),
+            agent: Default::default(),
             skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: Vec::new(),

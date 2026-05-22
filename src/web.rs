@@ -22,8 +22,8 @@ use crate::{
     recipes::RecipeRegistry,
     schedules::{ScheduleCreateRequest, build_schedule_record, run_schedule_by_id},
     types::{
-        ConversationSummary, FilesystemAccess, FilesystemScope, ProgressEvent, RetentionPolicy,
-        RunTurnResult, UiEvent,
+        AgentBudgetOverride, ConversationSummary, FilesystemAccess, FilesystemScope, ProgressEvent,
+        RetentionPolicy, RunTurnResult, UiEvent,
     },
 };
 
@@ -110,6 +110,17 @@ struct ConversationListQuery {
 #[derive(Deserialize)]
 struct PostMessageBody {
     content: String,
+}
+
+#[derive(Deserialize)]
+struct ContinueBody {
+    rounds: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct AgentBudgetBody {
+    max_iterations_per_turn: Option<usize>,
+    continuation_increment: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -479,6 +490,120 @@ async fn post_message(
     ))
 }
 
+async fn continue_conversation_turn(
+    State(state): State<WebAppState>,
+    Path((id, continuation_id)): Path<(String, String)>,
+    axum::Json(body): axum::Json<ContinueBody>,
+) -> AppResult<(StatusCode, axum::Json<serde_json::Value>)> {
+    validate_resource_id(&id, "conversation")?;
+    validate_resource_id(&continuation_id, "continuation")?;
+    if let Some(rounds) = body.rounds
+        && rounds == 0
+    {
+        return Err(anyhow::anyhow!("continuation rounds must be greater than zero").into());
+    }
+    ensure_no_active_job_for_conversation(&state, &id).await?;
+    let job_id = new_job_id();
+    {
+        let mut jobs = state.jobs.lock().await;
+        jobs.insert(
+            job_id.clone(),
+            JobState {
+                conversation_id: Some(id.clone()),
+                status: "running".to_string(),
+                events: Vec::new(),
+                result: None,
+                error: None,
+                completed_at: None,
+            },
+        );
+    }
+
+    let orchestrator = state.orchestrator.clone();
+    let jobs = state.jobs.clone();
+    let conversation_id = id.clone();
+    let continuation_id_clone = continuation_id.clone();
+    let job_id_clone = job_id.clone();
+    tokio::spawn(async move {
+        let (ui_tx, mut ui_rx) = unbounded_channel::<UiEvent>();
+        let jobs_ev = jobs.clone();
+        let job_id_ev = job_id_clone.clone();
+        tokio::spawn(async move {
+            while let Some(event) = ui_rx.recv().await {
+                if let UiEvent::Progress(p) = event {
+                    let mut lock = jobs_ev.lock().await;
+                    if let Some(job) = lock.get_mut(&job_id_ev) {
+                        job.events.push(p);
+                    }
+                }
+            }
+        });
+
+        let result = orchestrator
+            .continue_turn(&conversation_id, &continuation_id_clone, body.rounds, ui_tx)
+            .await;
+
+        let mut lock = jobs.lock().await;
+        if let Some(job) = lock.get_mut(&job_id_clone) {
+            match result {
+                Ok(r) => mark_job_completed(job, "done", Some(r), None),
+                Err(e) => mark_job_completed(job, "failed", None, Some(format!("{e:#}"))),
+            }
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        axum::Json(json!({
+            "job_id": job_id,
+            "conversation_id": id,
+            "continuation_id": continuation_id,
+        })),
+    ))
+}
+
+async fn list_conversation_continuations(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    let continuations = state.orchestrator.store().list_turn_continuations(&id)?;
+    Ok(axum::Json(serde_json::to_value(continuations)?))
+}
+
+async fn put_agent_budget(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<AgentBudgetBody>,
+) -> AppResult<axum::Json<serde_json::Value>> {
+    validate_resource_id(&id, "conversation")?;
+    if body.max_iterations_per_turn == Some(0) || body.continuation_increment == Some(0) {
+        return Err(anyhow::anyhow!("agent budget values must be greater than zero").into());
+    }
+    let store = state.orchestrator.store();
+    let mut convo = store.load(&id)?;
+    convo.agent_budget = Some(AgentBudgetOverride {
+        max_iterations_per_turn: body.max_iterations_per_turn,
+        continuation_increment: body.continuation_increment,
+    });
+    convo.updated_at = Utc::now();
+    store.save(&convo)?;
+    Ok(axum::Json(serde_json::to_value(convo.agent_budget)?))
+}
+
+async fn delete_agent_budget(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    validate_resource_id(&id, "conversation")?;
+    let store = state.orchestrator.store();
+    let mut convo = store.load(&id)?;
+    convo.agent_budget = None;
+    convo.updated_at = Utc::now();
+    store.save(&convo)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn compact_conversation(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
@@ -516,10 +641,7 @@ async fn compact_conversation(
                 Ok(summary) => mark_job_completed(
                     job,
                     "done",
-                    Some(RunTurnResult {
-                        reply: summary,
-                        tool_calls: 0,
-                    }),
+                    Some(RunTurnResult::completed(summary, 0)),
                     None,
                 ),
                 Err(err) => {
@@ -1131,7 +1253,14 @@ async fn get_job(
     let job = jobs
         .get(&job_id)
         .ok_or_else(|| anyhow::anyhow!("job '{job_id}' not found"))?;
-    Ok(axum::Json(serde_json::to_value(job)?))
+    let mut value = serde_json::to_value(job)?;
+    if let Some(conversation_id) = job.conversation_id.as_deref()
+        && let Ok(record) = state.orchestrator.store().load(conversation_id)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("record".to_string(), serde_json::to_value(record)?);
+    }
+    Ok(axum::Json(value))
 }
 
 async fn delete_job(
@@ -1201,6 +1330,18 @@ pub async fn run_web_server(
             get(get_export_summary).post(export_summary),
         )
         .route("/api/conversations/{id}/messages", post(post_message))
+        .route(
+            "/api/conversations/{id}/continuations",
+            get(list_conversation_continuations),
+        )
+        .route(
+            "/api/conversations/{id}/continuations/{continuation_id}/continue",
+            post(continue_conversation_turn),
+        )
+        .route(
+            "/api/conversations/{id}/agent-budget",
+            axum::routing::put(put_agent_budget).delete(delete_agent_budget),
+        )
         .route(
             "/api/conversations/{id}/compact",
             post(compact_conversation),
@@ -1372,6 +1513,7 @@ mod tests {
 
     use axum::{
         extract::{Path, Query, State},
+        http::StatusCode,
         response::IntoResponse,
     };
     use chrono::Duration as ChronoDuration;
@@ -1386,13 +1528,13 @@ mod tests {
     };
 
     use super::{
-        COMPLETED_JOB_TTL, ConversationListQuery, ConversationTitleBody, FindingBody, JobState,
-        McpStatusesQuery, PermissionsUpdateBody, PostMessageBody, ScratchpadBody, SearchQuery,
-        WebAppState, archive_conversation, create_finding, evict_expired_jobs, export_summary,
-        get_conversation_permissions, get_export_summary, get_mcp_statuses, get_scratchpad,
-        list_conversations, list_findings, post_message, put_conversation_permissions,
-        put_conversation_title, put_scratchpad, search_local, unarchive_conversation,
-        update_finding,
+        AgentBudgetBody, COMPLETED_JOB_TTL, ConversationListQuery, ConversationTitleBody,
+        FindingBody, JobState, McpStatusesQuery, PermissionsUpdateBody, PostMessageBody,
+        ScratchpadBody, SearchQuery, WebAppState, archive_conversation, create_finding,
+        delete_agent_budget, evict_expired_jobs, export_summary, get_conversation_permissions,
+        get_export_summary, get_mcp_statuses, get_scratchpad, list_conversations, list_findings,
+        post_message, put_agent_budget, put_conversation_permissions, put_conversation_title,
+        put_scratchpad, search_local, unarchive_conversation, update_finding,
     };
 
     fn test_config(data_dir: std::path::PathBuf) -> AppConfig {
@@ -1408,6 +1550,7 @@ mod tests {
             agent_permissions: AgentPermissions::default(),
             local_tools: LocalToolsConfig::default(),
             tool_environment: Default::default(),
+            agent: Default::default(),
             skills: SkillsConfig::default(),
             mcp_runtime: McpRuntimeConfig::default(),
             mcp_servers: Vec::new(),
@@ -1592,6 +1735,46 @@ mod tests {
         assert_eq!(loaded["filesystem"], "read_write");
         assert_eq!(loaded["filesystem_scope"], "full");
         assert_eq!(loaded["yolo"], true);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_budget_handlers_persist_and_clear_overrides() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+
+        let updated = put_agent_budget(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+            axum::Json(AgentBudgetBody {
+                max_iterations_per_turn: Some(18),
+                continuation_increment: Some(9),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(updated["max_iterations_per_turn"], 18);
+        assert_eq!(updated["continuation_increment"], 9);
+
+        let status = delete_agent_budget(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let loaded = state
+            .orchestrator
+            .store()
+            .load(&conversation.conversation_id)
+            .unwrap();
+        assert!(loaded.agent_budget.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

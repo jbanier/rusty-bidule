@@ -13,7 +13,7 @@ use crate::types::{
     ActivatedSkill, AgentPermissions, AuditEvent, Conversation, ConversationSummary, FindingRecord,
     InvestigationMemory, Message, MessageMetadata, RememberedJob, RetentionBlockedItem,
     RetentionItem, RetentionPolicy, RetentionPreview, ScheduleRecord, SearchResult, ToolArtifact,
-    WorkflowRun,
+    TurnContinuation, WorkflowRun,
 };
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -61,6 +61,8 @@ impl ConversationStore {
             active_compaction: None,
             enabled_local_tools: None,
             active_workflow: None,
+            agent_budget: None,
+            active_continuation: None,
             pinned: false,
             legal_hold: false,
             agent_permissions: self.default_agent_permissions.clone(),
@@ -266,6 +268,7 @@ impl ConversationStore {
         fs::create_dir_all(dir.join("logs"))?;
         fs::create_dir_all(dir.join("compactions"))?;
         fs::create_dir_all(dir.join("workflow_runs"))?;
+        fs::create_dir_all(dir.join("turn_continuations"))?;
         Ok(())
     }
 
@@ -293,6 +296,18 @@ impl ConversationStore {
             .conversation_dir(conversation_id)?
             .join("workflow_runs")
             .join(format!("{workflow_id}.json")))
+    }
+
+    fn turn_continuation_path(
+        &self,
+        conversation_id: &str,
+        continuation_id: &str,
+    ) -> Result<PathBuf> {
+        validate_resource_id(continuation_id, "continuation id")?;
+        Ok(self
+            .conversation_dir(conversation_id)?
+            .join("turn_continuations")
+            .join(format!("{continuation_id}.json")))
     }
 
     fn legacy_jobs_path(&self, conversation_id: &str) -> Result<PathBuf> {
@@ -668,6 +683,8 @@ impl ConversationStore {
                 Some("conversation has a legal hold")
             } else if conversation.active_workflow.is_some() {
                 Some("conversation has an active workflow")
+            } else if conversation.active_continuation.is_some() {
+                Some("conversation has an active turn continuation")
             } else if schedule_conversations.contains(&conversation.conversation_id) {
                 Some("conversation is owned by a schedule")
             } else {
@@ -989,6 +1006,58 @@ impl ConversationStore {
         };
         self.save(&conversation)?;
         Ok(())
+    }
+
+    pub fn save_turn_continuation(&self, continuation: &TurnContinuation) -> Result<()> {
+        self.ensure_layout(&continuation.conversation_id)?;
+        let path = self
+            .turn_continuation_path(&continuation.conversation_id, &continuation.continuation_id)?;
+        let payload = serde_json::to_string_pretty(continuation)?;
+        fs::write(&path, payload).with_context(|| format!("failed to write {}", path.display()))?;
+        let mut conversation = self.load(&continuation.conversation_id)?;
+        conversation.active_continuation = match continuation.status.as_str() {
+            "needs_continuation" => Some(continuation.continuation_id.clone()),
+            _ => None,
+        };
+        conversation.updated_at = Utc::now();
+        self.save(&conversation)?;
+        Ok(())
+    }
+
+    pub fn load_turn_continuation(
+        &self,
+        conversation_id: &str,
+        continuation_id: &str,
+    ) -> Result<TurnContinuation> {
+        let path = self.turn_continuation_path(conversation_id, continuation_id)?;
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    pub fn list_turn_continuations(&self, conversation_id: &str) -> Result<Vec<TurnContinuation>> {
+        self.ensure_layout(conversation_id)?;
+        let dir = self
+            .conversation_dir(conversation_id)?
+            .join("turn_continuations");
+        let mut continuations = Vec::new();
+        if !dir.exists() {
+            return Ok(continuations);
+        }
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = fs::read_to_string(entry.path())?;
+            if let Ok(continuation) = serde_json::from_str::<TurnContinuation>(&raw) {
+                continuations.push(continuation);
+            }
+        }
+        continuations.sort_by_key(|continuation| std::cmp::Reverse(continuation.updated_at));
+        Ok(continuations)
     }
 
     pub fn load_workflow_run(
@@ -1393,12 +1462,16 @@ fn normalize_tags(tags: &[String]) -> Vec<String> {
 mod tests {
     use std::fs;
 
+    use chrono::Utc;
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::types::{
-        AgentPermissions, InvestigationMemory, RetentionPolicy, ScheduleCadence,
-        ScheduleIntervalUnit, ScheduleRecord, ToolArtifact,
+    use crate::{
+        llm::LlmMessage,
+        types::{
+            AgentPermissions, InvestigationMemory, RetentionPolicy, ScheduleCadence,
+            ScheduleIntervalUnit, ScheduleRecord, ToolArtifact, TurnContinuation,
+        },
     };
 
     use super::ConversationStore;
@@ -1415,6 +1488,56 @@ mod tests {
         let loaded = store.load(&conversation.conversation_id).unwrap();
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn turn_continuation_round_trips_and_marks_active_conversation() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let now = Utc::now();
+        let continuation = TurnContinuation {
+            continuation_id: "turn-test".to_string(),
+            conversation_id: conversation.conversation_id.clone(),
+            status: "needs_continuation".to_string(),
+            recipe_name: Some("demo".to_string()),
+            workflow: None,
+            messages: vec![LlmMessage::UserText("continue me".to_string())],
+            iterations_used: 10,
+            max_total_iterations: 50,
+            continuation_increment: 10,
+            tool_seconds: 1.0,
+            llm_seconds: 2.0,
+            tool_call_count: 3,
+            llm_usage: None,
+            evidence: Vec::new(),
+            automation: false,
+            suppress_persistence: false,
+            created_at: now,
+            updated_at: now,
+        };
+
+        store.save_turn_continuation(&continuation).unwrap();
+
+        let loaded = store
+            .load_turn_continuation(&conversation.conversation_id, "turn-test")
+            .unwrap();
+        assert_eq!(loaded.iterations_used, 10);
+        assert_eq!(
+            store
+                .load(&conversation.conversation_id)
+                .unwrap()
+                .active_continuation
+                .as_deref(),
+            Some("turn-test")
+        );
+        assert_eq!(
+            store
+                .list_turn_continuations(&conversation.conversation_id)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

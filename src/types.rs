@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::llm::LlmMessage;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FilesystemAccess {
@@ -174,6 +176,12 @@ pub struct Conversation {
     /// Workflow run currently associated with this conversation, if one is active or paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_workflow: Option<String>,
+    /// Agent iteration budget override for this conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_budget: Option<AgentBudgetOverride>,
+    /// Turn continuation currently waiting for operator approval, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_continuation: Option<String>,
     /// Protect this conversation from retention cleanup.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
@@ -183,6 +191,14 @@ pub struct Conversation {
     #[serde(default)]
     pub agent_permissions: AgentPermissions,
     pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentBudgetOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations_per_turn: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_increment: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +420,38 @@ pub struct WorkflowStep {
     pub mcp_servers: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowContinuationRef {
+    pub workflow_id: String,
+    pub step_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TurnContinuation {
+    pub continuation_id: String,
+    pub conversation_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<WorkflowContinuationRef>,
+    pub messages: Vec<LlmMessage>,
+    pub iterations_used: usize,
+    pub max_total_iterations: usize,
+    pub continuation_increment: usize,
+    pub tool_seconds: f64,
+    pub llm_seconds: f64,
+    pub tool_call_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_usage: Option<LlmUsage>,
+    #[serde(default)]
+    pub evidence: Vec<ToolArtifact>,
+    pub automation: bool,
+    pub suppress_persistence: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApprovalRequest {
     pub approval_id: String,
@@ -602,6 +650,38 @@ pub struct ProgressEvent {
 pub struct RunTurnResult {
     pub reply: String,
     pub tool_calls: usize,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_increment: Option<usize>,
+}
+
+impl RunTurnResult {
+    pub fn completed(reply: impl Into<String>, tool_calls: usize) -> Self {
+        Self {
+            reply: reply.into(),
+            tool_calls,
+            status: "completed".to_string(),
+            continuation_id: None,
+            continuation_increment: None,
+        }
+    }
+
+    pub fn needs_continuation(
+        reply: impl Into<String>,
+        tool_calls: usize,
+        continuation_id: String,
+        continuation_increment: usize,
+    ) -> Self {
+        Self {
+            reply: reply.into(),
+            tool_calls,
+            status: "needs_continuation".to_string(),
+            continuation_id: Some(continuation_id),
+            continuation_increment: Some(continuation_increment),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

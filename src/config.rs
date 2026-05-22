@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::types::AgentPermissions;
 
 pub const DEFAULT_MAX_ADVERTISED_TOOLS: usize = 128;
+pub const DEFAULT_MAX_AGENT_ITERATIONS: usize = 10;
+pub const DEFAULT_CONTINUATION_INCREMENT: usize = 10;
+pub const DEFAULT_MAX_TOTAL_AGENT_ITERATIONS: usize = 50;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -29,6 +32,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub tool_environment: ToolEnvironmentConfig,
     #[serde(default)]
+    pub agent: AgentRuntimeConfig,
+    #[serde(default)]
     pub skills: SkillsConfig,
     #[serde(default)]
     pub mcp_runtime: McpRuntimeConfig,
@@ -36,6 +41,26 @@ pub struct AppConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub tracing: Option<TracingConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AgentRuntimeConfig {
+    #[serde(default = "default_max_agent_iterations")]
+    pub max_iterations_per_turn: usize,
+    #[serde(default = "default_continuation_increment")]
+    pub continuation_increment: usize,
+    #[serde(default = "default_max_total_agent_iterations")]
+    pub max_total_iterations_per_turn: usize,
+}
+
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations_per_turn: default_max_agent_iterations(),
+            continuation_increment: default_continuation_increment(),
+            max_total_iterations_per_turn: default_max_total_agent_iterations(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
@@ -587,6 +612,20 @@ impl AppConfig {
         }
         .unwrap_or(DEFAULT_MAX_ADVERTISED_TOOLS)
     }
+
+    pub fn effective_agent_max_iterations(&self) -> usize {
+        self.agent.max_iterations_per_turn.max(1)
+    }
+
+    pub fn effective_continuation_increment(&self) -> usize {
+        self.agent.continuation_increment.max(1)
+    }
+
+    pub fn effective_agent_max_total_iterations(&self) -> usize {
+        self.agent
+            .max_total_iterations_per_turn
+            .max(self.effective_agent_max_iterations())
+    }
 }
 
 fn validate_azure_openai_config(label: &str, config: Option<&AzureOpenAiConfig>) -> Result<()> {
@@ -803,6 +842,18 @@ const fn default_max_advertised_tools() -> usize {
     DEFAULT_MAX_ADVERTISED_TOOLS
 }
 
+const fn default_max_agent_iterations() -> usize {
+    DEFAULT_MAX_AGENT_ITERATIONS
+}
+
+const fn default_continuation_increment() -> usize {
+    DEFAULT_CONTINUATION_INCREMENT
+}
+
+const fn default_max_total_agent_iterations() -> usize {
+    DEFAULT_MAX_TOTAL_AGENT_ITERATIONS
+}
+
 fn default_anthropic_version() -> String {
     "2023-06-01".to_string()
 }
@@ -900,6 +951,9 @@ mcp_servers:
         assert_eq!(config.local_tools.max_file_read_bytes, 16_384);
         assert_eq!(config.local_tools.max_file_write_bytes, 1_048_576);
         assert_eq!(config.local_tools.max_directory_entries, 1_000);
+        assert_eq!(config.effective_agent_max_iterations(), 10);
+        assert_eq!(config.effective_continuation_increment(), 10);
+        assert_eq!(config.effective_agent_max_total_iterations(), 50);
         assert!(config.tool_environment.pass_through.is_empty());
         assert!(config.tool_environment.variables.is_empty());
         assert!(config.tool_environment.path_prepend.is_empty());
@@ -1567,6 +1621,23 @@ agent_permissions:
             FilesystemScope::Full
         );
         assert!(!config.agent_permissions.yolo);
+    }
+
+    #[test]
+    fn parses_agent_iteration_budget_block() {
+        let config: AppConfig = serde_yaml::from_str(
+            r#"
+agent:
+  max_iterations_per_turn: 14
+  continuation_increment: 6
+  max_total_iterations_per_turn: 40
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.effective_agent_max_iterations(), 14);
+        assert_eq!(config.effective_continuation_increment(), 6);
+        assert_eq!(config.effective_agent_max_total_iterations(), 40);
     }
 
     #[test]

@@ -24,6 +24,8 @@ Config:
     - local__update_investigation_memory
     - local__write_file
     - local__exec_cli
+    - local__get_job
+    - local__list_jobs
   max_agent_iterations: 8
   continuation_increment: 5
 
@@ -47,11 +49,13 @@ Workflow:
         - local__write_file
     - name: Safe scanner plan
       prompt: |
-        Activate web-discovery-recon and web-scanner-safe as needed to produce conservative scanner and command plans. Do not run destructive templates or evasion. Summarize leads, unsafe checks excluded, and next validation work. Keep output under 60 lines; do not paste raw JSON, full command lists, command output, or logs.
+        Activate web-discovery-recon and web-scanner-safe as needed to produce conservative scanner and command plans. Do not run destructive templates or evasion. If active scanning is explicitly authorized and the operator asks to run a safe scanner command, use local__exec_cli with execution_mode managed_job, wait_for_result true, and the scoped rate limits instead of raising the foreground timeout. Summarize leads, unsafe checks excluded, and next validation work. Keep output under 60 lines; do not paste raw JSON, full command lists, command output, or logs.
       local_tools:
         - local__activate_skill
         - local__run_skill
         - local__exec_cli
+        - local__get_job
+        - local__list_jobs
         - local__get_investigation_memory
         - local__update_investigation_memory
 

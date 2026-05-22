@@ -265,6 +265,7 @@ impl ConversationStore {
     pub fn ensure_layout(&self, conversation_id: &str) -> Result<()> {
         let dir = self.conversation_dir(conversation_id)?;
         fs::create_dir_all(dir.join("tool_output"))?;
+        fs::create_dir_all(dir.join("managed_jobs"))?;
         fs::create_dir_all(dir.join("logs"))?;
         fs::create_dir_all(dir.join("compactions"))?;
         fs::create_dir_all(dir.join("workflow_runs"))?;

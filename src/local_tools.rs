@@ -11,6 +11,7 @@ use chrono::{Duration as ChronoDuration, Local, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
+use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use crate::{
@@ -93,6 +94,48 @@ impl SkillLaunchSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionMode {
+    Foreground,
+    ManagedJob,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedExecutionOptions {
+    wait_for_result: bool,
+    job_alias: Option<String>,
+    job_timeout_seconds: u64,
+    wait_timeout_seconds: u64,
+}
+
+struct StartedManagedJob {
+    alias: String,
+    transaction_id: String,
+    source_tool: String,
+    command_label: String,
+    handle: JoinHandle<Result<ManagedProcessResult>>,
+}
+
+#[derive(Debug)]
+struct ManagedProcessResult {
+    alias: String,
+    transaction_id: String,
+    command_label: String,
+    status: String,
+    exit_status: Option<String>,
+    stdout: String,
+    stderr: String,
+    artifact_relative_path: String,
+    artifact_byte_count: u64,
+    last_error: Option<String>,
+}
+
+impl ManagedProcessResult {
+    fn is_success(&self) -> bool {
+        self.status == "completed"
+    }
+}
+
 fn apply_skill_arguments(cmd: &mut tokio::process::Command, params: &Value) {
     let Some(obj) = params.as_object() else {
         return;
@@ -124,6 +167,9 @@ pub struct LocalToolExecutor {
     permissions: AgentPermissions,
     enabled_local_tools: Option<Vec<String>>,
     execution_timeout: Duration,
+    job_execution_timeout: Duration,
+    job_wait_timeout: Duration,
+    job_poll_interval: Duration,
     allowed_cli_tools: Vec<String>,
     tool_environment: ToolEnvironmentConfig,
     workspace_root: PathBuf,
@@ -150,6 +196,11 @@ impl LocalToolExecutor {
             permissions,
             enabled_local_tools,
             execution_timeout,
+            job_execution_timeout: Duration::from_secs(
+                default_local_tools.job_execution_timeout_seconds,
+            ),
+            job_wait_timeout: Duration::from_secs(default_local_tools.job_wait_timeout_seconds),
+            job_poll_interval: Duration::from_secs(default_local_tools.job_poll_interval_seconds),
             allowed_cli_tools,
             tool_environment: ToolEnvironmentConfig::default(),
             workspace_root: default_workspace_root(),
@@ -160,6 +211,10 @@ impl LocalToolExecutor {
     }
 
     pub fn with_local_tools_config(mut self, config: &LocalToolsConfig) -> Self {
+        self.job_execution_timeout =
+            Duration::from_secs(config.job_execution_timeout_seconds.max(1));
+        self.job_wait_timeout = Duration::from_secs(config.job_wait_timeout_seconds);
+        self.job_poll_interval = Duration::from_secs(config.job_poll_interval_seconds.max(1));
         self.max_file_read_bytes = config.max_file_read_bytes;
         self.max_file_write_bytes = config.max_file_write_bytes;
         self.max_directory_entries = config.max_directory_entries;
@@ -648,12 +703,6 @@ impl LocalToolExecutor {
             );
         }
 
-        let timeout_seconds = arguments
-            .get("timeout_seconds")
-            .and_then(Value::as_u64)
-            .unwrap_or(self.execution_timeout.as_secs())
-            .min(self.execution_timeout.as_secs());
-
         let args = arguments
             .get("args")
             .and_then(Value::as_array)
@@ -671,9 +720,39 @@ impl LocalToolExecutor {
             .transpose()?
             .unwrap_or_default();
 
+        let execution_mode = parse_execution_mode(&arguments, "exec_cli")?;
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(&args);
         self.apply_tool_environment(&mut cmd)?;
+
+        if execution_mode == ExecutionMode::ManagedJob {
+            self.require_filesystem_write("local__exec_cli managed_job")?;
+            let options = self.managed_options(&arguments, "exec_cli")?;
+            let command_label = format_command_label(command, &args);
+            let alias_base = options
+                .job_alias
+                .clone()
+                .unwrap_or_else(|| generated_managed_alias("cli", command));
+            let started = self
+                .start_managed_command(
+                    alias_base,
+                    "local__exec_cli".to_string(),
+                    command_label,
+                    cmd,
+                    &options,
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to start managed CLI command '{command}' with direct argv")
+                })?;
+            return self.finish_or_defer_managed_job(started, &options).await;
+        }
+
+        let timeout_seconds = arguments
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .unwrap_or(self.execution_timeout.as_secs())
+            .min(self.execution_timeout.as_secs());
         let output = self
             .run_child_command(cmd, timeout_seconds)
             .await
@@ -949,15 +1028,23 @@ impl LocalToolExecutor {
                 (json!({}), Some(warning))
             }
         };
+        let execution_mode = parse_execution_mode(&arguments, "run_skill")?;
         let timeout_seconds = arguments
             .get("timeout_seconds")
             .and_then(Value::as_u64)
             .unwrap_or(self.execution_timeout.as_secs())
             .min(self.execution_timeout.as_secs());
+        let managed_options = if execution_mode == ExecutionMode::ManagedJob {
+            self.require_filesystem_write("local__run_skill managed_job")?;
+            Some(self.managed_options(&arguments, "run_skill")?)
+        } else {
+            None
+        };
 
         let (skill, tools) = registry
             .find_tools(skill_name, tool_slug)
             .ok_or_else(|| anyhow!("skill '{skill_name}' / tool '{tool_slug:?}' not found"))?;
+        let tool_count = tools.len();
 
         let mut outputs = Vec::new();
         if let Some(warning) = parameters_warning {
@@ -979,6 +1066,29 @@ impl LocalToolExecutor {
                 .ok_or_else(|| anyhow!("skill tool has no script defined"))?;
 
             let launch = SkillLaunchSpec::new(&skill.skill_dir, script)?;
+            if let Some(options) = &managed_options {
+                let alias =
+                    managed_skill_alias(options.job_alias.as_deref(), &tool.slug, tool_count);
+                let command_label = format!(
+                    "skill {} / {} ({})",
+                    skill.name,
+                    tool.slug,
+                    launch.display_program()
+                );
+                let output = self
+                    .run_managed_skill_process(
+                        &launch,
+                        &params,
+                        alias,
+                        tool.slug.clone(),
+                        command_label,
+                        options,
+                    )
+                    .await?;
+                outputs.push(format!("[{}]\n{output}", tool.slug));
+                continue;
+            }
+
             let output = self
                 .run_skill_process(&launch, &params, timeout_seconds)
                 .await?;
@@ -1071,6 +1181,225 @@ impl LocalToolExecutor {
                 }
             }
         }
+    }
+
+    fn managed_options(
+        &self,
+        arguments: &Value,
+        tool_name: &str,
+    ) -> Result<ManagedExecutionOptions> {
+        let wait_for_result = arguments
+            .get("wait_for_result")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let job_timeout_seconds = optional_u64_arg(arguments, "job_timeout_seconds", tool_name)?
+            .unwrap_or(self.job_execution_timeout.as_secs())
+            .min(self.job_execution_timeout.as_secs())
+            .max(1);
+        let wait_timeout_seconds = optional_u64_arg(arguments, "wait_timeout_seconds", tool_name)?
+            .unwrap_or(self.job_wait_timeout.as_secs())
+            .min(self.job_wait_timeout.as_secs());
+        Ok(ManagedExecutionOptions {
+            wait_for_result,
+            job_alias: optional_string_arg(arguments, "job_alias", tool_name)?,
+            job_timeout_seconds,
+            wait_timeout_seconds,
+        })
+    }
+
+    async fn run_managed_skill_process(
+        &self,
+        launch: &SkillLaunchSpec,
+        params: &Value,
+        alias: String,
+        source_tool: String,
+        command_label: String,
+        options: &ManagedExecutionOptions,
+    ) -> Result<String> {
+        match &launch.program {
+            SkillProgram::Direct(_) => {
+                let mut cmd = launch.command_with_interpreter(None);
+                self.apply_tool_environment(&mut cmd)?;
+                self.apply_filesystem_env(&mut cmd);
+                apply_skill_arguments(&mut cmd, params);
+                let started = self
+                    .start_managed_command(alias, source_tool, command_label, cmd, options)
+                    .await?;
+                self.finish_or_defer_managed_job(started, options).await
+            }
+            SkillProgram::Python(_) => {
+                let mut primary = launch.command_with_interpreter(Some("python3"));
+                self.apply_tool_environment(&mut primary)?;
+                self.apply_filesystem_env(&mut primary);
+                apply_skill_arguments(&mut primary, params);
+                match self
+                    .start_managed_command(
+                        alias.clone(),
+                        source_tool.clone(),
+                        command_label.clone(),
+                        primary,
+                        options,
+                    )
+                    .await
+                {
+                    Ok(started) => self.finish_or_defer_managed_job(started, options).await,
+                    Err(err)
+                        if err.downcast_ref::<std::io::Error>().is_some_and(|io_err| {
+                            io_err.kind() == std::io::ErrorKind::NotFound
+                        }) =>
+                    {
+                        let mut fallback = launch.command_with_interpreter(Some("python"));
+                        self.apply_tool_environment(&mut fallback)?;
+                        self.apply_filesystem_env(&mut fallback);
+                        apply_skill_arguments(&mut fallback, params);
+                        let started = self
+                            .start_managed_command(
+                                alias,
+                                source_tool,
+                                command_label,
+                                fallback,
+                                options,
+                            )
+                            .await
+                            .map_err(|fallback_err| {
+                                anyhow!(
+                                    "failed to start managed python skill script {} with python3 or python: {fallback_err}",
+                                    launch.display_program()
+                                )
+                            })?;
+                        self.finish_or_defer_managed_job(started, options).await
+                    }
+                    Err(err) => Err(anyhow!(
+                        "failed to start managed python skill script {} with python3: {err}",
+                        launch.display_program()
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn start_managed_command(
+        &self,
+        alias: String,
+        source_tool: String,
+        command_label: String,
+        mut cmd: tokio::process::Command,
+        options: &ManagedExecutionOptions,
+    ) -> Result<StartedManagedJob> {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let _ = child.kill().await;
+                bail!("managed job failed to capture child stdout");
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                let _ = child.kill().await;
+                bail!("managed job failed to capture child stderr");
+            }
+        };
+
+        let transaction_id = generated_managed_transaction_id();
+        let mut record = RememberedJob::new(alias.clone(), transaction_id.clone())?;
+        record.source_tool = Some(source_tool.clone());
+        record.status = Some("running".to_string());
+        record.notes = Some(format!("Managed local process started: {command_label}"));
+        record.retrieval_state = Some("running".to_string());
+        record.automation_prompt = Some(managed_job_automation_prompt(&alias));
+        record.result_artifacts_json = Some(json!({
+            "kind": "managed_process",
+            "command": command_label,
+            "started_at": Utc::now().to_rfc3339()
+        }));
+        if let Err(err) = self.upsert_job(record) {
+            let _ = child.kill().await;
+            return Err(err);
+        }
+
+        let store = self.store.clone();
+        let conversation_id = self.conversation_id.clone();
+        let alias_for_task = alias.clone();
+        let transaction_id_for_task = transaction_id.clone();
+        let source_tool_for_task = source_tool.clone();
+        let command_label_for_task = command_label.clone();
+        let timeout_seconds = options.job_timeout_seconds;
+        let handle = tokio::spawn(async move {
+            complete_managed_process_job(
+                store,
+                conversation_id,
+                alias_for_task,
+                transaction_id_for_task,
+                source_tool_for_task,
+                command_label_for_task,
+                child,
+                stdout,
+                stderr,
+                timeout_seconds,
+            )
+            .await
+        });
+
+        Ok(StartedManagedJob {
+            alias,
+            transaction_id,
+            source_tool,
+            command_label,
+            handle,
+        })
+    }
+
+    async fn finish_or_defer_managed_job(
+        &self,
+        mut started: StartedManagedJob,
+        options: &ManagedExecutionOptions,
+    ) -> Result<String> {
+        if !options.wait_for_result {
+            self.enable_managed_job_auto_pull(&started.alias)?;
+            let reply = format_managed_job_deferred(&started, None);
+            detach_managed_handle(started.handle);
+            return Ok(reply);
+        }
+
+        match tokio::time::timeout(
+            Duration::from_secs(options.wait_timeout_seconds),
+            &mut started.handle,
+        )
+        .await
+        {
+            Ok(joined) => {
+                let result = joined??;
+                if result.is_success() {
+                    Ok(format_managed_job_result(&result))
+                } else {
+                    Err(anyhow!(format_managed_job_result(&result)))
+                }
+            }
+            Err(_) => {
+                self.enable_managed_job_auto_pull(&started.alias)?;
+                let reply =
+                    format_managed_job_deferred(&started, Some(options.wait_timeout_seconds));
+                detach_managed_handle(started.handle);
+                Ok(reply)
+            }
+        }
+    }
+
+    fn enable_managed_job_auto_pull(&self, alias: &str) -> Result<()> {
+        let mut jobs = self.load_jobs()?;
+        let job = jobs
+            .iter_mut()
+            .find(|job| job.alias == alias)
+            .ok_or_else(|| anyhow!("managed job '{alias}' not found"))?;
+        job.set_mode(Some("auto_pull".to_string()))?;
+        let interval = self.job_poll_interval.as_secs().max(1);
+        job.set_poll_interval_seconds(Some(interval))?;
+        job.next_poll_at = Some(Utc::now() + ChronoDuration::seconds(interval as i64));
+        job.updated_at = Utc::now();
+        self.save_jobs(&jobs)
     }
 
     async fn run_child_command(
@@ -1327,6 +1656,357 @@ impl LocalToolExecutor {
         }
 
         Ok(())
+    }
+}
+
+async fn complete_managed_process_job(
+    store: ConversationStore,
+    conversation_id: String,
+    alias: String,
+    transaction_id: String,
+    source_tool: String,
+    command_label: String,
+    mut child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    timeout_seconds: u64,
+) -> Result<ManagedProcessResult> {
+    let stdout_task = tokio::spawn(async move { read_stream(stdout).await });
+    let stderr_task = tokio::spawn(async move { read_stream(stderr).await });
+
+    let mut status = "completed".to_string();
+    let mut exit_status = None;
+    let mut last_error = None;
+    let mut timed_out = false;
+
+    match tokio::time::timeout(Duration::from_secs(timeout_seconds), child.wait()).await {
+        Ok(Ok(child_status)) => {
+            exit_status = Some(child_status.to_string());
+            if !child_status.success() {
+                status = "failed".to_string();
+                last_error = Some(format!("managed process exited with {child_status}"));
+            }
+        }
+        Ok(Err(err)) => {
+            status = "failed".to_string();
+            last_error = Some(format!("failed to wait for managed process: {err}"));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            status = "timed_out".to_string();
+            timed_out = true;
+            last_error = Some(format!(
+                "managed process timed out after {timeout_seconds}s"
+            ));
+        }
+    }
+
+    let (stdout_bytes, stderr_bytes) = if timed_out {
+        stdout_task.abort();
+        stderr_task.abort();
+        (Vec::new(), Vec::new())
+    } else {
+        let stdout_bytes = match stdout_task.await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(err)) => {
+                status = "failed".to_string();
+                append_error(
+                    &mut last_error,
+                    format!("failed to read managed stdout: {err}"),
+                );
+                Vec::new()
+            }
+            Err(err) => {
+                status = "failed".to_string();
+                append_error(
+                    &mut last_error,
+                    format!("managed stdout task failed: {err}"),
+                );
+                Vec::new()
+            }
+        };
+        let stderr_bytes = match stderr_task.await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(err)) => {
+                status = "failed".to_string();
+                append_error(
+                    &mut last_error,
+                    format!("failed to read managed stderr: {err}"),
+                );
+                Vec::new()
+            }
+            Err(err) => {
+                status = "failed".to_string();
+                append_error(
+                    &mut last_error,
+                    format!("managed stderr task failed: {err}"),
+                );
+                Vec::new()
+            }
+        };
+        (stdout_bytes, stderr_bytes)
+    };
+
+    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+
+    let (artifact_relative_path, artifact_byte_count) = match write_managed_process_artifact(
+        &store,
+        &conversation_id,
+        &alias,
+        &transaction_id,
+        &source_tool,
+        &command_label,
+        &status,
+        exit_status.as_deref(),
+        &stdout,
+        &stderr,
+        last_error.as_deref(),
+    ) {
+        Ok(artifact) => artifact,
+        Err(err) => {
+            status = "failed".to_string();
+            append_error(
+                &mut last_error,
+                format!("failed to write managed process artifact: {err}"),
+            );
+            (String::new(), 0)
+        }
+    };
+
+    let result = ManagedProcessResult {
+        alias,
+        transaction_id,
+        command_label,
+        status,
+        exit_status,
+        stdout,
+        stderr,
+        artifact_relative_path,
+        artifact_byte_count,
+        last_error,
+    };
+    update_managed_job_completion(&store, &conversation_id, &source_tool, &result)?;
+    Ok(result)
+}
+
+fn write_managed_process_artifact(
+    store: &ConversationStore,
+    conversation_id: &str,
+    alias: &str,
+    transaction_id: &str,
+    source_tool: &str,
+    command_label: &str,
+    status: &str,
+    exit_status: Option<&str>,
+    stdout: &str,
+    stderr: &str,
+    last_error: Option<&str>,
+) -> Result<(String, u64)> {
+    store.ensure_layout(conversation_id)?;
+    let timestamp = Utc::now().format("%Y%m%d%H%M%S%3f");
+    let filename = format!("{}_{}.txt", sanitize_job_filename(alias), timestamp);
+    let relative_path = format!("managed_jobs/{filename}");
+    let path = store
+        .conversation_dir(conversation_id)?
+        .join(&relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let payload = format!(
+        "managed_job: {alias}\ntransaction_id: {transaction_id}\nsource_tool: {source_tool}\ncommand: {command_label}\nstatus: {status}\nexit_status: {}\ntimestamp: {}\nlast_error: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n",
+        exit_status.unwrap_or(""),
+        Utc::now().to_rfc3339(),
+        last_error.unwrap_or(""),
+        stdout,
+        stderr
+    );
+    fs::write(&path, payload)
+        .with_context(|| format!("failed to write managed job artifact {}", path.display()))?;
+    let byte_count = fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    Ok((relative_path, byte_count))
+}
+
+fn update_managed_job_completion(
+    store: &ConversationStore,
+    conversation_id: &str,
+    source_tool: &str,
+    result: &ManagedProcessResult,
+) -> Result<()> {
+    let mut jobs = store.load_job_state(conversation_id)?;
+    let now = Utc::now();
+    let job = if let Some(index) = jobs.iter().position(|job| job.alias == result.alias) {
+        &mut jobs[index]
+    } else {
+        jobs.push(RememberedJob::new(
+            result.alias.clone(),
+            result.transaction_id.clone(),
+        )?);
+        jobs.last_mut().expect("just pushed managed job")
+    };
+    job.set_transaction_id(result.transaction_id.clone())?;
+    job.source_tool = Some(source_tool.to_string());
+    job.status = Some(result.status.clone());
+    job.notes = Some(format!(
+        "Managed local process finished with status '{}': {}",
+        result.status, result.command_label
+    ));
+    job.retrieval_state = Some(result.status.clone());
+    job.result_artifacts_json = Some(json!({
+        "kind": "managed_process",
+        "command": result.command_label,
+        "status": result.status,
+        "exit_status": result.exit_status,
+        "artifact": {
+            "relative_path": result.artifact_relative_path,
+            "byte_count": result.artifact_byte_count
+        }
+    }));
+    job.last_error = result.last_error.clone();
+    if job.mode.as_deref() == Some("auto_pull") {
+        job.next_poll_at = Some(now);
+    }
+    job.updated_at = now;
+    jobs.sort_by(|a, b| a.alias.cmp(&b.alias));
+    store.save_job_state(conversation_id, &jobs)
+}
+
+fn append_error(target: &mut Option<String>, error: String) {
+    match target {
+        Some(existing) if !existing.is_empty() => {
+            existing.push_str("; ");
+            existing.push_str(&error);
+        }
+        _ => *target = Some(error),
+    }
+}
+
+fn detach_managed_handle(handle: JoinHandle<Result<ManagedProcessResult>>) {
+    tokio::spawn(async move {
+        match handle.await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, "managed local job task failed");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "managed local job join failed");
+            }
+        }
+    });
+}
+
+fn parse_execution_mode(arguments: &Value, tool_name: &str) -> Result<ExecutionMode> {
+    match arguments
+        .get("execution_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("foreground")
+    {
+        "foreground" => Ok(ExecutionMode::Foreground),
+        "managed_job" => Ok(ExecutionMode::ManagedJob),
+        other => bail!(
+            "{tool_name}: execution_mode must be 'foreground' or 'managed_job', got '{other}'"
+        ),
+    }
+}
+
+fn generated_managed_transaction_id() -> String {
+    format!(
+        "managed-{}-{:08x}",
+        Utc::now().format("%Y%m%d%H%M%S%3f"),
+        rand::random::<u32>()
+    )
+}
+
+fn generated_managed_alias(kind: &str, name: &str) -> String {
+    format!(
+        "{}-{}-{:08x}",
+        sanitize_job_filename(kind),
+        sanitize_job_filename(name),
+        rand::random::<u32>()
+    )
+}
+
+fn managed_skill_alias(base_alias: Option<&str>, tool_slug: &str, tool_count: usize) -> String {
+    match base_alias {
+        Some(alias) if tool_count > 1 => format!("{alias}-{}", sanitize_job_filename(tool_slug)),
+        Some(alias) => alias.to_string(),
+        None => generated_managed_alias("skill", tool_slug),
+    }
+}
+
+fn managed_job_automation_prompt(alias: &str) -> String {
+    format!(
+        "Poll managed local job '{alias}' with local__get_job. If it is completed, summarize the recorded managed process artifact from result_artifacts_json. If it is still running, keep the job record for later follow-up. Treat scanner output as leads requiring validation."
+    )
+}
+
+fn format_command_label(command: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        command.to_string()
+    } else {
+        format!(
+            "{} {}",
+            command,
+            serde_json::to_string(args).unwrap_or_else(|_| "<args>".to_string())
+        )
+    }
+}
+
+fn format_managed_job_deferred(
+    job: &StartedManagedJob,
+    wait_timeout_seconds: Option<u64>,
+) -> String {
+    let timeout_note = wait_timeout_seconds
+        .map(|seconds| format!("\nWait timeout: `{seconds}s`"))
+        .unwrap_or_default();
+    format!(
+        "Managed job stored for follow-up.\nAlias: `{}`\nTransaction ID: `{}`\nSource tool: `{}`\nCommand: `{}`\nStatus: `running`{}\nUse `local__get_job` or `local__list_jobs` to inspect it, or let auto-pull continue.",
+        job.alias, job.transaction_id, job.source_tool, job.command_label, timeout_note
+    )
+}
+
+fn format_managed_job_result(result: &ManagedProcessResult) -> String {
+    let mut reply = format!(
+        "Managed job finished.\nAlias: `{}`\nTransaction ID: `{}`\nCommand: `{}`\nStatus: `{}`\nExit status: `{}`\nArtifact: `{}` ({} bytes)",
+        result.alias,
+        result.transaction_id,
+        result.command_label,
+        result.status,
+        result.exit_status.as_deref().unwrap_or(""),
+        result.artifact_relative_path,
+        result.artifact_byte_count
+    );
+    if let Some(error) = &result.last_error
+        && !error.is_empty()
+    {
+        reply.push_str(&format!("\nLast error: {error}"));
+    }
+    if !result.stdout.is_empty() {
+        reply.push_str("\n\n[stdout]\n");
+        reply.push_str(&result.stdout);
+    }
+    if !result.stderr.is_empty() {
+        reply.push_str("\n\n[stderr]\n");
+        reply.push_str(&result.stderr);
+    }
+    reply
+}
+
+fn sanitize_job_filename(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect::<String>();
+    if sanitized.trim_matches('_').is_empty() {
+        "job".to_string()
+    } else {
+        sanitized
     }
 }
 
@@ -1607,6 +2287,13 @@ mod tests {
             Vec::new(),
         )
         .with_workspace_root(root)
+    }
+
+    fn filesystem_write_permissions() -> AgentPermissions {
+        AgentPermissions {
+            filesystem: FilesystemAccess::ReadWrite,
+            ..AgentPermissions::default()
+        }
     }
 
     #[test]
@@ -2218,6 +2905,280 @@ Tools:
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn run_skill_managed_job_can_complete_past_foreground_timeout() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("managed-skill");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        let script_path = skill_dir.join("scripts/slow.sh");
+        fs::write(&script_path, "#!/bin/sh\nsleep 1\necho managed-done\n").unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: managed-skill
+description: Managed slow script
+---
+
+Tools:
+  - name: Slow
+    slug: slow
+    script: scripts/slow.sh
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let executor = LocalToolExecutor::new(
+            store.clone(),
+            &conversation.conversation_id,
+            Some(skills),
+            filesystem_write_permissions(),
+            None,
+            Duration::from_secs(1),
+            Vec::new(),
+        )
+        .with_local_tools_config(&LocalToolsConfig {
+            job_execution_timeout_seconds: 5,
+            job_wait_timeout_seconds: 5,
+            job_poll_interval_seconds: 1,
+            ..LocalToolsConfig::default()
+        });
+
+        let output = executor
+            .execute(
+                "local__run_skill",
+                json!({
+                    "skill_name": "managed-skill",
+                    "tool_slug": "slow",
+                    "execution_mode": "managed_job",
+                    "job_alias": "managed-slow"
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("Managed job finished."));
+        assert!(output.contains("managed-done"));
+        let jobs = store.load_job_state(&conversation.conversation_id).unwrap();
+        let job = jobs.iter().find(|job| job.alias == "managed-slow").unwrap();
+        assert_eq!(job.status.as_deref(), Some("completed"));
+        assert!(job.result_artifacts_json.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_skill_managed_job_wait_timeout_returns_pending_then_completes() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("deferred-skill");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        let script_path = skill_dir.join("scripts/deferred.sh");
+        fs::write(&script_path, "#!/bin/sh\nsleep 1\necho deferred-done\n").unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: deferred-skill
+description: Deferred managed script
+---
+
+Tools:
+  - name: Deferred
+    slug: deferred
+    script: scripts/deferred.sh
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let executor = LocalToolExecutor::new(
+            store.clone(),
+            &conversation.conversation_id,
+            Some(skills),
+            filesystem_write_permissions(),
+            None,
+            Duration::from_secs(1),
+            Vec::new(),
+        )
+        .with_local_tools_config(&LocalToolsConfig {
+            job_execution_timeout_seconds: 5,
+            job_wait_timeout_seconds: 5,
+            job_poll_interval_seconds: 1,
+            ..LocalToolsConfig::default()
+        });
+
+        let output = executor
+            .execute(
+                "local__run_skill",
+                json!({
+                    "skill_name": "deferred-skill",
+                    "tool_slug": "deferred",
+                    "execution_mode": "managed_job",
+                    "job_alias": "deferred-managed",
+                    "wait_timeout_seconds": 0
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("Managed job stored for follow-up."));
+        let jobs = store.load_job_state(&conversation.conversation_id).unwrap();
+        let job = jobs
+            .iter()
+            .find(|job| job.alias == "deferred-managed")
+            .unwrap();
+        assert_eq!(job.status.as_deref(), Some("running"));
+        assert_eq!(job.mode.as_deref(), Some("auto_pull"));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let job = loop {
+            let jobs = store.load_job_state(&conversation.conversation_id).unwrap();
+            assert_eq!(
+                jobs.iter()
+                    .filter(|job| job.alias == "deferred-managed")
+                    .count(),
+                1
+            );
+            let job = jobs
+                .iter()
+                .find(|job| job.alias == "deferred-managed")
+                .cloned()
+                .unwrap();
+            if job.status.as_deref() == Some("completed") || std::time::Instant::now() >= deadline {
+                break job;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert_eq!(job.status.as_deref(), Some("completed"));
+        let artifact = job
+            .result_artifacts_json
+            .as_ref()
+            .and_then(|value| value.get("artifact"))
+            .and_then(|value| value.get("relative_path"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            store
+                .conversation_dir(&conversation.conversation_id)
+                .unwrap()
+                .join(artifact)
+                .exists()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_skill_managed_job_records_failure_and_timeout() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join("managed-errors");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        let fail_path = skill_dir.join("scripts/fail.sh");
+        fs::write(&fail_path, "#!/bin/sh\necho bad >&2\nexit 7\n").unwrap();
+        let timeout_path = skill_dir.join("scripts/timeout.sh");
+        fs::write(&timeout_path, "#!/bin/sh\nsleep 2\necho too-late\n").unwrap();
+        for script_path in [&fail_path, &timeout_path] {
+            let mut perms = fs::metadata(script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(script_path, perms).unwrap();
+        }
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: managed-errors
+description: Managed error scripts
+---
+
+Tools:
+  - name: Fail
+    slug: fail
+    script: scripts/fail.sh
+  - name: Timeout
+    slug: timeout
+    script: scripts/timeout.sh
+"#,
+        )
+        .unwrap();
+
+        let skills = SkillRegistry::load(&skills_dir).unwrap();
+        let executor = LocalToolExecutor::new(
+            store.clone(),
+            &conversation.conversation_id,
+            Some(skills),
+            filesystem_write_permissions(),
+            None,
+            Duration::from_secs(1),
+            Vec::new(),
+        )
+        .with_local_tools_config(&LocalToolsConfig {
+            job_execution_timeout_seconds: 5,
+            job_wait_timeout_seconds: 5,
+            job_poll_interval_seconds: 1,
+            ..LocalToolsConfig::default()
+        });
+
+        let err = executor
+            .execute(
+                "local__run_skill",
+                json!({
+                    "skill_name": "managed-errors",
+                    "tool_slug": "fail",
+                    "execution_mode": "managed_job",
+                    "job_alias": "managed-fail"
+                }),
+            )
+            .await
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("Status: `failed`"));
+        assert!(message.contains("bad"));
+
+        let err = executor
+            .execute(
+                "local__run_skill",
+                json!({
+                    "skill_name": "managed-errors",
+                    "tool_slug": "timeout",
+                    "execution_mode": "managed_job",
+                    "job_alias": "managed-timeout",
+                    "job_timeout_seconds": 1,
+                    "wait_timeout_seconds": 2
+                }),
+            )
+            .await
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("Status: `timed_out`"));
+        assert!(message.contains("timed out after 1s"));
+
+        let jobs = store.load_job_state(&conversation.conversation_id).unwrap();
+        let failed = jobs.iter().find(|job| job.alias == "managed-fail").unwrap();
+        assert_eq!(failed.status.as_deref(), Some("failed"));
+        assert!(failed.last_error.as_deref().unwrap_or("").contains("exit"));
+        let timed_out = jobs
+            .iter()
+            .find(|job| job.alias == "managed-timeout")
+            .unwrap();
+        assert_eq!(timed_out.status.as_deref(), Some("timed_out"));
+        assert!(
+            timed_out
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out after 1s")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn exec_cli_rejects_disallowed_commands() {
         let dir = tempdir().unwrap();
         let store = ConversationStore::new(dir.path(), AgentPermissions::default());
@@ -2278,6 +3239,65 @@ Tools:
 
         assert!(output.contains("Command: `echo`"));
         assert!(output.contains("hello world"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exec_cli_managed_job_completes_allowed_command() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+        let bin_dir = dir.path().join("tool-bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let script_path = bin_dir.join("rb-managed-cli");
+        fs::write(&script_path, "#!/bin/sh\nsleep 1\necho cli-managed:$1\n").unwrap();
+        let mut perms = fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).unwrap();
+
+        let executor = LocalToolExecutor::new(
+            store.clone(),
+            &conversation.conversation_id,
+            None,
+            AgentPermissions {
+                allow_network: true,
+                filesystem: FilesystemAccess::ReadWrite,
+                filesystem_scope: Default::default(),
+                yolo: false,
+            },
+            None,
+            Duration::from_secs(1),
+            vec!["rb-managed-cli".to_string()],
+        )
+        .with_tool_environment(&ToolEnvironmentConfig {
+            path_prepend: vec![bin_dir],
+            ..ToolEnvironmentConfig::default()
+        })
+        .with_local_tools_config(&LocalToolsConfig {
+            job_execution_timeout_seconds: 5,
+            job_wait_timeout_seconds: 5,
+            job_poll_interval_seconds: 1,
+            ..LocalToolsConfig::default()
+        });
+
+        let output = executor
+            .execute(
+                "local__exec_cli",
+                json!({
+                    "command": "rb-managed-cli",
+                    "args": ["ok"],
+                    "execution_mode": "managed_job",
+                    "job_alias": "managed-cli"
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.contains("Managed job finished."));
+        assert!(output.contains("cli-managed:ok"));
+        let jobs = store.load_job_state(&conversation.conversation_id).unwrap();
+        let job = jobs.iter().find(|job| job.alias == "managed-cli").unwrap();
+        assert_eq!(job.status.as_deref(), Some("completed"));
+        assert_eq!(job.source_tool.as_deref(), Some("local__exec_cli"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2960,7 +3980,7 @@ pub fn local_tool_definitions(
         defs.push(LlmTool {
             name: "local__exec_cli".to_string(),
             description: format!(
-                "Execute an allowed local CLI binary with direct argv execution only; no shell parsing, pipes, redirects, or paths. Allowed commands: {}. Requires network permission when the command performs remote lookups.",
+                "Execute an allowed local CLI binary with direct argv execution only; no shell parsing, pipes, redirects, or paths. Use execution_mode=managed_job for long-running local scans; managed jobs require filesystem write permission for job state and artifacts. Allowed commands: {}. Requires network permission when the command performs remote lookups.",
                 local_tools_config.allowed_cli_tools.join(", ")
             ),
             parameters: json!({
@@ -2968,7 +3988,12 @@ pub fn local_tool_definitions(
                 "properties": {
                     "command": {"type": "string", "description": "Allowed binary name to execute"},
                     "args": {"type": "array", "items": {"type": "string"}, "description": "Argument vector passed directly to the binary"},
-                    "timeout_seconds": {"type": "integer", "description": "Optional timeout override capped by local_tools.execution_timeout_seconds"}
+                    "timeout_seconds": {"type": "integer", "description": "Optional foreground timeout override capped by local_tools.execution_timeout_seconds"},
+                    "execution_mode": {"type": "string", "enum": ["foreground", "managed_job"], "description": "foreground waits under local_tools.execution_timeout_seconds; managed_job starts a remembered process job for long scans"},
+                    "wait_for_result": {"type": "boolean", "description": "For managed_job, wait for completion in this turn. Defaults to true."},
+                    "job_alias": {"type": "string", "description": "Optional alias for the managed job record"},
+                    "job_timeout_seconds": {"type": "integer", "description": "Optional managed process hard timeout capped by local_tools.job_execution_timeout_seconds"},
+                    "wait_timeout_seconds": {"type": "integer", "description": "Optional managed same-turn wait timeout capped by local_tools.job_wait_timeout_seconds"}
                 },
                 "required": ["command"]
             }),
@@ -3003,14 +4028,19 @@ pub fn local_tool_definitions(
 
     defs.push(LlmTool {
         name: "local__run_skill".to_string(),
-        description: "Execute one or more skill scripts with parameters. Omitting tool_slug runs every executable tool in the matched skill. Skill-specific network/filesystem permissions are enforced unless yolo mode is enabled. Local skill execution defaults to 180s and can be overridden with timeout_seconds. Scripts may return a JSON pending-job envelope so long-running remote work can be remembered and auto-polled.".to_string(),
+        description: "Execute one or more skill scripts with parameters. Omitting tool_slug runs every executable tool in the matched skill. Skill-specific network/filesystem permissions are enforced unless yolo mode is enabled. Local skill foreground execution defaults to 180s and can be overridden with timeout_seconds. Use execution_mode=managed_job for long-running local scripts; managed jobs require filesystem write permission for job state and artifacts. Scripts may also return a JSON pending-job envelope so long-running remote work can be remembered and auto-polled.".to_string(),
         parameters: json!({
             "type": "object",
             "properties": {
                 "skill_name": {"type": "string", "description": "Name of the skill directory"},
                 "tool_slug": {"type": "string", "description": "Slug of the specific tool within the skill"},
                 "parameters": {"type": "string", "description": "JSON string of parameters to pass to the script"},
-                "timeout_seconds": {"type": "integer", "description": "Optional per-run timeout override for the local script execution"}
+                "timeout_seconds": {"type": "integer", "description": "Optional foreground timeout override for the local script execution"},
+                "execution_mode": {"type": "string", "enum": ["foreground", "managed_job"], "description": "foreground waits under local_tools.execution_timeout_seconds; managed_job starts a remembered process job for long scripts"},
+                "wait_for_result": {"type": "boolean", "description": "For managed_job, wait for completion in this turn. Defaults to true."},
+                "job_alias": {"type": "string", "description": "Optional alias for the managed job record"},
+                "job_timeout_seconds": {"type": "integer", "description": "Optional managed process hard timeout capped by local_tools.job_execution_timeout_seconds"},
+                "wait_timeout_seconds": {"type": "integer", "description": "Optional managed same-turn wait timeout capped by local_tools.job_wait_timeout_seconds"}
             },
             "required": ["skill_name"]
         }),

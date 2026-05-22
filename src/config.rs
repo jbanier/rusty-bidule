@@ -312,6 +312,12 @@ pub struct McpRuntimeConfig {
 pub struct LocalToolsConfig {
     #[serde(default = "default_local_tool_execution_timeout_seconds")]
     pub execution_timeout_seconds: u64,
+    #[serde(default = "default_local_tool_job_execution_timeout_seconds")]
+    pub job_execution_timeout_seconds: u64,
+    #[serde(default = "default_local_tool_job_wait_timeout_seconds")]
+    pub job_wait_timeout_seconds: u64,
+    #[serde(default = "default_local_tool_job_poll_interval_seconds")]
+    pub job_poll_interval_seconds: u64,
     #[serde(default = "default_allowed_cli_tools")]
     pub allowed_cli_tools: Vec<String>,
     #[serde(default = "default_max_file_read_bytes")]
@@ -326,6 +332,9 @@ impl Default for LocalToolsConfig {
     fn default() -> Self {
         Self {
             execution_timeout_seconds: default_local_tool_execution_timeout_seconds(),
+            job_execution_timeout_seconds: default_local_tool_job_execution_timeout_seconds(),
+            job_wait_timeout_seconds: default_local_tool_job_wait_timeout_seconds(),
+            job_poll_interval_seconds: default_local_tool_job_poll_interval_seconds(),
             allowed_cli_tools: default_allowed_cli_tools(),
             max_file_read_bytes: default_max_file_read_bytes(),
             max_file_write_bytes: default_max_file_write_bytes(),
@@ -884,6 +893,18 @@ const fn default_local_tool_execution_timeout_seconds() -> u64 {
     180
 }
 
+const fn default_local_tool_job_execution_timeout_seconds() -> u64 {
+    1200
+}
+
+const fn default_local_tool_job_wait_timeout_seconds() -> u64 {
+    900
+}
+
+const fn default_local_tool_job_poll_interval_seconds() -> u64 {
+    5
+}
+
 const fn default_max_file_read_bytes() -> u64 {
     16_384
 }
@@ -948,6 +969,9 @@ mcp_servers:
             Some("super-secret")
         );
         assert_eq!(config.local_tools.execution_timeout_seconds, 180);
+        assert_eq!(config.local_tools.job_execution_timeout_seconds, 1200);
+        assert_eq!(config.local_tools.job_wait_timeout_seconds, 900);
+        assert_eq!(config.local_tools.job_poll_interval_seconds, 5);
         assert_eq!(config.local_tools.max_file_read_bytes, 16_384);
         assert_eq!(config.local_tools.max_file_write_bytes, 1_048_576);
         assert_eq!(config.local_tools.max_directory_entries, 1_000);
@@ -1495,12 +1519,18 @@ azure_openai:
   deployment: gpt-4.1
 local_tools:
   execution_timeout_seconds: 240
+  job_execution_timeout_seconds: 1200
+  job_wait_timeout_seconds: 900
+  job_poll_interval_seconds: 5
 "#,
         )
         .unwrap();
 
         let config = AppConfig::load(&path).unwrap();
         assert_eq!(config.local_tools.execution_timeout_seconds, 240);
+        assert_eq!(config.local_tools.job_execution_timeout_seconds, 1200);
+        assert_eq!(config.local_tools.job_wait_timeout_seconds, 900);
+        assert_eq!(config.local_tools.job_poll_interval_seconds, 5);
         assert!(
             config
                 .local_tools

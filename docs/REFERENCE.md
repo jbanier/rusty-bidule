@@ -391,7 +391,6 @@ The Rust client does not currently implement:
 - deterministic iterative recipe execution,
 - scheduled recipes/prompts,
 - outbound delivery wrappers,
-- command-backed skill adapters beyond `local__exec_cli`,
-- full compatibility with the older Python `bidule2` internals.
+- command-backed skill adapters beyond `local__exec_cli`.
 
 Those concepts may be added later, but current recipes and skills should target the Rust-native `local__run_skill` and local-tool contracts.

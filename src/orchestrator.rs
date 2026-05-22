@@ -2012,6 +2012,7 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
         - Prefer local skill execution when an appropriate listed skill exists.\n\
         - When a listed skill matches the task, use `local__activate_skill` when available to load its full `SKILL.md` instructions before acting.\n\
         - A listed skill with a local script must be executed via `local__run_skill`.\n\
+        - For long-running local scans or skill scripts, prefer `execution_mode=\"managed_job\"` with `wait_for_result=true` instead of raising the foreground timeout.\n\
         - Use `local__time` before making claims about relative windows like last 12 hours, last 2 days, today, or yesterday.\n\
         - Use investigation memory to preserve durable case context: read it when resuming a case, update it when durable conclusions, entities, decisions, or unresolved questions change.\n\
         - Use `local__exec_cli` only for explicitly allowed local CLI binaries such as `whois`, `dig`, `nslookup`, `vt`, or `nmap` when that tool is advertised.\n\

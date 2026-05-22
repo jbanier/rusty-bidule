@@ -14,6 +14,7 @@ Constraints:
 - Exclude brute force, DoS, destructive, intrusive, and exploit-heavy templates by default.
 - Respect engagement rate limits and blackout windows.
 - Treat scanner output as leads requiring manual confirmation.
+- When an authorized safe scanner command is actually run, prefer `local__exec_cli` with `execution_mode` set to `managed_job` and `wait_for_result` set to `true` so long scans are tracked as jobs instead of foreground tool calls.
 
 Tools:
   - name: Safe Scanner Plan
@@ -21,4 +22,3 @@ Tools:
     description: Validate scope and generate safe nuclei/ZAP baseline command plans with conservative exclusions.
     script: scripts/scanner_safe.py
     network: true
-

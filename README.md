@@ -7,6 +7,11 @@ conversation state, and both terminal and browser interfaces.
 The project is aimed at operators who want a tool-grounded assistant rather than
 an open-ended chat shell.
 
+The bundled web recipes are purple-team workflows: they help authorized teams
+plan scoped testing, collect evidence, validate findings, and turn results into
+defensive remediation and retest work. They are not unbounded offensive
+playbooks.
+
 ## What It Does
 
 - Runs interactive conversations in a Ratatui terminal UI
@@ -17,6 +22,8 @@ an open-ended chat shell.
 - Executes selected local skill scripts through `local__run_skill`
 - Executes configured allowlisted local CLI tools through `local__exec_cli`
 - Persists conversations, compactions, logs, OAuth state, and tool evidence
+- Provides authorized web posture recipes for scope intake, safe recon,
+  validation, reporting, remediation, and retest planning
 - Supports OAuth public-client login for MCP servers that require browser auth
 
 ## Prototype Status
@@ -299,6 +306,9 @@ Local built-in tools are configured under:
 ```yaml
 local_tools:
   execution_timeout_seconds: 180
+  job_execution_timeout_seconds: 1200
+  job_wait_timeout_seconds: 900
+  job_poll_interval_seconds: 5
   max_file_read_bytes: 16384
   max_file_write_bytes: 1048576
   max_directory_entries: 1000
@@ -333,7 +343,12 @@ local_tools:
   `local__clear_investigation_memory`, and `local__search_conversation_memories`
   manage durable case carry-over state
 - `local__exec_cli` does not invoke a shell, and does not support pipes, redirects, or path-based commands
-- Web posture recipes use the web assessment skills and keep destructive, brute-force, DoS, OOB, and WAF-evasion testing disabled unless scope explicitly authorizes it
+- Long-running local scanners and scripts should use `execution_mode: managed_job`; the process is remembered, stdout/stderr are written under the conversation's `managed_jobs/` directory, and same-turn waiting is capped by `job_wait_timeout_seconds`
+- Purple-team web recipes use the web assessment skills to support authorized
+  testing, defensive validation, evidence capture, remediation planning, and
+  retest checklists. Destructive, brute-force, DoS, OOB, and WAF-evasion testing
+  stay disabled unless the captured scope explicitly authorizes that class of
+  work.
 - On Ubuntu, install the supporting web assessment binaries with `bash scripts/setup-web-assessment-tools.sh`; use `--apt-only` if upstream Go/npm/gem installs are not allowed.
 
 ### Tool Environment
@@ -367,6 +382,11 @@ Current shared runtime settings:
 mcp_runtime:
   connect_timeout_seconds: 180
 ```
+
+Long-running MCP tools should return a job id quickly and expose separate poll
+or result tools instead of holding `tools/call` open for minutes. Raising a
+server's `client_session_timeout_seconds` can be useful as a compatibility
+fallback, but async MCP job APIs are preferred for scanner-style work.
 
 ### MCP Servers
 
@@ -539,6 +559,14 @@ conversation and re-injected after compaction.
 Recipes are loaded from `recipes/<recipe-name>/RECIPE.md`. They let you preload
 instructions, an initial prompt, supported structured workflows, local-tool/MCP
 filters, and optional agent iteration budgets for a conversation.
+
+The bundled `web-app-*` recipes are designed for purple-team web application
+work. A typical flow starts with `web-app-scope-intake`, then uses passive or
+bounded active recipes to build a shared evidence base, and ends with
+`web-app-final-report` for confirmed findings, remediation guidance, and retest
+steps. Scanner output is treated as a lead until manually validated, and recipes
+preserve uncertainty, authorization gaps, and unresolved defensive follow-up in
+investigation memory.
 
 ## Persistence, Logging, And Evidence
 

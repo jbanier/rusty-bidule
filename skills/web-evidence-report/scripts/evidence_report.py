@@ -30,6 +30,17 @@ def finding_block(item: dict[str, object]) -> str:
     )
 
 
+def is_validated(item: dict[str, object]) -> bool:
+    return bool(item.get("confirmed")) or str(item.get("status", "")).strip().lower() == "validated"
+
+
+def lead_block(item: dict[str, object]) -> str:
+    title = item.get("title") or item.get("name") or "Untitled lead"
+    status = item.get("status", "lead")
+    evidence = item.get("evidence", item.get("source_artifact", ""))
+    return f"- {title} ({status}) - evidence: {evidence or 'not supplied'}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case-name", default="web-app-posture-assessment")
@@ -38,6 +49,8 @@ def main() -> None:
     parser.add_argument("--output-path", default="")
     args = parser.parse_args()
     findings = parse_json_arg(args.findings_json, [])
+    validated = [item for item in findings if isinstance(item, dict) and is_validated(item)]
+    leads = [item for item in findings if isinstance(item, dict) and not is_validated(item)]
     report = "\n".join(
         [
             f"# {args.case_name}",
@@ -45,8 +58,10 @@ def main() -> None:
             "## Scope",
             args.scope_summary or "Scope summary not provided.",
             "",
-            "## Findings",
-            "\n".join(finding_block(item) for item in findings) if findings else "No confirmed findings supplied.",
+            "## Validated Findings",
+            "\n".join(finding_block(item) for item in validated) if validated else "No validated findings supplied.",
+            "## Leads And Gaps",
+            "\n".join(lead_block(item) for item in leads) if leads else "No unresolved leads supplied.",
             "## Retest Checklist",
             "- Re-run affected workflow with fixed build.",
             "- Confirm access control, input handling, and logging behavior.",
@@ -61,7 +76,7 @@ def main() -> None:
             raise ScopeError(f"output parent directory does not exist: {path.parent}")
         path.write_text(report)
         written_path = str(path)
-    json_dump({"status": "ok", "report_markdown": report, "output_path": written_path, "finding_count": len(findings)})
+    json_dump({"status": "ok", "report_markdown": report, "output_path": written_path, "finding_count": len(validated), "lead_count": len(leads)})
 
 
 if __name__ == "__main__":

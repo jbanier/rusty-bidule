@@ -25,6 +25,11 @@ pub struct SkillTool {
     pub mcp_backed: bool,
     pub requires_network: bool,
     pub filesystem: FilesystemAccess,
+    pub safety_profile: Option<String>,
+    pub requires_active_authorization: bool,
+    pub requires_oob_authorization: bool,
+    pub requires_destructive_authorization: bool,
+    pub methodology: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,11 +300,21 @@ impl SkillRegistry {
                         .description
                         .as_deref()
                         .unwrap_or("No description provided.");
+                    let metadata_note = tool_metadata_note(tool);
                     match (tool.script.as_deref(), tool.server.as_deref()) {
                         (Some(_), _) => {
                             let mut requirements = Vec::new();
                             if tool.requires_network {
                                 requirements.push("network");
+                            }
+                            if tool.requires_active_authorization {
+                                requirements.push("active authorization");
+                            }
+                            if tool.requires_oob_authorization {
+                                requirements.push("OOB authorization");
+                            }
+                            if tool.requires_destructive_authorization {
+                                requirements.push("destructive authorization");
                             }
                             if !matches!(tool.filesystem, FilesystemAccess::None) {
                                 requirements.push(match tool.filesystem {
@@ -314,26 +329,26 @@ impl SkillRegistry {
                                 format!(" Requires {}.", requirements.join(" + "))
                             };
                             out.push_str(&format!(
-                                "- `{}`: {} Use `local__run_skill` with `skill_name=\"{}\"` and `tool_slug=\"{}\"`.{}\n",
-                                display_name, desc, skill_name, tool.slug, requirement_note
+                                "- `{}`: {} Use `local__run_skill` with `skill_name=\"{}\"` and `tool_slug=\"{}\"`.{}{}\n",
+                                display_name, desc, skill_name, tool.slug, requirement_note, metadata_note
                             ));
                         }
                         (None, Some(server)) => {
                             out.push_str(&format!(
-                                "- `{}`: {} MCP-backed via server `{server}`; not locally executable.\n",
-                                display_name, desc
+                                "- `{}`: {} MCP-backed via server `{server}`; not locally executable.{}\n",
+                                display_name, desc, metadata_note
                             ));
                         }
                         (None, None) if tool.mcp_backed => {
                             out.push_str(&format!(
-                                "- `{}`: {} MCP-backed; not locally executable.\n",
-                                display_name, desc
+                                "- `{}`: {} MCP-backed; not locally executable.{}\n",
+                                display_name, desc, metadata_note
                             ));
                         }
                         (None, None) => {
                             out.push_str(&format!(
-                                "- `{}`: {} Metadata only; no execution backend declared.\n",
-                                display_name, desc
+                                "- `{}`: {} Metadata only; no execution backend declared.{}\n",
+                                display_name, desc, metadata_note
                             ));
                         }
                     }
@@ -372,6 +387,21 @@ impl SkillRegistry {
             skill.tools.iter().collect::<Vec<_>>()
         };
         Some((skill, tools))
+    }
+}
+
+fn tool_metadata_note(tool: &SkillTool) -> String {
+    let mut notes = Vec::new();
+    if let Some(safety_profile) = tool.safety_profile.as_deref() {
+        notes.push(format!("safety={safety_profile}"));
+    }
+    if !tool.methodology.is_empty() {
+        notes.push(format!("methodology={}", tool.methodology.join(",")));
+    }
+    if notes.is_empty() {
+        String::new()
+    } else {
+        format!(" Metadata: {}.", notes.join("; "))
     }
 }
 
@@ -678,6 +708,16 @@ fn parse_tools_section(tools_section: &str) -> Vec<SkillTool> {
                             .and_then(|v| v.as_str())
                             .and_then(parse_filesystem_access)
                             .unwrap_or(FilesystemAccess::None),
+                        safety_profile: map
+                            .get("safety_profile")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        requires_active_authorization: yaml_bool(map.get("requires_active_authorization")),
+                        requires_oob_authorization: yaml_bool(map.get("requires_oob_authorization")),
+                        requires_destructive_authorization: yaml_bool(
+                            map.get("requires_destructive_authorization"),
+                        ),
+                        methodology: yaml_string_list(map.get("methodology")),
                     };
                     tools.push(tool);
                 }
@@ -697,6 +737,11 @@ fn parse_tools_section(tools_section: &str) -> Vec<SkillTool> {
                         mcp_backed: false,
                         requires_network: false,
                         filesystem: FilesystemAccess::None,
+                        safety_profile: None,
+                        requires_active_authorization: false,
+                        requires_oob_authorization: false,
+                        requires_destructive_authorization: false,
+                        methodology: Vec::new(),
                     });
                 }
                 _ => {}
@@ -732,6 +777,11 @@ fn parse_tools_section(tools_section: &str) -> Vec<SkillTool> {
                     mcp_backed: false,
                     requires_network: false,
                     filesystem: FilesystemAccess::None,
+                    safety_profile: None,
+                    requires_active_authorization: false,
+                    requires_oob_authorization: false,
+                    requires_destructive_authorization: false,
+                    methodology: Vec::new(),
                 });
             }
         }
@@ -751,10 +801,37 @@ fn parse_tools_section(tools_section: &str) -> Vec<SkillTool> {
                 mcp_backed: false,
                 requires_network: false,
                 filesystem: FilesystemAccess::None,
+                safety_profile: None,
+                requires_active_authorization: false,
+                requires_oob_authorization: false,
+                requires_destructive_authorization: false,
+                methodology: Vec::new(),
             });
         }
     }
     tools
+}
+
+fn yaml_bool(value: Option<&serde_yaml::Value>) -> bool {
+    value.and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    match value {
+        Some(serde_yaml::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(str::trim))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(serde_yaml::Value::String(s)) => s
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn parse_filesystem_access(value: &str) -> Option<FilesystemAccess> {
@@ -906,6 +983,11 @@ Tools:
                     mcp_backed: false,
                     requires_network: true,
                     filesystem: FilesystemAccess::ReadOnly,
+                    safety_profile: None,
+                    requires_active_authorization: false,
+                    requires_oob_authorization: false,
+                    requires_destructive_authorization: false,
+                    methodology: Vec::new(),
                 }],
                 skill_dir: PathBuf::from("skills/webex-room-conversation"),
                 skill_md: PathBuf::from("skills/webex-room-conversation/SKILL.md"),
@@ -938,6 +1020,11 @@ Tools:
                     mcp_backed: true,
                     requires_network: false,
                     filesystem: FilesystemAccess::None,
+                    safety_profile: None,
+                    requires_active_authorization: false,
+                    requires_oob_authorization: false,
+                    requires_destructive_authorization: false,
+                    methodology: Vec::new(),
                 }],
                 skill_dir: PathBuf::from("skills/splunk"),
                 skill_md: PathBuf::from("skills/splunk/SKILL.md"),
@@ -964,6 +1051,11 @@ Tools:
                 mcp_backed: false,
                 requires_network: true,
                 filesystem: FilesystemAccess::ReadOnly,
+                safety_profile: None,
+                requires_active_authorization: false,
+                requires_oob_authorization: false,
+                requires_destructive_authorization: false,
+                methodology: Vec::new(),
             }],
             skill_dir: PathBuf::from("skills/webex-room-conversation"),
             skill_md: PathBuf::from("skills/webex-room-conversation/SKILL.md"),
@@ -1150,6 +1242,15 @@ Run `scripts/run.py`.
             "web-websocket",
             "web-upload-content",
             "web-evidence-report",
+            "web-engagement-state",
+            "web-coverage-status",
+            "web-finding-validator",
+            "web-burp-mcp-review",
+            "web-browser-evidence",
+            "web-scanner-result-normalizer",
+            "web-js-route-extractor",
+            "web-payload-catalog",
+            "web-ai-feature-review",
         ];
 
         for name in expected {
@@ -1256,6 +1357,84 @@ Run `scripts/run.py`.
                     r#"[{"title":"Missing HSTS","severity":"low","confirmed":true}]"#,
                 ],
             ),
+            (
+                "skills/web-engagement-state/scripts/engagement_state.py",
+                vec![
+                    "--target-urls",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                    "--endpoints-json",
+                    r#"[{"method":"GET","path":"/api/users","parameters":["id"]}]"#,
+                ],
+            ),
+            (
+                "skills/web-coverage-status/scripts/coverage_status.py",
+                vec![
+                    "--coverage-json",
+                    r#"[{"wstg_ids":["WSTG-INPV-05"],"api_top10_ids":["API8"]}]"#,
+                ],
+            ),
+            (
+                "skills/web-finding-validator/scripts/finding_validator.py",
+                vec![
+                    "--scope-json",
+                    r#"{"target_urls":["https://example.com"],"allowed_hosts":["example.com"]}"#,
+                    "--finding-json",
+                    r#"{"affected_endpoint":"https://example.com/api/users/1","request":"GET /api/users/1 HTTP/1.1","response":"HTTP/1.1 200 OK","impact":"Read another user's profile","real_vulnerability":true,"client_reproducible":true}"#,
+                ],
+            ),
+            (
+                "skills/web-burp-mcp-review/scripts/burp_mcp_review.py",
+                vec![
+                    "--scope-json",
+                    r#"{"target_urls":["https://example.com"],"allowed_hosts":["example.com"]}"#,
+                    "--exchanges-json",
+                    r#"[{"method":"GET","url":"https://example.com/api/users?id=1","status":200,"artifact":"artifact-1"}]"#,
+                ],
+            ),
+            (
+                "skills/web-browser-evidence/scripts/browser_evidence.py",
+                vec![
+                    "--page-url",
+                    "https://example.com/app",
+                    "--routes",
+                    "/app,/api/users",
+                    "--forms-json",
+                    r#"[{"action":"/login","method":"POST"}]"#,
+                ],
+            ),
+            (
+                "skills/web-scanner-result-normalizer/scripts/scanner_result_normalizer.py",
+                vec![
+                    "--scope-json",
+                    r#"{"target_urls":["https://example.com"],"allowed_hosts":["example.com"]}"#,
+                    "--input-json",
+                    r#"[{"template-id":"missing-hsts","matched-at":"https://example.com","info":{"name":"Missing HSTS","severity":"low","tags":["header"]}}]"#,
+                ],
+            ),
+            (
+                "skills/web-js-route-extractor/scripts/js_route_extractor.py",
+                vec![
+                    "--input-text",
+                    r#"<script src="/app.js"></script><form action="/login"><input name="email"></form><script>fetch('/api/users?id=1'); const ws='wss://example.com/socket';</script>"#,
+                ],
+            ),
+            (
+                "skills/web-payload-catalog/scripts/payload_catalog.py",
+                vec!["--categories", "sqli,xss"],
+            ),
+            (
+                "skills/web-ai-feature-review/scripts/ai_feature_review.py",
+                vec![
+                    "--features",
+                    "chat assistant",
+                    "--tools",
+                    "ticket_search",
+                    "--data-sources",
+                    "knowledge base",
+                ],
+            ),
         ];
 
         for (script, args) in scripts {
@@ -1302,6 +1481,35 @@ Run `scripts/run.py`.
                 .unwrap()
                 .contains("active network testing requires")
         );
+
+        let redaction_failure = run_python_json(
+            &root.join("skills/web-finding-validator/scripts/finding_validator.py"),
+            &[
+                "--scope-json",
+                r#"{"target_urls":["https://example.com"],"allowed_hosts":["example.com"]}"#,
+                "--finding-json",
+                r#"{"affected_endpoint":"https://example.com/api/users/1","request":"GET /api/users/1 HTTP/1.1\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz1234567890","response":"HTTP/1.1 200 OK","impact":"Read another user's profile","real_vulnerability":true,"client_reproducible":true}"#,
+            ],
+        );
+        assert_eq!(redaction_failure["recommended_status"], "rejected");
+        assert!(
+            redaction_failure["validation_gates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gate| gate["gate"] == "credential-redaction" && gate["status"] == "fail")
+        );
+
+        let report = run_python_json(
+            &root.join("skills/web-evidence-report/scripts/evidence_report.py"),
+            &[
+                "--findings-json",
+                r#"[{"title":"Validated issue","status":"validated","evidence":"artifact-1"},{"title":"Scanner lead","status":"lead","evidence":"artifact-2"}]"#,
+            ],
+        );
+        assert_eq!(report["finding_count"], 1);
+        assert_eq!(report["lead_count"], 1);
+        assert!(report["report_markdown"].as_str().unwrap().contains("## Leads And Gaps"));
     }
 
     fn run_python_json(script: &std::path::Path, args: &[&str]) -> Value {

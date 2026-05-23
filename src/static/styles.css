@@ -1503,6 +1503,26 @@ select:-webkit-autofill {
   justify-content: flex-end;
 }
 
+.conversation-usage {
+  flex: 1 1 240px;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.usage-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid rgba(141, 165, 180, 0.18);
+  border-radius: 2px;
+  padding: 0.2rem 0.5rem;
+  background: rgba(255, 255, 255, 0.035);
+  white-space: nowrap;
+}
+
 .control-label {
   color: var(--text-secondary);
   font-size: 0.72rem;

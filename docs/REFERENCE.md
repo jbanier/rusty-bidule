@@ -335,6 +335,15 @@ recipes are authorized-only: active requests, destructive tests, OOB callbacks,
 brute force, DoS, and WAF evasion remain disabled unless the captured scope
 explicitly permits them.
 
+Newer web helpers add engagement-state normalization, coverage tracking,
+finding validation gates, Burp MCP/proxy-history review, browser evidence
+normalization, scanner-result normalization for ZAP/Nuclei output, JavaScript
+route extraction, safety-labeled payload cataloging, and AI-feature review.
+Finding records can store validation status, severity, affected endpoint,
+vulnerability class, WSTG/API mappings, evidence artifact references, and gate
+results. Tool output evidence is redacted before persistence so HTTP headers and
+token-like values are not written with live credentials.
+
 On Ubuntu, `scripts/setup-web-assessment-tools.sh` installs the supporting
 assessment binaries. It uses apt for packaged tools and, unless `--apt-only` is
 set, fills common Ubuntu package gaps with upstream Go/npm/gem installers.

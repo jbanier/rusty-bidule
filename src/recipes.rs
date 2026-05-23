@@ -14,6 +14,11 @@ pub struct Recipe {
     pub title: Option<String>,
     pub description: Option<String>,
     pub keywords: Vec<String>,
+    pub safety_profile: Option<String>,
+    pub requires_active_authorization: bool,
+    pub requires_oob_authorization: bool,
+    pub requires_destructive_authorization: bool,
+    pub methodology: Vec<String>,
     pub instructions: String,
     pub initial_prompt: Option<String>,
     pub config_mcp_servers: Option<Vec<String>>,
@@ -46,6 +51,25 @@ impl Recipe {
 
     fn prompt_guidance_with_workflow(&self, include_workflow: bool) -> String {
         let mut parts = Vec::new();
+        let mut metadata = Vec::new();
+        if let Some(safety_profile) = self.safety_profile.as_deref() {
+            metadata.push(format!("safety_profile={safety_profile}"));
+        }
+        if self.requires_active_authorization {
+            metadata.push("requires_active_authorization=true".to_string());
+        }
+        if self.requires_oob_authorization {
+            metadata.push("requires_oob_authorization=true".to_string());
+        }
+        if self.requires_destructive_authorization {
+            metadata.push("requires_destructive_authorization=true".to_string());
+        }
+        if !self.methodology.is_empty() {
+            metadata.push(format!("methodology={}", self.methodology.join(", ")));
+        }
+        if !metadata.is_empty() {
+            parts.push(format!("Safety and methodology metadata:\n{}", metadata.join("\n")));
+        }
         if !self.instructions.trim().is_empty() {
             parts.push(format!("Instructions:\n{}", self.instructions.trim()));
         }
@@ -117,6 +141,11 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
     let mut title = None;
     let mut description = None;
     let mut keywords = Vec::new();
+    let mut safety_profile = None;
+    let mut requires_active_authorization = false;
+    let mut requires_oob_authorization = false;
+    let mut requires_destructive_authorization = false;
+    let mut methodology = Vec::new();
 
     if let Some(yaml) = doc.frontmatter.as_ref() {
         name = yaml
@@ -133,6 +162,15 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
             .and_then(|v| v.as_str())
             .map(str::to_string);
         keywords = parse_keywords(yaml);
+        safety_profile = yaml
+            .get("safety_profile")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        requires_active_authorization = yaml_bool(yaml.get("requires_active_authorization"));
+        requires_oob_authorization = yaml_bool(yaml.get("requires_oob_authorization"));
+        requires_destructive_authorization =
+            yaml_bool(yaml.get("requires_destructive_authorization"));
+        methodology = yaml_string_vec(yaml.get("methodology"));
     } else {
         name = path
             .parent()
@@ -154,6 +192,11 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
         title,
         description,
         keywords,
+        safety_profile,
+        requires_active_authorization,
+        requires_oob_authorization,
+        requires_destructive_authorization,
+        methodology,
         instructions,
         initial_prompt,
         config_mcp_servers: config.mcp_servers,
@@ -163,6 +206,28 @@ fn parse_recipe_md(path: &Path, _recipe_dir: PathBuf) -> Result<Recipe> {
         workflow,
         response_template,
     })
+}
+
+fn yaml_bool(value: Option<&serde_yaml::Value>) -> bool {
+    value.and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn yaml_string_vec(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    match value {
+        Some(serde_yaml::Value::Sequence(seq)) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(str::trim))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(serde_yaml::Value::String(s)) => s
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn non_empty_section(doc: &ParsedMarkdownDoc, heading: &str) -> Option<String> {
@@ -373,6 +438,11 @@ Workflow:
             "web-app-business-logic-race",
             "web-app-cms-wordpress",
             "web-app-final-report",
+            "web-app-engagement-governance",
+            "web-app-burp-mcp-review",
+            "web-app-browser-evidence",
+            "web-app-scanner-normalization",
+            "web-app-ai-feature-review",
         ];
 
         for name in expected {

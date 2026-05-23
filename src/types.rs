@@ -524,11 +524,47 @@ pub struct RetentionBlockedItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindingValidationGate {
+    pub gate: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FindingRecordDetails {
+    pub status: Option<String>,
+    pub severity: Option<String>,
+    pub affected_endpoint: Option<String>,
+    pub vuln_class: Option<String>,
+    pub wstg_ids: Option<Vec<String>>,
+    pub api_top10_ids: Option<Vec<String>>,
+    pub evidence_artifacts: Option<Vec<String>>,
+    pub validation_gates: Option<Vec<FindingValidationGate>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FindingRecord {
     pub finding_id: String,
     pub conversation_id: String,
     pub kind: String,
     pub value: String,
+    #[serde(default = "default_finding_status")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vuln_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wstg_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_top10_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_gates: Vec<FindingValidationGate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -563,6 +599,14 @@ impl FindingRecord {
             conversation_id,
             kind,
             value,
+            status: default_finding_status(),
+            severity: None,
+            affected_endpoint: None,
+            vuln_class: None,
+            wstg_ids: Vec::new(),
+            api_top10_ids: Vec::new(),
+            evidence_artifacts: Vec::new(),
+            validation_gates: Vec::new(),
             note,
             tags,
             confidence,
@@ -572,6 +616,37 @@ impl FindingRecord {
         })
     }
 
+    pub fn apply_details(&mut self, details: FindingRecordDetails) -> Result<()> {
+        if let Some(status) = details.status {
+            self.status = normalize_finding_status(&status)?;
+        }
+        if let Some(severity) = details.severity {
+            self.severity = normalize_optional_finding_text(&severity);
+        }
+        if let Some(endpoint) = details.affected_endpoint {
+            self.affected_endpoint = normalize_optional_finding_text(&endpoint);
+        }
+        if let Some(vuln_class) = details.vuln_class {
+            self.vuln_class = normalize_optional_finding_text(&vuln_class);
+        }
+        if let Some(wstg_ids) = details.wstg_ids {
+            self.wstg_ids = normalize_finding_list(&wstg_ids);
+        }
+        if let Some(api_top10_ids) = details.api_top10_ids {
+            self.api_top10_ids = normalize_finding_list(&api_top10_ids);
+        }
+        if let Some(evidence_artifacts) = details.evidence_artifacts {
+            self.evidence_artifacts = normalize_finding_list(&evidence_artifacts);
+        }
+        if let Some(validation_gates) = details.validation_gates {
+            self.validation_gates = validation_gates
+                .into_iter()
+                .filter_map(normalize_validation_gate)
+                .collect();
+        }
+        self.validate_for_storage()
+    }
+
     pub fn set_confidence(&mut self, confidence: Option<u8>) -> Result<()> {
         validate_finding_confidence(confidence)?;
         self.confidence = confidence;
@@ -579,8 +654,25 @@ impl FindingRecord {
     }
 
     pub fn validate_for_storage(&self) -> Result<()> {
-        validate_finding_confidence(self.confidence)
+        validate_finding_confidence(self.confidence)?;
+        validate_finding_status(&self.status)?;
+        validate_optional_finding_text(self.severity.as_deref(), "severity")?;
+        validate_optional_finding_text(self.affected_endpoint.as_deref(), "affected_endpoint")?;
+        validate_optional_finding_text(self.vuln_class.as_deref(), "vuln_class")?;
+        validate_finding_list(&self.wstg_ids, "wstg_ids")?;
+        validate_finding_list(&self.api_top10_ids, "api_top10_ids")?;
+        validate_finding_list(&self.evidence_artifacts, "evidence_artifacts")?;
+        for gate in &self.validation_gates {
+            validate_required_finding_text(&gate.gate, "validation_gates.gate")?;
+            validate_finding_gate_status(&gate.status)?;
+            validate_optional_finding_text(gate.reason.as_deref(), "validation_gates.reason")?;
+        }
+        Ok(())
     }
+}
+
+fn default_finding_status() -> String {
+    "lead".to_string()
 }
 
 fn validate_finding_confidence(confidence: Option<u8>) -> Result<()> {
@@ -592,6 +684,86 @@ fn validate_finding_confidence(confidence: Option<u8>) -> Result<()> {
             FindingRecord::MIN_CONFIDENCE,
             FindingRecord::MAX_CONFIDENCE
         );
+    }
+    Ok(())
+}
+
+fn normalize_finding_status(status: &str) -> Result<String> {
+    let status = status.trim().replace('_', "-").to_ascii_lowercase();
+    validate_finding_status(&status)?;
+    Ok(status)
+}
+
+fn validate_finding_status(status: &str) -> Result<()> {
+    match status {
+        "lead" | "unvalidated" | "needs-work" | "validated" | "rejected" => Ok(()),
+        _ => bail!(
+            "invalid finding status: expected lead, unvalidated, needs-work, validated, or rejected"
+        ),
+    }
+}
+
+fn validate_finding_gate_status(status: &str) -> Result<()> {
+    match status.trim().replace('_', "-").to_ascii_lowercase().as_str() {
+        "pass" | "fail" | "needs-work" | "not-applicable" | "unknown" => Ok(()),
+        _ => bail!(
+            "invalid validation gate status: expected pass, fail, needs-work, not-applicable, or unknown"
+        ),
+    }
+}
+
+fn normalize_optional_finding_text(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn normalize_finding_list(values: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+            out.push(value.to_string());
+        }
+    }
+    out
+}
+
+fn normalize_validation_gate(gate: FindingValidationGate) -> Option<FindingValidationGate> {
+    let gate_name = gate.gate.trim();
+    if gate_name.is_empty() {
+        return None;
+    }
+    Some(FindingValidationGate {
+        gate: gate_name.to_string(),
+        status: gate.status.trim().replace('_', "-").to_ascii_lowercase(),
+        reason: gate.reason.and_then(|reason| normalize_optional_finding_text(&reason)),
+    })
+}
+
+fn validate_optional_finding_text(value: Option<&str>, field: &str) -> Result<()> {
+    if let Some(value) = value {
+        validate_required_finding_text(value, field)?;
+    }
+    Ok(())
+}
+
+fn validate_required_finding_text(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("invalid finding {field}: value must not be empty");
+    }
+    if value.contains(['\n', '\r']) {
+        bail!("invalid finding {field}: value must be single-line");
+    }
+    Ok(())
+}
+
+fn validate_finding_list(values: &[String], field: &str) -> Result<()> {
+    for value in values {
+        validate_required_finding_text(value, field)?;
     }
     Ok(())
 }

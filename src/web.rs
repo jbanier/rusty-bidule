@@ -22,8 +22,9 @@ use crate::{
     recipes::RecipeRegistry,
     schedules::{ScheduleCreateRequest, build_schedule_record, run_schedule_by_id},
     types::{
-        AgentBudgetOverride, ConversationSummary, FilesystemAccess, FilesystemScope, ProgressEvent,
-        RetentionPolicy, RunTurnResult, UiEvent,
+        AgentBudgetOverride, ConversationSummary, FilesystemAccess, FilesystemScope,
+        FindingRecordDetails, FindingValidationGate, ProgressEvent, RetentionPolicy,
+        RunTurnResult, UiEvent,
     },
 };
 
@@ -185,11 +186,38 @@ struct ScratchpadBody {
 struct FindingBody {
     kind: String,
     value: String,
+    status: Option<String>,
+    severity: Option<String>,
+    affected_endpoint: Option<String>,
+    vuln_class: Option<String>,
+    #[serde(default)]
+    wstg_ids: Option<Vec<String>>,
+    #[serde(default)]
+    api_top10_ids: Option<Vec<String>>,
+    #[serde(default)]
+    evidence_artifacts: Option<Vec<String>>,
+    #[serde(default)]
+    validation_gates: Option<Vec<FindingValidationGate>>,
     note: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
     confidence: Option<u8>,
     source_artifact: Option<String>,
+}
+
+impl FindingBody {
+    fn details(&self) -> FindingRecordDetails {
+        FindingRecordDetails {
+            status: self.status.clone(),
+            severity: self.severity.clone(),
+            affected_endpoint: self.affected_endpoint.clone(),
+            vuln_class: self.vuln_class.clone(),
+            wstg_ids: self.wstg_ids.clone(),
+            api_top10_ids: self.api_top10_ids.clone(),
+            evidence_artifacts: self.evidence_artifacts.clone(),
+            validation_gates: self.validation_gates.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -1055,7 +1083,7 @@ async fn create_finding(
     axum::Json(body): axum::Json<FindingBody>,
 ) -> AppResult<(StatusCode, axum::Json<serde_json::Value>)> {
     validate_resource_id(&id, "conversation")?;
-    let finding = state.orchestrator.store().add_finding(
+    let finding = state.orchestrator.store().add_finding_detailed(
         &id,
         &body.kind,
         &body.value,
@@ -1063,6 +1091,7 @@ async fn create_finding(
         &body.tags,
         body.confidence,
         body.source_artifact.as_deref(),
+        body.details(),
     )?;
     Ok((
         StatusCode::CREATED,
@@ -1079,7 +1108,7 @@ async fn update_finding(
     let finding = state
         .orchestrator
         .store()
-        .update_finding(
+        .update_finding_detailed(
             &finding_id,
             &body.kind,
             &body.value,
@@ -1087,6 +1116,7 @@ async fn update_finding(
             &body.tags,
             body.confidence,
             body.source_artifact.as_deref(),
+            body.details(),
         )?
         .ok_or_else(|| anyhow::anyhow!("finding '{finding_id}' not found"))?;
     Ok(axum::Json(serde_json::to_value(finding)?))
@@ -1524,7 +1554,7 @@ mod tests {
         config::{AppConfig, LocalToolsConfig, McpRuntimeConfig, SkillsConfig},
         orchestrator::Orchestrator,
         recipes::RecipeRegistry,
-        types::{AgentPermissions, FilesystemAccess, FilesystemScope},
+        types::{AgentPermissions, FilesystemAccess, FilesystemScope, FindingValidationGate},
     };
 
     use super::{
@@ -1855,6 +1885,14 @@ mod tests {
             axum::Json(FindingBody {
                 kind: "ip".to_string(),
                 value: "5.6.7.8".to_string(),
+                status: Some("lead".to_string()),
+                severity: Some("low".to_string()),
+                affected_endpoint: Some("https://example.com/api/users/5".to_string()),
+                vuln_class: Some("access-control".to_string()),
+                wstg_ids: Some(vec!["WSTG-ATHZ".to_string()]),
+                api_top10_ids: Some(vec!["API1".to_string()]),
+                evidence_artifacts: Some(vec!["artifact-1".to_string()]),
+                validation_gates: None,
                 note: Some("watchlist".to_string()),
                 tags: vec!["network".to_string()],
                 confidence: Some(70),
@@ -1871,6 +1909,9 @@ mod tests {
             .0;
         assert_eq!(findings.as_array().unwrap().len(), 1);
         assert_eq!(findings[0]["confidence"], 70);
+        assert_eq!(findings[0]["status"], "lead");
+        assert_eq!(findings[0]["severity"], "low");
+        assert_eq!(findings[0]["wstg_ids"][0], "WSTG-ATHZ");
 
         let results = search_local(
             State(state),
@@ -1996,6 +2037,18 @@ mod tests {
             axum::Json(FindingBody {
                 kind: "domain".to_string(),
                 value: "example.org".to_string(),
+                status: Some("validated".to_string()),
+                severity: Some("medium".to_string()),
+                affected_endpoint: Some("https://example.org/login".to_string()),
+                vuln_class: Some("configuration".to_string()),
+                wstg_ids: Some(vec!["WSTG-CONF".to_string()]),
+                api_top10_ids: None,
+                evidence_artifacts: Some(vec!["mail.eml".to_string()]),
+                validation_gates: Some(vec![FindingValidationGate {
+                    gate: "credential-redaction".to_string(),
+                    status: "pass".to_string(),
+                    reason: Some("reviewed".to_string()),
+                }]),
                 note: Some("promoted".to_string()),
                 tags: vec!["ioc".to_string(), "phishing".to_string()],
                 confidence: Some(95),
@@ -2007,6 +2060,8 @@ mod tests {
         .0;
 
         assert_eq!(updated["kind"], "domain");
+        assert_eq!(updated["status"], "validated");
+        assert_eq!(updated["validation_gates"][0]["status"], "pass");
         assert_eq!(updated["confidence"], 95);
         assert_eq!(updated["source_artifact"], "mail.eml");
     }

@@ -572,6 +572,13 @@ steps. Scanner output is treated as a lead until manually validated, and recipes
 preserve uncertainty, authorization gaps, and unresolved defensive follow-up in
 investigation memory.
 
+Additional web assessment helpers support engagement-state normalization,
+WSTG/API coverage tracking, strict finding validation gates, Burp MCP or proxy
+history triage, browser evidence organization, ZAP/Nuclei result normalization,
+JavaScript route extraction, safety-labeled payload references, and AI-feature
+review. These helpers keep scanner and payload-derived observations as `lead`
+status until scope, evidence, impact, reproducibility, and redaction checks pass.
+
 ## Persistence, Logging, And Evidence
 
 Durable output is split by purpose:

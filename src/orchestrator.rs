@@ -290,10 +290,28 @@ impl Orchestrator {
                 "reasoning_controls": capabilities.reasoning_controls,
             })
         });
+        let token_pricing = match self.inner.config.effective_llm_provider() {
+            Some(crate::config::LlmProvider::AzureAnthropic) => self
+                .inner
+                .config
+                .azure_anthropic
+                .as_ref()
+                .and_then(|config| {
+                    let input = config.input_cost_per_million_tokens?;
+                    let output = config.output_cost_per_million_tokens?;
+                    Some(json!({
+                        "currency": "USD",
+                        "input_cost_per_million_tokens": input,
+                        "output_cost_per_million_tokens": output,
+                    }))
+                }),
+            _ => None,
+        };
         json!({
             "provider": self.inner.config.effective_llm_provider(),
             "provider_label": self.inner.llm.provider_label(),
             "capabilities": capabilities,
+            "token_pricing": token_pricing,
         })
     }
 
@@ -2834,8 +2852,8 @@ mod tests {
 
     use crate::{
         config::{
-            AppConfig, DEFAULT_MAX_ADVERTISED_TOOLS, LocalToolsConfig, McpRuntimeConfig,
-            McpServerConfig, SkillsConfig,
+            AppConfig, AzureAnthropicConfig, DEFAULT_MAX_ADVERTISED_TOOLS, LlmProvider,
+            LocalToolsConfig, McpRuntimeConfig, McpServerConfig, SkillsConfig,
         },
         conversation_store::ConversationStore,
         llm::{LlmAssistantBlock, LlmMessage, LlmTool},
@@ -2878,6 +2896,40 @@ mod tests {
             mcp_servers: Vec::new(),
             tracing: None,
         }
+    }
+
+    #[test]
+    fn model_status_exposes_active_azure_anthropic_pricing() {
+        let dir = tempdir().unwrap();
+        let mut config = test_app_config(dir.path().to_path_buf());
+        config.llm_provider = Some(LlmProvider::AzureAnthropic);
+        config.azure_anthropic = Some(AzureAnthropicConfig {
+            api_key: "test-key".to_string(),
+            api_version: None,
+            anthropic_version: Some("2023-06-01".to_string()),
+            endpoint: "https://example.invalid/anthropic/".to_string(),
+            deployment: "claude-opus-4-6".to_string(),
+            temperature: 0.2,
+            top_p: None,
+            max_output_tokens: 512,
+            max_advertised_tools: 128,
+            input_cost_per_million_tokens: Some(0.3),
+            output_cost_per_million_tokens: Some(15.0),
+        });
+        let orchestrator = super::Orchestrator::new(config).unwrap();
+
+        let status = orchestrator.model_status();
+
+        assert_eq!(status["provider"], json!("azure_anthropic"));
+        assert_eq!(status["token_pricing"]["currency"], json!("USD"));
+        assert_eq!(
+            status["token_pricing"]["input_cost_per_million_tokens"],
+            json!(0.3)
+        );
+        assert_eq!(
+            status["token_pricing"]["output_cost_per_million_tokens"],
+            json!(15.0)
+        );
     }
 
     #[test]
@@ -2926,6 +2978,11 @@ mod tests {
             title: None,
             description: None,
             keywords: Vec::new(),
+            safety_profile: None,
+            requires_active_authorization: false,
+            requires_oob_authorization: false,
+            requires_destructive_authorization: false,
+            methodology: Vec::new(),
             instructions: String::new(),
             initial_prompt: None,
             config_mcp_servers: None,
@@ -3204,6 +3261,11 @@ mod tests {
             title: None,
             description: None,
             keywords: Vec::new(),
+            safety_profile: None,
+            requires_active_authorization: false,
+            requires_oob_authorization: false,
+            requires_destructive_authorization: false,
+            methodology: Vec::new(),
             instructions: "Stay scoped.".to_string(),
             initial_prompt: None,
             config_mcp_servers: None,
@@ -3261,6 +3323,11 @@ steps:
             title: None,
             description: None,
             keywords: Vec::new(),
+            safety_profile: None,
+            requires_active_authorization: false,
+            requires_oob_authorization: false,
+            requires_destructive_authorization: false,
+            methodology: Vec::new(),
             instructions: "Stay scoped.".to_string(),
             initial_prompt: None,
             config_mcp_servers: None,

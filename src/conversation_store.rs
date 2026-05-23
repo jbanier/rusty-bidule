@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 
 use crate::types::{
     ActivatedSkill, AgentPermissions, AuditEvent, Conversation, ConversationSummary, FindingRecord,
-    InvestigationMemory, Message, MessageMetadata, RememberedJob, RetentionBlockedItem,
-    RetentionItem, RetentionPolicy, RetentionPreview, ScheduleRecord, SearchResult, ToolArtifact,
-    TurnContinuation, WorkflowRun,
+    FindingRecordDetails, InvestigationMemory, Message, MessageMetadata, RememberedJob,
+    RetentionBlockedItem, RetentionItem, RetentionPolicy, RetentionPreview, ScheduleRecord,
+    SearchResult, ToolArtifact, TurnContinuation, WorkflowRun,
 };
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -478,9 +478,33 @@ impl ConversationStore {
         confidence: Option<u8>,
         source_artifact: Option<&str>,
     ) -> Result<FindingRecord> {
+        self.add_finding_detailed(
+            conversation_id,
+            kind,
+            value,
+            note,
+            tags,
+            confidence,
+            source_artifact,
+            FindingRecordDetails::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_finding_detailed(
+        &self,
+        conversation_id: &str,
+        kind: &str,
+        value: &str,
+        note: Option<&str>,
+        tags: &[String],
+        confidence: Option<u8>,
+        source_artifact: Option<&str>,
+        details: FindingRecordDetails,
+    ) -> Result<FindingRecord> {
         validate_conversation_id(conversation_id)?;
         let now = Utc::now();
-        let finding = FindingRecord::new(
+        let mut finding = FindingRecord::new(
             format!(
                 "finding-{}-{:08x}",
                 now.format("%Y%m%d%H%M%S"),
@@ -494,6 +518,7 @@ impl ConversationStore {
             confidence,
             source_artifact.map(str::to_string),
         )?;
+        finding.apply_details(details)?;
         let mut findings = self.load_findings()?;
         findings.push(finding.clone());
         findings.sort_by_key(|finding| std::cmp::Reverse(finding.updated_at));
@@ -512,6 +537,30 @@ impl ConversationStore {
         confidence: Option<u8>,
         source_artifact: Option<&str>,
     ) -> Result<Option<FindingRecord>> {
+        self.update_finding_detailed(
+            finding_id,
+            kind,
+            value,
+            note,
+            tags,
+            confidence,
+            source_artifact,
+            FindingRecordDetails::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_finding_detailed(
+        &self,
+        finding_id: &str,
+        kind: &str,
+        value: &str,
+        note: Option<&str>,
+        tags: &[String],
+        confidence: Option<u8>,
+        source_artifact: Option<&str>,
+        details: FindingRecordDetails,
+    ) -> Result<Option<FindingRecord>> {
         let mut findings = self.load_findings()?;
         let mut updated = None;
         for finding in &mut findings {
@@ -524,6 +573,7 @@ impl ConversationStore {
             finding.tags = normalize_tags(tags);
             finding.set_confidence(confidence)?;
             finding.source_artifact = normalize_optional_text(source_artifact);
+            finding.apply_details(details.clone())?;
             finding.updated_at = Utc::now();
             updated = Some(finding.clone());
             break;
@@ -845,10 +895,17 @@ impl ConversationStore {
 
         for finding in self.load_findings()? {
             let haystack = format!(
-                "{} {} {} {} {} {} {}",
+                "{} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                 finding.conversation_id,
                 finding.kind,
                 finding.value,
+                finding.status,
+                finding.severity.as_deref().unwrap_or(""),
+                finding.affected_endpoint.as_deref().unwrap_or(""),
+                finding.vuln_class.as_deref().unwrap_or(""),
+                finding.wstg_ids.join(" "),
+                finding.api_top10_ids.join(" "),
+                finding.evidence_artifacts.join(" "),
                 finding.note.as_deref().unwrap_or(""),
                 finding.tags.join(" "),
                 finding
@@ -864,9 +921,20 @@ impl ConversationStore {
                     title: format!("{} / {}", finding.conversation_id, finding.finding_id),
                     snippet: summarize_match(
                         &format!(
-                            "{}: {}{}{}{}{}",
+                            "{}: {} // status: {}{}{}{}{}{}{}",
                             finding.kind,
                             finding.value,
+                            finding.status,
+                            finding
+                                .severity
+                                .as_deref()
+                                .map(|severity| format!(" // severity: {severity}"))
+                                .unwrap_or_default(),
+                            finding
+                                .affected_endpoint
+                                .as_deref()
+                                .map(|endpoint| format!(" // endpoint: {endpoint}"))
+                                .unwrap_or_default(),
                             finding
                                 .note
                                 .as_deref()
@@ -1470,8 +1538,9 @@ mod tests {
     use crate::{
         llm::LlmMessage,
         types::{
-            AgentPermissions, InvestigationMemory, RetentionPolicy, ScheduleCadence,
-            ScheduleIntervalUnit, ScheduleRecord, ToolArtifact, TurnContinuation,
+            AgentPermissions, FindingRecordDetails, InvestigationMemory, RetentionPolicy,
+            ScheduleCadence, ScheduleIntervalUnit, ScheduleRecord, ToolArtifact,
+            TurnContinuation,
         },
     };
 
@@ -1818,6 +1887,44 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("invalid finding confidence"));
+    }
+
+    #[test]
+    fn findings_store_validation_metadata() {
+        let dir = tempdir().unwrap();
+        let store = ConversationStore::new(dir.path(), AgentPermissions::default());
+        let conversation = store.create_conversation().unwrap();
+
+        let finding = store
+            .add_finding_detailed(
+                &conversation.conversation_id,
+                "web",
+                "IDOR on profile endpoint",
+                Some("validated manually"),
+                &["web".to_string()],
+                Some(95),
+                Some("tool_output/request.txt"),
+                FindingRecordDetails {
+                    status: Some("validated".to_string()),
+                    severity: Some("high".to_string()),
+                    affected_endpoint: Some("https://example.com/api/users/2".to_string()),
+                    vuln_class: Some("access-control".to_string()),
+                    wstg_ids: Some(vec!["WSTG-ATHZ".to_string()]),
+                    api_top10_ids: Some(vec!["API1".to_string()]),
+                    evidence_artifacts: Some(vec!["artifact-1".to_string()]),
+                    validation_gates: Some(vec![crate::types::FindingValidationGate {
+                        gate: "in-scope".to_string(),
+                        status: "pass".to_string(),
+                        reason: Some("allowed host".to_string()),
+                    }]),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(finding.status, "validated");
+        assert_eq!(finding.severity.as_deref(), Some("high"));
+        assert_eq!(finding.wstg_ids, vec!["WSTG-ATHZ"]);
+        assert_eq!(finding.validation_gates[0].status, "pass");
     }
 
     #[test]

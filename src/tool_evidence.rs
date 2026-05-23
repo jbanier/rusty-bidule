@@ -4,7 +4,11 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::Value;
 
-use crate::{conversation_store::ConversationStore, redaction::redact_value, types::ToolArtifact};
+use crate::{
+    conversation_store::ConversationStore,
+    redaction::{redact_tool_output, redact_value},
+    types::ToolArtifact,
+};
 
 #[derive(Debug, Clone)]
 pub struct ToolEvidenceWriter {
@@ -34,11 +38,12 @@ impl ToolEvidenceWriter {
             .join(&relative_path);
         let created_at = Utc::now();
         let arguments_redacted = redact_value(arguments);
+        let output_redacted = redact_tool_output(raw_output);
         let payload = format!(
             "tool: {tool_name}\nstatus: {status}\ntimestamp: {}\narguments: {}\n\n{}",
             created_at.to_rfc3339(),
             serde_json::to_string_pretty(&arguments_redacted)?,
-            raw_output
+            output_redacted
         );
         fs::write(&path, payload)
             .with_context(|| format!("failed to write tool artifact {}", path.display()))?;
@@ -58,7 +63,7 @@ impl ToolEvidenceWriter {
             relative_path,
             byte_count,
             arguments_redacted,
-            preview: preview(raw_output),
+            preview: preview(&output_redacted),
         };
         self.store.append_tool_artifact(&artifact)?;
         self.store.append_audit_event(

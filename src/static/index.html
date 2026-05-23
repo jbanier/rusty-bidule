@@ -135,6 +135,7 @@
           >All off</button>
           <button id="permission-reset" class="control-button control-button-subtle" type="button">Reset</button>
         </div>
+        <div id="conversation-usage" class="bottom-control-group conversation-usage hidden" aria-label="Conversation usage"></div>
       </section>
       <div class="composer">
         <textarea id="message-input" placeholder="Select or start a conversation to begin." disabled></textarea>
@@ -414,6 +415,61 @@
     return remainder ? `${minutes}m ${String(remainder).padStart(2, '0')}s` : `${minutes}m`;
   }
 
+  function safeTokenCount(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.trunc(number) : 0;
+  }
+
+  function formatTokenCount(value) {
+    return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+  }
+
+  function conversationTokenTotals(messages) {
+    return (Array.isArray(messages) ? messages : []).reduce((totals, message) => {
+      const metadata = getMessageMetadata(message);
+      const usage = metadata.llm_usage && typeof metadata.llm_usage === 'object' ? metadata.llm_usage : null;
+      if (!usage) return totals;
+      totals.inputTokens += safeTokenCount(usage.input_tokens);
+      totals.outputTokens += safeTokenCount(usage.output_tokens);
+      return totals;
+    }, { inputTokens: 0, outputTokens: 0 });
+  }
+
+  function activeTokenPricing() {
+    const pricing = state.modelStatus && state.modelStatus.token_pricing && typeof state.modelStatus.token_pricing === 'object'
+      ? state.modelStatus.token_pricing
+      : null;
+    if (!pricing) return null;
+    const input = Number(pricing.input_cost_per_million_tokens);
+    const output = Number(pricing.output_cost_per_million_tokens);
+    if (!Number.isFinite(input) || input < 0 || !Number.isFinite(output) || output < 0) {
+      return null;
+    }
+    return { input, output };
+  }
+
+  function formatTokenCost(totals, pricing) {
+    if (!pricing) return 'cost:--';
+    const dollars = ((totals.inputTokens * pricing.input) + (totals.outputTokens * pricing.output)) / 1000000;
+    return `cost:$${dollars.toFixed(4)}`;
+  }
+
+  function renderConversationUsage() {
+    if (!conversationUsageEl) return;
+    if (!state.activeConversationId) {
+      conversationUsageEl.classList.add('hidden');
+      conversationUsageEl.innerHTML = '';
+      return;
+    }
+    const totals = conversationTokenTotals(state.activeConversation && state.activeConversation.messages);
+    conversationUsageEl.classList.remove('hidden');
+    conversationUsageEl.innerHTML = `
+      <span class="usage-chip">tok:in=${escapeHtml(formatTokenCount(totals.inputTokens))}</span>
+      <span class="usage-chip">out=${escapeHtml(formatTokenCount(totals.outputTokens))}</span>
+      <span class="usage-chip">${escapeHtml(formatTokenCost(totals, activeTokenPricing()))}</span>
+    `;
+  }
+
   function formatMessageRole(message) {
     if (message.role !== 'assistant') {
       return 'User';
@@ -520,6 +576,7 @@
   const permissionFilesystemScopeSelectEl = document.getElementById('permission-filesystem-scope');
   const permissionYoloButtonEl = document.getElementById('permission-yolo');
   const permissionResetButtonEl = document.getElementById('permission-reset');
+  const conversationUsageEl = document.getElementById('conversation-usage');
   const applyRecipeButtonEl = document.getElementById('apply-recipe');
   const clearRecipeButtonEl = document.getElementById('clear-recipe');
   const resetMcpButtonEl = document.getElementById('reset-mcp-servers');
@@ -1263,6 +1320,7 @@
     state.configDirty = false;
     state.configSaving = false;
     renderRestartNotice(payload.message || '');
+    renderConversationUsage();
     renderConfigForm();
   }
 
@@ -1293,6 +1351,7 @@
     state.configDirty = false;
     renderConfigErrors([]);
     renderRestartNotice(payload.message || '');
+    renderConversationUsage();
     renderConfigForm();
     setRunStatus('config', 'Configuration saved to disk. Restart the app to fully apply it.');
   }
@@ -2436,9 +2495,14 @@
   }
 
   function renderMessages(messages) {
+    const safeMessages = Array.isArray(messages) ? messages : [];
     streamEl.innerHTML = '';
+    if (state.activeConversation) {
+      state.activeConversation.messages = safeMessages;
+    }
+    renderConversationUsage();
     const template = document.getElementById('message-template');
-    messages.forEach((message) => {
+    safeMessages.forEach((message) => {
       const node = template.content.cloneNode(true);
       node.querySelector('.role').textContent = formatMessageRole(message);
       node.querySelector('.message-badges').innerHTML = renderAssistantBadges(message);
@@ -2667,6 +2731,7 @@
     }
     renderPermissionControls(state.activeConversation && state.activeConversation.agent_permissions);
     renderContinuationState();
+    renderConversationUsage();
 
     messageInputEl.disabled = !hasConversation || jobRunning;
     composerHintEl.classList.toggle('hidden', jobRunning);

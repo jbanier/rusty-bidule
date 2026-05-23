@@ -949,7 +949,7 @@ impl LocalToolExecutor {
         } else if let Some(hex) = hex {
             (decode_hex_bytes(hex)?, "hex")
         } else {
-            (Vec::new(), "empty")
+            bail!("write_file: missing payload; provide either 'text' or 'hex'");
         };
         if data.len() as u64 > self.max_file_write_bytes {
             bail!(
@@ -2272,7 +2272,7 @@ mod tests {
         types::{AgentPermissions, FilesystemAccess, FilesystemScope},
     };
 
-    use super::{LocalToolExecutor, SkillLaunchSpec, SkillProgram};
+    use super::{LocalToolExecutor, SkillLaunchSpec, SkillProgram, local_tool_definitions};
 
     fn file_tool_executor(root: &Path, permissions: AgentPermissions) -> LocalToolExecutor {
         let store = ConversationStore::new(root.join(".agent-data"), AgentPermissions::default());
@@ -3685,6 +3685,13 @@ Tools:
         });
 
         let err = executor
+            .execute("local__write_file", json!({"path": "empty.txt"}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing payload"));
+        assert!(!dir.path().join("empty.txt").exists());
+
+        let err = executor
             .execute(
                 "local__write_file",
                 json!({"path": "missing/created.txt", "text": "a"}),
@@ -3701,6 +3708,28 @@ Tools:
             .await
             .unwrap_err();
         assert!(err.to_string().contains("max_file_write_bytes"));
+    }
+
+    #[test]
+    fn write_file_schema_requires_text_or_hex_payload() {
+        let definitions = local_tool_definitions(None, &LocalToolsConfig::default(), None);
+        let read_file = definitions
+            .iter()
+            .find(|tool| tool.name == "local__read_file")
+            .unwrap();
+        let write_file = definitions
+            .iter()
+            .find(|tool| tool.name == "local__write_file")
+            .unwrap();
+
+        assert!(read_file.parameters.get("oneOf").is_none());
+        assert_eq!(
+            write_file.parameters["oneOf"],
+            json!([
+                {"required": ["text"]},
+                {"required": ["hex"]}
+            ])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3971,7 +4000,11 @@ pub fn local_tool_definitions(
                     "text": {"type": "string", "description": "UTF-8 text payload"},
                     "hex": {"type": "string", "description": "Hex-encoded binary payload; whitespace and optional 0x prefix are accepted"}
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "oneOf": [
+                    {"required": ["text"]},
+                    {"required": ["hex"]}
+                ]
             }),
         },
     ];

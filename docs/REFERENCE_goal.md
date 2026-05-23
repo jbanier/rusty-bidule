@@ -1,6 +1,11 @@
-# bidule2 Reference
+# Historical bidule2 Reference Goal
 
-`bidule2` is an investigation assistant for CSIRT workflows. It combines:
+This document is retained as historical design context for the earlier Python
+`bidule2` codebase. It is not the current `rusty-bidule` implementation
+reference. For current Rust behavior, use [`REFERENCE.md`](REFERENCE.md) and the
+repository [`README.md`](../README.md).
+
+The legacy Python `bidule2` design described below combines:
 
 - an Azure OpenAI-backed agent,
 - MCP servers that expose security tools,
@@ -8,7 +13,8 @@
 - a filesystem-backed conversation store,
 - and CLI/web interfaces over the same orchestrator.
 
-This document is the engineering and architecture reference for the repository as it exists today.
+The paths, module names, and framework references below belong to that legacy
+design and should not be used as current implementation guidance.
 
 ## Table Of Contents
 

@@ -94,10 +94,10 @@ Inline file inclusion requires filesystem read permission for the active
 conversation. If access is disabled, or the file cannot be resolved or read,
 the submission fails immediately.
 
-Recipes are currently guidance overlays for the model, not a deterministic
-playbook engine. They can bias tool usage and structure, but they do not yet
-enforce mandatory multi-step branching, variable passing, or guaranteed tool
-execution order.
+Recipes are prompt and configuration overlays for the model. Supported
+structured workflow sections, including `supervised_steps` and
+`iterative_research`, are executed by the workflow runner; unsupported workflow
+sections remain model guidance.
 
 ## Running Modes
 
@@ -603,3 +603,7 @@ User-facing setup and operation live here in `README.md`.
 
 Engineering details, architecture, runtime behavior, and interface references
 live in [`docs/REFERENCE.md`](docs/REFERENCE.md).
+
+[`docs/REFERENCE_goal.md`](docs/REFERENCE_goal.md) is retained only as a
+historical reference for the earlier Python `bidule2` design and is not the
+current implementation reference.

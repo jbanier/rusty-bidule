@@ -11,6 +11,8 @@
 - TUI, one-shot CLI, and web/API interfaces over the same orchestrator.
 
 This document describes the Rust client as implemented in this repository.
+`docs/REFERENCE_goal.md` is a historical reference for the earlier Python
+`bidule2` design and is not authoritative for current Rust behavior.
 
 ## Repository Layout
 

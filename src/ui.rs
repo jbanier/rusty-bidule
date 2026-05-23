@@ -18,6 +18,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    config::{AppConfig, LlmProvider},
     orchestrator::Orchestrator,
     paths::discover_project_root,
     prompt_expansion::expand_prompt_file_references,
@@ -133,6 +134,7 @@ pub struct App {
     configured_mcp_servers: Vec<String>,
     enabled_mcp_servers: Option<Vec<String>>,
     agent_permissions: AgentPermissions,
+    token_pricing: Option<TokenPricing>,
     messages: Vec<Message>,
     command_output: Vec<Message>,
     message_scroll: u16,
@@ -153,6 +155,64 @@ pub struct App {
     should_quit: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TokenPricing {
+    input_cost_per_million_tokens: f64,
+    output_cost_per_million_tokens: f64,
+}
+
+impl TokenPricing {
+    fn from_config(config: &AppConfig) -> Option<Self> {
+        if config.effective_llm_provider() != Some(LlmProvider::AzureAnthropic) {
+            return None;
+        }
+        let config = config.azure_anthropic.as_ref()?;
+        Some(Self {
+            input_cost_per_million_tokens: config.input_cost_per_million_tokens?,
+            output_cost_per_million_tokens: config.output_cost_per_million_tokens?,
+        })
+    }
+
+    fn estimated_cost_dollars(self, totals: ConversationTokenTotals) -> f64 {
+        ((totals.input_tokens as f64) * self.input_cost_per_million_tokens
+            + (totals.output_tokens as f64) * self.output_cost_per_million_tokens)
+            / 1_000_000.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ConversationTokenTotals {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+fn conversation_token_totals(messages: &[Message]) -> ConversationTokenTotals {
+    messages
+        .iter()
+        .fold(ConversationTokenTotals::default(), |mut totals, message| {
+            if let Some(usage) = message
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.llm_usage.as_ref())
+            {
+                totals.input_tokens = totals
+                    .input_tokens
+                    .saturating_add(usage.input_tokens.unwrap_or(0));
+                totals.output_tokens = totals
+                    .output_tokens
+                    .saturating_add(usage.output_tokens.unwrap_or(0));
+            }
+            totals
+        })
+}
+
+fn format_token_cost(pricing: Option<TokenPricing>, totals: ConversationTokenTotals) -> String {
+    let Some(pricing) = pricing else {
+        return "cost:--".to_string();
+    };
+    format!("cost:${:.4}", pricing.estimated_cost_dollars(totals))
+}
+
 struct TerminalRestoreGuard;
 
 impl Drop for TerminalRestoreGuard {
@@ -166,6 +226,7 @@ impl App {
         let current_conversation_id = orchestrator.ensure_default_conversation().await?;
         let conversation = orchestrator.store().load(&current_conversation_id)?;
         let configured_mcp_servers = orchestrator.configured_mcp_server_names();
+        let token_pricing = TokenPricing::from_config(&orchestrator.config());
         let messages = conversation.messages;
         let enabled_mcp_servers = conversation.enabled_mcp_servers;
         let agent_permissions = conversation.agent_permissions;
@@ -182,6 +243,7 @@ impl App {
             configured_mcp_servers,
             enabled_mcp_servers,
             agent_permissions,
+            token_pricing,
             messages,
             command_output: Vec::new(),
             message_scroll: 0,
@@ -425,7 +487,7 @@ impl App {
         .style(Style::default().bg(input_ink()))
     }
 
-    fn render_footer(&self) -> Paragraph<'static> {
+    fn footer_line(&self) -> Line<'static> {
         let mode = if self.inflight { "RUNNING" } else { "READY" };
         let input_mode = if self.multiline_buffer.is_some() {
             "MULTILINE"
@@ -479,8 +541,14 @@ impl App {
             .as_ref()
             .map(|buffer| format!("ml:{:>2}", buffer.len()))
             .unwrap_or_else(|| "ml:--".to_string());
+        let token_totals = conversation_token_totals(&self.messages);
+        let token_usage = format!(
+            "tok:in={} out={}",
+            token_totals.input_tokens, token_totals.output_tokens
+        );
+        let token_cost = format_token_cost(self.token_pricing, token_totals);
 
-        let line = Line::from(vec![
+        Line::from(vec![
             Span::styled(
                 "(:) ",
                 Style::default()
@@ -510,6 +578,10 @@ impl App {
                 format!("tools:{tool_calls}"),
                 Style::default().fg(synth_text()),
             ),
+            Span::raw("  "),
+            Span::styled(token_usage, Style::default().fg(synth_text())),
+            Span::raw("  "),
+            Span::styled(token_cost, Style::default().fg(synth_text())),
             Span::raw("  "),
             Span::styled(multiline, Style::default().fg(synth_text())),
             Span::raw("  "),
@@ -541,9 +613,11 @@ impl App {
                 format!("id:{}", self.current_conversation_id),
                 Style::default().fg(muted_synth()),
             ),
-        ]);
+        ])
+    }
 
-        Paragraph::new(Text::from(vec![line]))
+    fn render_footer(&self) -> Paragraph<'static> {
+        Paragraph::new(Text::from(vec![self.footer_line()]))
             .style(Style::default().fg(synth_text()).bg(panel_ink()))
     }
 
@@ -2735,18 +2809,22 @@ mod tests {
 
     use crate::{
         config::{
-            AppConfig, AzureOpenAiConfig, LlmProvider, LocalToolsConfig, McpRuntimeConfig,
-            McpServerConfig, SkillsConfig,
+            AppConfig, AzureAnthropicConfig, AzureOpenAiConfig, LlmProvider, LocalToolsConfig,
+            McpRuntimeConfig, McpServerConfig, SkillsConfig,
         },
         orchestrator::Orchestrator,
         prompt_expansion::expand_prompt_file_references,
-        types::{AgentPermissions, FilesystemAccess, FilesystemScope, Message, UiEvent},
+        types::{
+            AgentPermissions, FilesystemAccess, FilesystemScope, LlmUsage, Message,
+            MessageMetadata, MessageTiming, UiEvent,
+        },
     };
 
     use super::{
-        App, McpServerStatus, build_mcp_server_statuses, build_scroll_indicator_lines,
-        canonicalize_mcp_filter, count_wrapped_rows, max_message_scroll, neon_cyan, neon_gold,
-        neon_pink, ordered_messages, render_markdown, synth_text,
+        App, McpServerStatus, TokenPricing, build_mcp_server_statuses,
+        build_scroll_indicator_lines, canonicalize_mcp_filter, count_wrapped_rows,
+        max_message_scroll, neon_cyan, neon_gold, neon_pink, ordered_messages, render_markdown,
+        synth_text,
     };
 
     fn line_text(line: &ratatui::text::Line<'_>) -> String {
@@ -2806,6 +2884,68 @@ mod tests {
             Orchestrator::new(test_config(dir.path().to_path_buf(), mcp_servers)).unwrap();
         let app = App::new(orchestrator).await.unwrap();
         (dir, app)
+    }
+
+    #[test]
+    fn token_pricing_reads_active_azure_anthropic_config() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf(), &[]);
+        config.llm_provider = Some(LlmProvider::AzureAnthropic);
+        config.azure_openai = None;
+        config.azure_anthropic = Some(AzureAnthropicConfig {
+            api_key: "test-key".to_string(),
+            api_version: None,
+            anthropic_version: Some("2023-06-01".to_string()),
+            endpoint: "https://example.invalid/anthropic/".to_string(),
+            deployment: "claude-opus-4-6".to_string(),
+            temperature: 0.2,
+            top_p: None,
+            max_output_tokens: 512,
+            max_advertised_tools: 128,
+            input_cost_per_million_tokens: Some(0.3),
+            output_cost_per_million_tokens: Some(15.0),
+        });
+
+        let pricing = TokenPricing::from_config(&config).unwrap();
+
+        assert_eq!(pricing.input_cost_per_million_tokens, 0.3);
+        assert_eq!(pricing.output_cost_per_million_tokens, 15.0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn footer_shows_conversation_tokens_and_configured_cost() {
+        let (_dir, mut app) = test_app(&[]).await;
+        app.token_pricing = Some(TokenPricing {
+            input_cost_per_million_tokens: 0.3,
+            output_cost_per_million_tokens: 15.0,
+        });
+        app.messages.push(Message {
+            role: "assistant".to_string(),
+            content: "answer".to_string(),
+            timestamp: Utc::now(),
+            metadata: Some(MessageMetadata {
+                assistant_index: 1,
+                timing: MessageTiming {
+                    tool_seconds: 0.0,
+                    llm_seconds: 0.0,
+                    total_seconds: 0.0,
+                },
+                tool_call_count: 0,
+                llm_usage: Some(LlmUsage {
+                    input_tokens: Some(1_000_000),
+                    output_tokens: Some(1_000),
+                    total_tokens: Some(1_001_000),
+                    estimated_cost_micros: None,
+                    estimated_cost_currency: None,
+                }),
+                evidence: Vec::new(),
+            }),
+        });
+
+        let footer = line_text(&app.footer_line());
+
+        assert!(footer.contains("tok:in=1000000 out=1000"));
+        assert!(footer.contains("cost:$0.3150"));
     }
 
     async fn spawn_mock_mcp_server(tool_names: &[&str]) -> SocketAddr {

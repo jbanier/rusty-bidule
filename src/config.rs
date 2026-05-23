@@ -237,6 +237,10 @@ pub struct AzureAnthropicConfig {
     pub max_output_tokens: u32,
     #[serde(default = "default_max_advertised_tools")]
     pub max_advertised_tools: usize,
+    #[serde(default)]
+    pub input_cost_per_million_tokens: Option<f64>,
+    #[serde(default)]
+    pub output_cost_per_million_tokens: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -698,6 +702,25 @@ fn validate_azure_anthropic_config(
             );
         }
     }
+    validate_optional_cost_rate(
+        label,
+        "input_cost_per_million_tokens",
+        config.input_cost_per_million_tokens,
+    )?;
+    validate_optional_cost_rate(
+        label,
+        "output_cost_per_million_tokens",
+        config.output_cost_per_million_tokens,
+    )?;
+    Ok(())
+}
+
+fn validate_optional_cost_rate(label: &str, field: &str, value: Option<f64>) -> Result<()> {
+    if let Some(value) = value
+        && (!value.is_finite() || value < 0.0)
+    {
+        bail!("{label}.{field} must be a finite non-negative number");
+    }
     Ok(())
 }
 
@@ -1121,6 +1144,8 @@ azure_anthropic:
   api_version: 2025-03-01-preview
   endpoint: https://example.invalid/anthropic/
   deployment: claude-opus-4-6
+  input_cost_per_million_tokens: 0.3
+  output_cost_per_million_tokens: 15.0
 "#,
         )
         .unwrap();
@@ -1140,6 +1165,20 @@ azure_anthropic:
                 .map(AzureAnthropicConfig::effective_anthropic_version)
                 .as_deref(),
             Some("2023-06-01")
+        );
+        assert_eq!(
+            config
+                .azure_anthropic
+                .as_ref()
+                .and_then(|cfg| cfg.input_cost_per_million_tokens),
+            Some(0.3)
+        );
+        assert_eq!(
+            config
+                .azure_anthropic
+                .as_ref()
+                .and_then(|cfg| cfg.output_cost_per_million_tokens),
+            Some(15.0)
         );
         assert_eq!(
             config.effective_llm_provider(),
@@ -1232,6 +1271,29 @@ azure_anthropic:
                 .as_deref(),
             Some("2023-01-01")
         );
+    }
+
+    #[test]
+    fn rejects_negative_azure_anthropic_cost_rates() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+azure_anthropic:
+  api_key: test
+  endpoint: https://example.invalid/anthropic/
+  deployment: claude-opus-4-6
+  input_cost_per_million_tokens: -0.1
+"#,
+        )
+        .unwrap();
+
+        let err = AppConfig::load(&path).unwrap_err();
+
+        assert!(format!("{err:#}").contains(
+            "azure_anthropic.input_cost_per_million_tokens must be a finite non-negative number"
+        ));
     }
 
     #[test]

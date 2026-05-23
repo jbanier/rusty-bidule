@@ -202,6 +202,8 @@ azure_anthropic:
   temperature: 0.2
   max_output_tokens: 1200
   max_advertised_tools: 128
+  input_cost_per_million_tokens: 0.3
+  output_cost_per_million_tokens: 15.0
 ```
 
 Values prefixed with `env:` are resolved from environment variables at startup.
@@ -213,6 +215,8 @@ versions. If you omit `anthropic_version`, the client defaults to `2023-06-01`.
 For Anthropic requests, set either `temperature` or `top_p`, not both. The
 default path uses `temperature`; if you set a non-default `top_p`, it replaces
 `temperature` in the outgoing request.
+When both cost rates are set, the TUI footer shows conversation input/output
+token totals and an estimated USD cost.
 
 ### OpenAI
 

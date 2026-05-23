@@ -27,6 +27,8 @@ azure_openai:
 #   temperature: 0.2
 #   max_output_tokens: 1200
 #   max_advertised_tools: 128
+#   input_cost_per_million_tokens: 0.3
+#   output_cost_per_million_tokens: 15.0
 
 # Optional OpenAI API backend.
 # openai:

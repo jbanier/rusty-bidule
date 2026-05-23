@@ -1268,12 +1268,7 @@ fn parse_openai_chat_completion_payload(payload: &Value) -> Result<LlmCompletion
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("tool call missing function.name"))?
                 .to_string();
-            let raw_arguments = function
-                .get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or("{}");
-            let input = serde_json::from_str(raw_arguments)
-                .unwrap_or_else(|_| Value::String(raw_arguments.to_string()));
+            let input = parse_openai_tool_arguments(function.get("arguments"));
             assistant_blocks.push(LlmAssistantBlock::ToolUse { id, name, input });
         }
     }
@@ -1292,6 +1287,16 @@ fn parse_openai_chat_completion_payload(payload: &Value) -> Result<LlmCompletion
         assistant_blocks,
         usage: parse_openai_usage(payload),
     })
+}
+
+fn parse_openai_tool_arguments(arguments: Option<&Value>) -> Value {
+    match arguments {
+        Some(Value::String(raw)) => {
+            serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.clone()))
+        }
+        Some(Value::Null) | None => json!({}),
+        Some(value) => value.clone(),
+    }
 }
 
 fn parse_openai_usage(payload: &Value) -> Option<LlmUsage> {
@@ -1966,6 +1971,35 @@ mod tests {
 
         assert_eq!(completion.stop_reason, LlmStopReason::ToolUse);
         assert_eq!(completion.assistant_blocks.len(), 2);
+    }
+
+    #[test]
+    fn parses_openai_tool_arguments_when_returned_as_object() {
+        let large_text = "x".repeat(15_000);
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "local__write_file",
+                            "arguments": {
+                                "path": "large.txt",
+                                "text": large_text
+                            }
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let completion = parse_openai_chat_completion_payload(&payload).unwrap();
+        let LlmAssistantBlock::ToolUse { input, .. } = &completion.assistant_blocks[0] else {
+            panic!("expected tool use");
+        };
+
+        assert_eq!(input["path"], "large.txt");
+        assert_eq!(input["text"].as_str().unwrap().len(), 15_000);
     }
 
     #[test]

@@ -935,19 +935,35 @@ impl LocalToolExecutor {
             .get("mode")
             .and_then(Value::as_str)
             .unwrap_or("create_new");
-        if mode != "create_new" && mode != "overwrite" {
-            bail!("write_file: mode must be 'create_new' or 'overwrite'");
+        if mode != "create_new" && mode != "overwrite" && mode != "append" {
+            bail!("write_file: mode must be 'create_new', 'overwrite', or 'append'");
         }
 
-        let text = arguments.get("text").and_then(Value::as_str);
-        let hex = arguments.get("hex").and_then(Value::as_str);
+        let text = optional_raw_string_arg(&arguments, "text", "write_file")?;
+        let hex = optional_raw_string_arg(&arguments, "hex", "write_file")?;
+        let allow_empty = arguments
+            .get("allow_empty")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if text.is_some() && hex.is_some() {
             bail!("write_file: provide either 'text' or 'hex', not both");
         }
         let (data, input_format) = if let Some(text) = text {
-            (text.as_bytes().to_vec(), "text")
+            let data = text.as_bytes().to_vec();
+            if data.is_empty() && !allow_empty {
+                bail!(
+                    "write_file: text payload is empty; set allow_empty=true to create an empty file intentionally"
+                );
+            }
+            (data, "text")
         } else if let Some(hex) = hex {
-            (decode_hex_bytes(hex)?, "hex")
+            let data = decode_hex_bytes(hex)?;
+            if data.is_empty() && !allow_empty {
+                bail!(
+                    "write_file: hex payload is empty; set allow_empty=true to create an empty file intentionally"
+                );
+            }
+            (data, "hex")
         } else {
             bail!("write_file: missing payload; provide either 'text' or 'hex'");
         };
@@ -971,6 +987,9 @@ impl LocalToolExecutor {
             }
             "overwrite" => {
                 options.create(true).truncate(true);
+            }
+            "append" => {
+                options.create(true).append(true);
             }
             _ => unreachable!(),
         }
@@ -2055,6 +2074,23 @@ fn optional_string_arg(arguments: &Value, field: &str, tool_name: &str) -> Resul
     } else {
         Ok(Some(value.to_string()))
     }
+}
+
+fn optional_raw_string_arg<'a>(
+    arguments: &'a Value,
+    field: &str,
+    tool_name: &str,
+) -> Result<Option<&'a str>> {
+    let Some(value) = arguments.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(Some)
+        .ok_or_else(|| anyhow!("{tool_name}: '{field}' must be a string or null"))
 }
 
 fn optional_u64_arg(arguments: &Value, field: &str, tool_name: &str) -> Result<Option<u64>> {
@@ -3575,6 +3611,25 @@ Tools:
             "hello"
         );
 
+        executor
+            .execute(
+                "local__write_file",
+                json!({"path": "appended.txt", "mode": "append", "text": "hello"}),
+            )
+            .await
+            .unwrap();
+        executor
+            .execute(
+                "local__write_file",
+                json!({"path": "appended.txt", "mode": "append", "text": " world"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("appended.txt")).unwrap(),
+            "hello world"
+        );
+
         let err = executor
             .execute(
                 "local__write_file",
@@ -3605,6 +3660,31 @@ Tools:
             .await
             .unwrap_err();
         assert!(err.to_string().contains("filesystem write access"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_file_preserves_large_text_payloads() {
+        let dir = tempdir().unwrap();
+        let executor = file_tool_executor(dir.path(), filesystem_write_permissions());
+        let text = (0..530)
+            .map(|line| format!("line {line:03}: abcdefghijklmnopqrstuvwxyz 0123456789 payload\n"))
+            .collect::<String>();
+        assert!(text.len() > 15_000);
+
+        let output = executor
+            .execute(
+                "local__write_file",
+                json!({"path": "large.txt", "text": text.clone()}),
+            )
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["bytes_written"], text.len());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("large.txt")).unwrap(),
+            text
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3690,6 +3770,26 @@ Tools:
             .unwrap_err();
         assert!(err.to_string().contains("missing payload"));
         assert!(!dir.path().join("empty.txt").exists());
+
+        let err = executor
+            .execute(
+                "local__write_file",
+                json!({"path": "empty.txt", "text": ""}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("text payload is empty"));
+        assert!(!dir.path().join("empty.txt").exists());
+
+        let output = executor
+            .execute(
+                "local__write_file",
+                json!({"path": "empty.txt", "text": "", "allow_empty": true}),
+            )
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["bytes_written"], 0);
 
         let err = executor
             .execute(
@@ -3977,16 +4077,17 @@ pub fn local_tool_definitions(
         LlmTool {
             name: "local__write_file".to_string(),
             description: format!(
-                "Create or overwrite a local file from UTF-8 text or hex-encoded bytes. Provide exactly one of text or hex. Parent directories must already exist. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem write permission. Payloads are capped at {} bytes.",
+                "Create, overwrite, or append to a local file from UTF-8 text or hex-encoded bytes. Provide exactly one of text or hex. For large files, write smaller chunks across multiple calls: first create_new or overwrite, then append. Parent directories must already exist. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem write permission. Payloads are capped at {} bytes per call.",
                 local_tools_config.max_file_write_bytes
             ),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path. Relative paths resolve under the workspace root."},
-                    "mode": {"type": "string", "enum": ["create_new", "overwrite"], "description": "create_new refuses existing files; overwrite truncates or creates the file"},
+                    "mode": {"type": "string", "enum": ["create_new", "overwrite", "append"], "description": "create_new refuses existing files; overwrite truncates or creates the file; append creates the file if needed and writes at the end"},
                     "text": {"type": "string", "description": "UTF-8 text payload. Provide exactly one of text or hex."},
-                    "hex": {"type": "string", "description": "Hex-encoded binary payload. Provide exactly one of text or hex; whitespace and optional 0x prefix are accepted."}
+                    "hex": {"type": "string", "description": "Hex-encoded binary payload. Provide exactly one of text or hex; whitespace and optional 0x prefix are accepted."},
+                    "allow_empty": {"type": "boolean", "description": "Set true only when intentionally creating or overwriting with an empty file."}
                 },
                 "required": ["path"]
             }),

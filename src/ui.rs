@@ -4,7 +4,8 @@ use anyhow::Result;
 use chrono::{Local, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use pulldown_cmark::{
-    BlockQuoteKind, CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag,
+    TagEnd,
 };
 use ratatui::{
     DefaultTerminal, Frame,
@@ -2165,6 +2166,8 @@ struct MarkdownRenderer {
     table_active: bool,
     table_header: bool,
     table_row_open: bool,
+    table_alignments: Vec<Alignment>,
+    table_rows: Vec<TableRow>,
     table_current_row: Vec<String>,
     table_current_cell: String,
 }
@@ -2172,6 +2175,12 @@ struct MarkdownRenderer {
 #[derive(Debug, Clone)]
 struct ListState {
     next_index: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct TableRow {
+    cells: Vec<String>,
+    is_header: bool,
 }
 
 fn render_markdown(content: &str) -> Vec<Line<'static>> {
@@ -2310,11 +2319,13 @@ impl MarkdownRenderer {
                 self.flush_line();
                 self.pending_item_prefix = Some(self.next_item_prefix());
             }
-            Tag::Table(_) => {
+            Tag::Table(alignments) => {
                 self.flush_line();
                 self.table_active = true;
                 self.table_header = false;
                 self.table_row_open = false;
+                self.table_alignments = alignments;
+                self.table_rows.clear();
                 self.table_current_row.clear();
                 self.table_current_cell.clear();
             }
@@ -2363,18 +2374,20 @@ impl MarkdownRenderer {
             TagEnd::Item => self.flush_line(),
             TagEnd::TableHead => {
                 if !self.table_row_open && !self.table_current_row.is_empty() {
-                    let columns = self.table_current_row.len();
-                    self.render_table_row();
-                    self.lines.push(render_table_separator(columns));
+                    let cells = std::mem::take(&mut self.table_current_row);
+                    self.table_rows.push(TableRow {
+                        cells,
+                        is_header: true,
+                    });
                 }
                 self.table_header = false;
             }
             TagEnd::TableRow => {
-                let columns = self.table_current_row.len();
-                self.render_table_row();
-                if self.table_header {
-                    self.lines.push(render_table_separator(columns));
-                }
+                let cells = std::mem::take(&mut self.table_current_row);
+                self.table_rows.push(TableRow {
+                    cells,
+                    is_header: self.table_header,
+                });
                 self.table_row_open = false;
             }
             TagEnd::TableCell => {
@@ -2383,11 +2396,18 @@ impl MarkdownRenderer {
             }
             TagEnd::Table => {
                 if !self.table_row_open && !self.table_current_row.is_empty() {
-                    self.render_table_row();
+                    let cells = std::mem::take(&mut self.table_current_row);
+                    self.table_rows.push(TableRow {
+                        cells,
+                        is_header: self.table_header,
+                    });
                 }
+                self.render_table();
                 self.table_active = false;
                 self.table_header = false;
                 self.table_row_open = false;
+                self.table_alignments.clear();
+                self.table_rows.clear();
                 self.table_current_row.clear();
                 self.table_current_cell.clear();
                 self.push_blank_line();
@@ -2457,28 +2477,46 @@ impl MarkdownRenderer {
         self.lines.push(Line::from(spans));
     }
 
-    fn render_table_row(&mut self) {
-        if self.table_current_row.is_empty() {
+    fn render_table(&mut self) {
+        if self.table_rows.is_empty() {
             return;
         }
 
-        let cells = std::mem::take(&mut self.table_current_row);
-        let cell_style = if self.table_header {
-            Style::default()
-                .fg(neon_cyan())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(synth_text())
-        };
+        let columns = self.table_column_count();
+        let widths = self.table_column_widths(columns);
+        let last_header_index = self.table_rows.iter().rposition(|row| row.is_header);
 
-        let mut spans = vec![Span::styled("│", Style::default().fg(neon_pink()))];
-        for cell in cells {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(cell, cell_style));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled("│", Style::default().fg(neon_pink())));
+        for (index, row) in self.table_rows.iter().enumerate() {
+            self.lines.push(render_table_row(
+                row,
+                &widths,
+                &self.table_alignments,
+                table_cell_style(row.is_header),
+            ));
+            if last_header_index == Some(index) {
+                self.lines.push(render_table_separator(&widths));
+            }
         }
-        self.lines.push(Line::from(spans));
+    }
+
+    fn table_column_count(&self) -> usize {
+        self.table_rows
+            .iter()
+            .map(|row| row.cells.len())
+            .chain(std::iter::once(self.table_alignments.len()))
+            .max()
+            .unwrap_or(0)
+            .max(1)
+    }
+
+    fn table_column_widths(&self, columns: usize) -> Vec<usize> {
+        let mut widths = vec![0; columns];
+        for row in &self.table_rows {
+            for (index, cell) in row.cells.iter().enumerate().take(columns) {
+                widths[index] = widths[index].max(display_width(cell));
+            }
+        }
+        widths
     }
 
     fn flush_line(&mut self) {
@@ -2613,11 +2651,59 @@ fn render_code_block_chrome(language: Option<&str>, top: bool) -> Line<'static> 
     ))
 }
 
-fn render_table_separator(columns: usize) -> Line<'static> {
+fn table_cell_style(is_header: bool) -> Style {
+    if is_header {
+        Style::default()
+            .fg(neon_cyan())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(synth_text())
+    }
+}
+
+fn render_table_row(
+    row: &TableRow,
+    widths: &[usize],
+    alignments: &[Alignment],
+    cell_style: Style,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled("│", Style::default().fg(neon_pink()))];
+    for (index, width) in widths.iter().enumerate() {
+        let cell = row.cells.get(index).map(String::as_str).unwrap_or("");
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            align_table_cell(cell, *width, alignments.get(index).copied()),
+            cell_style,
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("│", Style::default().fg(neon_pink())));
+    }
+    Line::from(spans)
+}
+
+fn align_table_cell(cell: &str, width: usize, alignment: Option<Alignment>) -> String {
+    let cell_width = display_width(cell);
+    let padding = width.saturating_sub(cell_width);
+    match alignment.unwrap_or(Alignment::None) {
+        Alignment::Right => format!("{}{}", " ".repeat(padding), cell),
+        Alignment::Center => {
+            let left = padding / 2;
+            let right = padding - left;
+            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(right))
+        }
+        Alignment::None | Alignment::Left => format!("{}{}", cell, " ".repeat(padding)),
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    Line::from(text.to_string()).width()
+}
+
+fn render_table_separator(widths: &[usize]) -> Line<'static> {
     let mut text = String::from("├");
-    for index in 0..columns.max(1) {
-        text.push_str("────────");
-        text.push(if index + 1 < columns.max(1) {
+    for (index, width) in widths.iter().enumerate() {
+        text.push_str(&"─".repeat(width + 2));
+        text.push(if index + 1 < widths.len() {
             '┼'
         } else {
             '┤'
@@ -2659,9 +2745,16 @@ mod tests {
 
     use super::{
         App, McpServerStatus, build_mcp_server_statuses, build_scroll_indicator_lines,
-        canonicalize_mcp_filter, count_wrapped_rows, max_message_scroll, neon_gold, neon_pink,
-        ordered_messages, render_markdown,
+        canonicalize_mcp_filter, count_wrapped_rows, max_message_scroll, neon_cyan, neon_gold,
+        neon_pink, ordered_messages, render_markdown, synth_text,
     };
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
 
     fn test_config(data_dir: PathBuf, mcp_servers: &[&str]) -> AppConfig {
         AppConfig {
@@ -2819,20 +2912,60 @@ mod tests {
     #[test]
     fn renders_markdown_tables_as_rows() {
         let lines = render_markdown("| IOC | Value |\n| --- | --- |\n| IP | 1.2.3.4 |");
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert!(lines.iter().any(|line| {
-            line.spans.iter().any(|span| span.content == "IOC")
-                && line.spans.iter().any(|span| span.content == "Value")
-        }));
-        assert!(lines.iter().any(|line| {
-            line.spans.iter().any(|span| span.content == "IP")
-                && line.spans.iter().any(|span| span.content == "1.2.3.4")
-        }));
+        assert!(
+            rendered.contains(&"│ IOC │ Value   │".to_string()),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.contains(&"├─────┼─────────┤".to_string()),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.contains(&"│ IP  │ 1.2.3.4 │".to_string()),
+            "{rendered:?}"
+        );
+        assert!(lines.iter().any(|line| line.spans.iter().any(|span| {
+            span.content == "IOC"
+                && span.style.fg == Some(neon_cyan())
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        })));
         assert!(lines.iter().any(|line| {
             line.spans
                 .iter()
-                .any(|span| span.content.contains("┼") || span.content.contains("┤"))
+                .any(|span| span.content == "1.2.3.4" && span.style.fg == Some(synth_text()))
         }));
+    }
+
+    #[test]
+    fn renders_compact_markdown_tables_with_aligned_columns() {
+        let lines = render_markdown("|columnA|columnB|\n|---|---|\n|valueforA | Value for B |");
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"│ columnA   │ columnB     │".to_string()));
+        assert!(rendered.contains(&"├───────────┼─────────────┤".to_string()));
+        assert!(rendered.contains(&"│ valueforA │ Value for B │".to_string()));
+    }
+
+    #[test]
+    fn renders_table_missing_cells_as_empty_padded_cells() {
+        let lines = render_markdown("| A | B | C |\n| --- | --- | --- |\n| one | two |");
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"│ A   │ B   │ C │".to_string()));
+        assert!(rendered.contains(&"├─────┼─────┼───┤".to_string()));
+        assert!(rendered.contains(&"│ one │ two │   │".to_string()));
+    }
+
+    #[test]
+    fn renders_table_cells_with_gfm_alignment() {
+        let lines =
+            render_markdown("| Left | Center | Right |\n| :--- | :---: | ---: |\n| a | b | c |");
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"│ Left │ Center │ Right │".to_string()));
+        assert!(rendered.contains(&"│ a    │   b    │     c │".to_string()));
     }
 
     #[test]

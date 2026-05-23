@@ -832,17 +832,19 @@ impl Orchestrator {
                 let mut tool_results = Vec::with_capacity(tool_uses.len());
                 for (tool_use_id, tool_name, tool_input) in tool_uses {
                     tool_call_count += 1;
+                    let tool_display_name = progress_tool_display_name(&tool_name, &tool_input);
                     info!(
                         %conversation_id,
                         tool = %tool_name,
                         tool_call_count,
                         "executing tool call"
                     );
-                    self.emit(
+                    self.emit_with_display_name(
                         &ui_tx,
                         "tool_start",
-                        &format!("Calling {}", tool_name),
+                        &format!("Calling {}", tool_display_name),
                         Some(tool_name.clone()),
+                        Some(tool_display_name.clone()),
                         Some(tool_call_count),
                     );
 
@@ -873,11 +875,12 @@ impl Orchestrator {
                             }
                             let err_text = format!("{:#}", failure.error);
                             if let Some(prompt) = permission_denied_user_prompt(&err_text) {
-                                self.emit(
+                                self.emit_with_display_name(
                                     &ui_tx,
                                     "tool_end",
-                                    &format!("Finished {}", tool_name),
+                                    &format!("Finished {}", tool_display_name),
                                     Some(tool_name.clone()),
+                                    Some(tool_display_name.clone()),
                                     Some(tool_call_count),
                                 );
                                 return self
@@ -906,11 +909,12 @@ impl Orchestrator {
                         }
                     };
 
-                    self.emit(
+                    self.emit_with_display_name(
                         &ui_tx,
                         "tool_end",
-                        &format!("Finished {}", tool_name),
+                        &format!("Finished {}", tool_display_name),
                         Some(tool_name.clone()),
+                        Some(tool_display_name.clone()),
                         Some(tool_call_count),
                     );
 
@@ -1994,10 +1998,23 @@ impl Orchestrator {
         tool_name: Option<String>,
         tool_call_count: Option<usize>,
     ) {
+        self.emit_with_display_name(ui_tx, kind, message, tool_name, None, tool_call_count);
+    }
+
+    fn emit_with_display_name(
+        &self,
+        ui_tx: &UnboundedSender<UiEvent>,
+        kind: &str,
+        message: &str,
+        tool_name: Option<String>,
+        tool_display_name: Option<String>,
+        tool_call_count: Option<usize>,
+    ) {
         let _ = ui_tx.send(UiEvent::Progress(ProgressEvent {
             kind: kind.to_string(),
             message: message.to_string(),
             tool_name,
+            tool_display_name,
             tool_call_count,
         }));
     }
@@ -2257,6 +2274,45 @@ fn assistant_text_from_blocks(blocks: &[LlmAssistantBlock]) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     if text.is_empty() { None } else { Some(text) }
+}
+
+fn progress_tool_display_name(tool_name: &str, input: &Value) -> String {
+    match tool_name {
+        "local__exec_cli" => input
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(tool_name)
+            .to_string(),
+        "local__run_skill" => {
+            let skill_name = input
+                .get("skill_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let tool_slug = input
+                .get("tool_slug")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match (skill_name, tool_slug) {
+                (Some(skill_name), Some(tool_slug)) => format!("{skill_name} / {tool_slug}"),
+                (Some(skill_name), None) => skill_name.to_string(),
+                (None, Some(tool_slug)) => tool_slug.to_string(),
+                (None, None) => tool_name.to_string(),
+            }
+        }
+        "local__activate_skill" => input
+            .get("name")
+            .or_else(|| input.get("skill_name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(tool_name)
+            .to_string(),
+        _ => tool_name.to_string(),
+    }
 }
 
 fn continuation_pause_messages(
@@ -2798,8 +2854,9 @@ mod tests {
         OUTPUT_TOKEN_CONTINUATION_INSTRUCTION, PINNED_LOCAL_TOOL_NAMES, build_llm_tools,
         build_messages, build_ranked_llm_tools_with_local, compact_workflow_output,
         effective_agent_budget, estimate_context_chars, output_token_continuation_reply,
-        output_token_partial_text, pause_workflow_step_for_continuation, recipe_guidance_for_turn,
-        sanitize_tool_schema, summarize_advertised_mcp_tools, tool_result_with_evidence,
+        output_token_partial_text, pause_workflow_step_for_continuation,
+        progress_tool_display_name, recipe_guidance_for_turn, sanitize_tool_schema,
+        summarize_advertised_mcp_tools, tool_result_with_evidence,
     };
 
     fn test_app_config(data_dir: PathBuf) -> AppConfig {
@@ -2888,6 +2945,39 @@ mod tests {
         assert_eq!(budget.max_iterations_per_turn, 12);
         assert_eq!(budget.continuation_increment, 6);
         assert_eq!(budget.max_total_iterations_per_turn, 50);
+    }
+
+    #[test]
+    fn progress_tool_display_name_describes_underlying_tool() {
+        assert_eq!(
+            progress_tool_display_name("local__exec_cli", &json!({"command": "nmap"})),
+            "nmap"
+        );
+        assert_eq!(
+            progress_tool_display_name(
+                "local__run_skill",
+                &json!({"skill_name": "web-discovery-recon", "tool_slug": "validate-scope"})
+            ),
+            "web-discovery-recon / validate-scope"
+        );
+        assert_eq!(
+            progress_tool_display_name(
+                "local__run_skill",
+                &json!({"skill_name": "web-discovery-recon"})
+            ),
+            "web-discovery-recon"
+        );
+        assert_eq!(
+            progress_tool_display_name(
+                "local__activate_skill",
+                &json!({"name": "web-discovery-recon"})
+            ),
+            "web-discovery-recon"
+        );
+        assert_eq!(
+            progress_tool_display_name("remote_search", &json!({"query": "status"})),
+            "remote_search"
+        );
     }
 
     #[tokio::test]

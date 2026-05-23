@@ -54,6 +54,38 @@ code {
   font-feature-settings: "liga" 1, "calt" 1, "zero" 1;
 }
 
+input,
+textarea,
+select {
+  color-scheme: dark;
+  caret-color: var(--text-primary);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: rgba(214, 206, 145, 0.72);
+  opacity: 1;
+}
+
+select option,
+select optgroup {
+  background-color: #111318;
+  color: var(--text-primary);
+}
+
+select option:checked {
+  background-color: #2a2608;
+  color: var(--text-primary);
+}
+
+input:-webkit-autofill,
+textarea:-webkit-autofill,
+select:-webkit-autofill {
+  -webkit-text-fill-color: var(--text-primary);
+  caret-color: var(--text-primary);
+  box-shadow: 0 0 0 1000px #111318 inset;
+}
+
 .app-shell {
   display: flex;
   min-height: 100vh;

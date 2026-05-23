@@ -643,6 +643,8 @@ pub struct ProgressEvent {
     pub kind: String,
     pub message: String,
     pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_display_name: Option<String>,
     pub tool_call_count: Option<usize>,
 }
 

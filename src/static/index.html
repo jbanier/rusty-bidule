@@ -1765,6 +1765,8 @@
     if (!state.activeConversationId || !continuationId) return;
     const rounds = Number(continuationRoundsEl.value || 10);
     const safeRounds = Number.isFinite(rounds) && rounds > 0 ? Math.floor(rounds) : 10;
+    setRunStatus('running', `Continuing from checkpoint ${continuationId}...`);
+    renderRunEvents([]);
     const response = await fetch(`/api/conversations/${state.activeConversationId}/continuations/${encodeURIComponent(continuationId)}/continue`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2033,6 +2035,24 @@
     renderSchedules(schedules);
   }
 
+  function jobToolLabel(job) {
+    const sourceTool = String(job && job.source_tool ? job.source_tool : '').trim();
+    const artifacts = job && job.result_artifacts_json && typeof job.result_artifacts_json === 'object'
+      ? job.result_artifacts_json
+      : null;
+    const command = artifacts && typeof artifacts.command === 'string'
+      ? artifacts.command.trim()
+      : '';
+    if (command) {
+      const skillMatch = command.match(/^skill\s+(.+?)\s+\/\s+(.+?)\s+\(/);
+      if (skillMatch) {
+        return `${skillMatch[1]} / ${skillMatch[2]}`;
+      }
+      return command.split(/\s+/, 1)[0] || sourceTool || '—';
+    }
+    return sourceTool || '—';
+  }
+
   function renderJobs(jobs) {
     const runningStatuses = ['running', 'pending', 'submitted', 'in_progress'];
     const runningJobs = jobs.filter((job) => runningStatuses.includes(String(job.status || '').toLowerCase()));
@@ -2050,7 +2070,7 @@
     jobsRunningCountEl.textContent = `${runningJobs.length} running`;
     const table = document.createElement('table');
     table.className = 'jobs-table';
-    table.innerHTML = '<thead><tr><th>Alias</th><th>Status</th><th>Retrieval</th><th>Source</th><th>Transaction ID</th><th>Artifacts</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th>Alias</th><th>Status</th><th>Retrieval</th><th>Tool</th><th>Transaction ID</th><th>Artifacts</th></tr></thead>';
     const tbody = document.createElement('tbody');
     jobs.forEach((job) => {
       const tr = document.createElement('tr');
@@ -2067,6 +2087,7 @@
       const retrievalState = job.retrieval_state || '—';
       const artifacts = Array.isArray(job.result_artifacts) ? job.result_artifacts : [];
       const artifactLabel = artifacts.length ? `${artifacts.length} saved` : '—';
+      const toolLabel = jobToolLabel(job);
       tr.innerHTML = `
         <td><strong>${escapeHtml(job.alias || '')}</strong></td>
         <td>
@@ -2076,7 +2097,7 @@
           </span>
         </td>
         <td>${escapeHtml(retrievalState)}</td>
-        <td>${escapeHtml(job.source_tool || '—')}</td>
+        <td>${escapeHtml(toolLabel)}</td>
         <td title="${escapeHtml(txId)}">${escapeHtml(txShort)}</td>
         <td title="${escapeHtml(artifacts.map((item) => item.path || item.name || '').join(', '))}">${escapeHtml(artifactLabel)}</td>
       `;
@@ -2648,12 +2669,13 @@
     renderContinuationState();
 
     messageInputEl.disabled = !hasConversation || jobRunning;
+    composerHintEl.classList.toggle('hidden', jobRunning);
     if (!hasConversation) {
       messageInputEl.placeholder = 'Select or start a conversation to begin.';
       composerHintEl.textContent = 'Select a conversation, then type a request. Use Ctrl/Cmd+Enter to send.';
     } else if (jobRunning) {
       messageInputEl.placeholder = 'Wait for the current request to finish.';
-      composerHintEl.textContent = 'A request is in progress. Review the status panel while you wait.';
+      composerHintEl.textContent = '';
     } else {
       messageInputEl.placeholder = 'Type instructions for the agent...';
       composerHintEl.textContent = 'Press Ctrl/Cmd+Enter to send. Full transcript history remains available in Show History.';

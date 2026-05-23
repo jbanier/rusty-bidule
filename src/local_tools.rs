@@ -3711,25 +3711,13 @@ Tools:
     }
 
     #[test]
-    fn write_file_schema_requires_text_or_hex_payload() {
+    fn local_tool_schemas_avoid_top_level_combinators() {
         let definitions = local_tool_definitions(None, &LocalToolsConfig::default(), None);
-        let read_file = definitions
-            .iter()
-            .find(|tool| tool.name == "local__read_file")
-            .unwrap();
-        let write_file = definitions
-            .iter()
-            .find(|tool| tool.name == "local__write_file")
-            .unwrap();
-
-        assert!(read_file.parameters.get("oneOf").is_none());
-        assert_eq!(
-            write_file.parameters["oneOf"],
-            json!([
-                {"required": ["text"]},
-                {"required": ["hex"]}
-            ])
-        );
+        for tool in definitions {
+            assert!(tool.parameters.get("oneOf").is_none(), "{}", tool.name);
+            assert!(tool.parameters.get("allOf").is_none(), "{}", tool.name);
+            assert!(tool.parameters.get("anyOf").is_none(), "{}", tool.name);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3989,7 +3977,7 @@ pub fn local_tool_definitions(
         LlmTool {
             name: "local__write_file".to_string(),
             description: format!(
-                "Create or overwrite a local file from UTF-8 text or hex-encoded bytes. Parent directories must already exist. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem write permission. Payloads are capped at {} bytes.",
+                "Create or overwrite a local file from UTF-8 text or hex-encoded bytes. Provide exactly one of text or hex. Parent directories must already exist. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem write permission. Payloads are capped at {} bytes.",
                 local_tools_config.max_file_write_bytes
             ),
             parameters: json!({
@@ -3997,14 +3985,10 @@ pub fn local_tool_definitions(
                 "properties": {
                     "path": {"type": "string", "description": "File path. Relative paths resolve under the workspace root."},
                     "mode": {"type": "string", "enum": ["create_new", "overwrite"], "description": "create_new refuses existing files; overwrite truncates or creates the file"},
-                    "text": {"type": "string", "description": "UTF-8 text payload"},
-                    "hex": {"type": "string", "description": "Hex-encoded binary payload; whitespace and optional 0x prefix are accepted"}
+                    "text": {"type": "string", "description": "UTF-8 text payload. Provide exactly one of text or hex."},
+                    "hex": {"type": "string", "description": "Hex-encoded binary payload. Provide exactly one of text or hex; whitespace and optional 0x prefix are accepted."}
                 },
-                "required": ["path"],
-                "oneOf": [
-                    {"required": ["text"]},
-                    {"required": ["hex"]}
-                ]
+                "required": ["path"]
             }),
         },
     ];

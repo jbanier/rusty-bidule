@@ -330,6 +330,8 @@ pub struct LocalToolsConfig {
     pub max_file_write_bytes: u64,
     #[serde(default = "default_max_directory_entries")]
     pub max_directory_entries: usize,
+    #[serde(default = "default_max_webfetch_bytes")]
+    pub max_webfetch_bytes: u64,
 }
 
 impl Default for LocalToolsConfig {
@@ -343,6 +345,7 @@ impl Default for LocalToolsConfig {
             max_file_read_bytes: default_max_file_read_bytes(),
             max_file_write_bytes: default_max_file_write_bytes(),
             max_directory_entries: default_max_directory_entries(),
+            max_webfetch_bytes: default_max_webfetch_bytes(),
         }
     }
 }
@@ -940,6 +943,10 @@ const fn default_max_directory_entries() -> usize {
     1_000
 }
 
+const fn default_max_webfetch_bytes() -> u64 {
+    262_144
+}
+
 fn default_token_endpoint_auth_method() -> String {
     "none".to_string()
 }
@@ -998,6 +1005,7 @@ mcp_servers:
         assert_eq!(config.local_tools.max_file_read_bytes, 16_384);
         assert_eq!(config.local_tools.max_file_write_bytes, 1_048_576);
         assert_eq!(config.local_tools.max_directory_entries, 1_000);
+        assert_eq!(config.local_tools.max_webfetch_bytes, 262_144);
         assert_eq!(config.effective_agent_max_iterations(), 10);
         assert_eq!(config.effective_continuation_increment(), 10);
         assert_eq!(config.effective_agent_max_total_iterations(), 50);
@@ -1584,6 +1592,7 @@ local_tools:
   job_execution_timeout_seconds: 1200
   job_wait_timeout_seconds: 900
   job_poll_interval_seconds: 5
+  max_webfetch_bytes: 4096
 "#,
         )
         .unwrap();
@@ -1593,6 +1602,7 @@ local_tools:
         assert_eq!(config.local_tools.job_execution_timeout_seconds, 1200);
         assert_eq!(config.local_tools.job_wait_timeout_seconds, 900);
         assert_eq!(config.local_tools.job_poll_interval_seconds, 5);
+        assert_eq!(config.local_tools.max_webfetch_bytes, 4096);
         assert!(
             config
                 .local_tools

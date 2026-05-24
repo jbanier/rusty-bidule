@@ -4,12 +4,16 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Stdio,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose};
 use chrono::{Duration as ChronoDuration, Local, Utc};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -176,6 +180,7 @@ pub struct LocalToolExecutor {
     max_file_read_bytes: u64,
     max_file_write_bytes: u64,
     max_directory_entries: usize,
+    max_webfetch_bytes: u64,
 }
 
 impl LocalToolExecutor {
@@ -207,6 +212,7 @@ impl LocalToolExecutor {
             max_file_read_bytes: default_local_tools.max_file_read_bytes,
             max_file_write_bytes: default_local_tools.max_file_write_bytes,
             max_directory_entries: default_local_tools.max_directory_entries,
+            max_webfetch_bytes: default_local_tools.max_webfetch_bytes,
         }
     }
 
@@ -218,6 +224,7 @@ impl LocalToolExecutor {
         self.max_file_read_bytes = config.max_file_read_bytes;
         self.max_file_write_bytes = config.max_file_write_bytes;
         self.max_directory_entries = config.max_directory_entries;
+        self.max_webfetch_bytes = config.max_webfetch_bytes;
         self
     }
 
@@ -258,6 +265,7 @@ impl LocalToolExecutor {
             }
             "local__time" => self.exec_time(arguments),
             "local__configure_mcp_servers" => self.exec_configure_mcp_servers(arguments),
+            "local__webfetch" => self.exec_webfetch(arguments).await,
             "local__exec_cli" => self.exec_cli(arguments).await,
             "local__list_directory" => self.exec_list_directory(arguments),
             "local__read_file" => self.exec_read_file(arguments),
@@ -680,6 +688,127 @@ impl LocalToolExecutor {
             "Conversation MCP selection updated to {}.",
             serde_json::to_string(&next)?
         ))
+    }
+
+    async fn exec_webfetch(&self, arguments: Value) -> Result<String> {
+        self.require_network("local__webfetch")?;
+        let raw_url = required_string_arg(&arguments, "url", "webfetch")?;
+        let url = url::Url::parse(&raw_url)
+            .with_context(|| format!("webfetch: invalid url '{raw_url}'"))?;
+        match url.scheme() {
+            "http" | "https" => {}
+            scheme => bail!("webfetch: unsupported URL scheme '{scheme}'; use http or https"),
+        }
+
+        let method = webfetch_method(&arguments)?;
+        let body_format = arguments
+            .get("body_format")
+            .and_then(Value::as_str)
+            .unwrap_or("text");
+        if body_format != "text" && body_format != "base64" {
+            bail!("webfetch: body_format must be 'text' or 'base64'");
+        }
+
+        let accept_invalid_certs =
+            optional_bool_arg(&arguments, "accept_invalid_certs", "webfetch")?.unwrap_or(false);
+        let include_certificate_der =
+            optional_bool_arg(&arguments, "include_certificate_der", "webfetch")?.unwrap_or(false);
+        let timeout_seconds = optional_u64_arg(&arguments, "timeout_seconds", "webfetch")?
+            .unwrap_or(self.execution_timeout.as_secs())
+            .max(1)
+            .min(self.execution_timeout.as_secs().max(1));
+        let requested_max_bytes = optional_u64_arg(&arguments, "max_bytes", "webfetch")?
+            .unwrap_or(self.max_webfetch_bytes);
+        let max_bytes = requested_max_bytes.min(self.max_webfetch_bytes);
+        let max_body_len = usize::try_from(max_bytes)
+            .map_err(|_| anyhow!("webfetch: max_bytes is too large for this platform"))?;
+
+        let mut headers = webfetch_request_headers(&arguments)?;
+        if !headers.contains_key(USER_AGENT) {
+            headers.insert(
+                USER_AGENT,
+                HeaderValue::from_static("rusty-bidule-webfetch/0.1"),
+            );
+        }
+
+        let mut client_builder = reqwest::Client::builder()
+            .tls_backend_rustls()
+            .tls_info(true)
+            .timeout(Duration::from_secs(timeout_seconds))
+            .redirect(reqwest::redirect::Policy::limited(10));
+        if accept_invalid_certs {
+            client_builder = client_builder.tls_danger_accept_invalid_certs(true);
+        }
+        let client = client_builder
+            .build()
+            .context("webfetch: failed to build HTTP client")?;
+
+        let start = Instant::now();
+        let mut response = client
+            .request(method.clone(), url.clone())
+            .headers(headers)
+            .send()
+            .await
+            .with_context(|| format!("webfetch: request failed for {url}"))?;
+        let elapsed_ms = start.elapsed().as_millis();
+
+        let final_url = response.url().clone();
+        let status = response.status();
+        let version = response.version();
+        let response_headers = webfetch_headers_json(response.headers());
+        let content_length = response.content_length();
+        let tls_info = response
+            .extensions()
+            .get::<reqwest::tls::TlsInfo>()
+            .cloned();
+        let (tls, warnings) = webfetch_tls_json(
+            &final_url,
+            tls_info.as_ref(),
+            accept_invalid_certs,
+            include_certificate_der,
+        );
+
+        let (body_bytes, truncated) = if method == reqwest::Method::HEAD {
+            (Vec::new(), false)
+        } else {
+            read_webfetch_body(&mut response, max_body_len).await?
+        };
+        let utf8_valid = std::str::from_utf8(&body_bytes).is_ok();
+
+        let mut body = json!({
+            "format": body_format,
+            "bytes_returned": body_bytes.len(),
+            "requested_max_bytes": requested_max_bytes,
+            "max_bytes": max_bytes,
+            "truncated": truncated,
+            "truncated_by_cap": requested_max_bytes > max_bytes,
+            "content_length": content_length,
+            "utf8_valid": utf8_valid,
+        });
+        match body_format {
+            "text" => {
+                body["text"] = Value::String(String::from_utf8_lossy(&body_bytes).to_string());
+            }
+            "base64" => {
+                body["base64"] = Value::String(general_purpose::STANDARD.encode(&body_bytes));
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(serde_json::to_string_pretty(&json!({
+            "url": url.to_string(),
+            "final_url": final_url.to_string(),
+            "redirected": final_url != url,
+            "method": method.as_str(),
+            "status": status.as_u16(),
+            "status_text": status.canonical_reason().unwrap_or(""),
+            "http_version": http_version_label(version),
+            "elapsed_ms": elapsed_ms,
+            "headers": response_headers,
+            "tls": tls,
+            "warnings": warnings,
+            "body": body,
+        }))?)
     }
 
     async fn exec_cli(&self, arguments: Value) -> Result<String> {
@@ -2044,6 +2173,153 @@ fn parse_optional_datetime(value: Option<&Value>) -> Result<Option<chrono::DateT
     Ok(Some(parsed.with_timezone(&chrono::Utc)))
 }
 
+fn webfetch_method(arguments: &Value) -> Result<reqwest::Method> {
+    let raw = arguments
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET")
+        .trim()
+        .to_ascii_uppercase();
+    match raw.as_str() {
+        "GET" => Ok(reqwest::Method::GET),
+        "HEAD" => Ok(reqwest::Method::HEAD),
+        _ => bail!("webfetch: method must be 'GET' or 'HEAD'"),
+    }
+}
+
+fn webfetch_request_headers(arguments: &Value) -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    let Some(value) = arguments.get("headers") else {
+        return Ok(headers);
+    };
+    if value.is_null() {
+        return Ok(headers);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("webfetch: 'headers' must be an object of string values"))?;
+    for (name, value) in object {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("webfetch: invalid header name '{name}'"))?;
+        let header_value = value
+            .as_str()
+            .ok_or_else(|| anyhow!("webfetch: header '{name}' value must be a string"))?;
+        let header_value = HeaderValue::from_str(header_value)
+            .with_context(|| format!("webfetch: invalid header value for '{name}'"))?;
+        headers.insert(header_name, header_value);
+    }
+    Ok(headers)
+}
+
+fn webfetch_headers_json(headers: &HeaderMap) -> Value {
+    let items = headers
+        .iter()
+        .map(|(name, value)| match value.to_str() {
+            Ok(text) => json!({
+                "name": name.as_str(),
+                "value": text,
+                "encoding": "text",
+            }),
+            Err(_) => json!({
+                "name": name.as_str(),
+                "value": general_purpose::STANDARD.encode(value.as_bytes()),
+                "encoding": "base64",
+            }),
+        })
+        .collect::<Vec<_>>();
+    Value::Array(items)
+}
+
+async fn read_webfetch_body(
+    response: &mut reqwest::Response,
+    max_len: usize,
+) -> Result<(Vec<u8>, bool)> {
+    let mut body = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("webfetch: failed to read response body")?
+    {
+        let remaining = max_len.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, truncated))
+}
+
+fn webfetch_tls_json(
+    final_url: &url::Url,
+    tls_info: Option<&reqwest::tls::TlsInfo>,
+    accept_invalid_certs: bool,
+    include_certificate_der: bool,
+) -> (Value, Vec<String>) {
+    let tls_used = final_url.scheme() == "https";
+    let mut warnings = Vec::new();
+    let validation = if accept_invalid_certs {
+        warnings.push(
+            "TLS certificate validation was disabled for this request; the server certificate may be invalid or untrusted."
+                .to_string(),
+        );
+        "disabled"
+    } else if tls_used {
+        "enabled"
+    } else {
+        "not_applicable"
+    };
+
+    let peer_certificate = tls_info
+        .and_then(reqwest::tls::TlsInfo::peer_certificate)
+        .map(|der| {
+            let digest = Sha256::digest(der);
+            let mut cert = json!({
+                "present": true,
+                "sha256": bytes_to_lower_hex(&digest),
+                "length_bytes": der.len(),
+            });
+            if include_certificate_der {
+                cert["der_base64"] = Value::String(general_purpose::STANDARD.encode(der));
+            }
+            cert
+        })
+        .unwrap_or_else(|| {
+            if tls_used {
+                json!({"present": false})
+            } else {
+                Value::Null
+            }
+        });
+
+    if tls_used && tls_info.is_none() {
+        warnings.push("TLS transport metadata was unavailable for this response.".to_string());
+    }
+
+    (
+        json!({
+            "used": tls_used,
+            "certificate_validation": validation,
+            "tls_info_available": tls_info.is_some(),
+            "peer_certificate": peer_certificate,
+        }),
+        warnings,
+    )
+}
+
+fn http_version_label(version: reqwest::Version) -> &'static str {
+    match version {
+        reqwest::Version::HTTP_09 => "HTTP/0.9",
+        reqwest::Version::HTTP_10 => "HTTP/1.0",
+        reqwest::Version::HTTP_11 => "HTTP/1.1",
+        reqwest::Version::HTTP_2 => "HTTP/2",
+        reqwest::Version::HTTP_3 => "HTTP/3",
+        _ => "unknown",
+    }
+}
+
 fn required_string_arg(arguments: &Value, field: &str, tool_name: &str) -> Result<String> {
     let value = arguments
         .get(field)
@@ -2104,6 +2380,19 @@ fn optional_u64_arg(arguments: &Value, field: &str, tool_name: &str) -> Result<O
         .as_u64()
         .map(Some)
         .ok_or_else(|| anyhow!("{tool_name}: '{field}' must be an unsigned integer or null"))
+}
+
+fn optional_bool_arg(arguments: &Value, field: &str, tool_name: &str) -> Result<Option<bool>> {
+    let Some(value) = arguments.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| anyhow!("{tool_name}: '{field}' must be a boolean or null"))
 }
 
 fn memory_patch_value<'a>(arguments: &'a Value, field: &str) -> Option<&'a Value> {
@@ -2167,6 +2456,7 @@ fn is_advertised_local_tool_name(name: &str) -> bool {
             | "local__search_conversation_memories"
             | "local__time"
             | "local__configure_mcp_servers"
+            | "local__webfetch"
             | "local__exec_cli"
             | "local__list_directory"
             | "local__read_file"
@@ -2297,9 +2587,10 @@ mod tests {
         collections::HashMap, fs, os::unix::fs::PermissionsExt, os::unix::fs::symlink, path::Path,
     };
 
+    use axum::{Router, routing::get};
     use serde_json::{Value, json};
     use tempfile::tempdir;
-    use tokio::time::Duration;
+    use tokio::{net::TcpListener, time::Duration};
 
     use crate::{
         config::{LocalToolsConfig, ToolEnvironmentConfig},
@@ -2308,7 +2599,9 @@ mod tests {
         types::{AgentPermissions, FilesystemAccess, FilesystemScope},
     };
 
-    use super::{LocalToolExecutor, SkillLaunchSpec, SkillProgram, local_tool_definitions};
+    use super::{
+        LocalToolExecutor, SkillLaunchSpec, SkillProgram, local_tool_definitions, webfetch_tls_json,
+    };
 
     fn file_tool_executor(root: &Path, permissions: AgentPermissions) -> LocalToolExecutor {
         let store = ConversationStore::new(root.join(".agent-data"), AgentPermissions::default());
@@ -3810,6 +4103,76 @@ Tools:
         assert!(err.to_string().contains("max_file_write_bytes"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn webfetch_returns_meta_headers_and_bounded_body() {
+        let app = Router::new().route(
+            "/",
+            get(|| async { ([("x-demo", "ok")], "hello webfetch") }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let dir = tempdir().unwrap();
+        let denied = file_tool_executor(dir.path(), AgentPermissions::default());
+        let err = denied
+            .execute("local__webfetch", json!({"url": format!("http://{addr}/")}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("network access"));
+
+        let executor = file_tool_executor(
+            dir.path(),
+            AgentPermissions {
+                allow_network: true,
+                ..AgentPermissions::default()
+            },
+        )
+        .with_local_tools_config(&LocalToolsConfig {
+            max_webfetch_bytes: 5,
+            ..LocalToolsConfig::default()
+        });
+        let output = executor
+            .execute(
+                "local__webfetch",
+                json!({"url": format!("http://{addr}/"), "max_bytes": 99}),
+            )
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["status"], 200);
+        assert_eq!(parsed["http_version"], "HTTP/1.1");
+        assert_eq!(parsed["tls"]["used"], false);
+        assert_eq!(parsed["body"]["text"], "hello");
+        assert_eq!(parsed["body"]["truncated"], true);
+        assert_eq!(parsed["body"]["truncated_by_cap"], true);
+        assert!(
+            parsed["headers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|header| header["name"] == "x-demo" && header["value"] == "ok")
+        );
+    }
+
+    #[test]
+    fn webfetch_tls_meta_warns_when_invalid_certs_are_accepted() {
+        let url = url::Url::parse("https://example.invalid/").unwrap();
+        let (tls, warnings) = webfetch_tls_json(&url, None, true, false);
+
+        assert_eq!(tls["used"], true);
+        assert_eq!(tls["certificate_validation"], "disabled");
+        assert_eq!(tls["peer_certificate"]["present"], false);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("certificate validation was disabled"))
+        );
+    }
+
     #[test]
     fn local_tool_schemas_avoid_top_level_combinators() {
         let definitions = local_tool_definitions(None, &LocalToolsConfig::default(), None);
@@ -4040,6 +4403,27 @@ pub fn local_tool_definitions(
                     "server_names": {"type": "array", "items": {"type": "string"}}
                 },
                 "required": ["action"]
+            }),
+        },
+        LlmTool {
+            name: "local__webfetch".to_string(),
+            description: format!(
+                "Fetch an HTTP or HTTPS URL with bounded response body capture. Returns response metadata, final URL, HTTP status/version, response headers, TLS certificate metadata when available, warnings, and body text or base64. Requires network permission. max_bytes is capped at {} bytes. Set accept_invalid_certs=true only for authorized diagnostics; the result metadata will warn that TLS certificate validation was disabled.",
+                local_tools_config.max_webfetch_bytes
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "HTTP or HTTPS URL to fetch"},
+                    "method": {"type": "string", "enum": ["GET", "HEAD"], "description": "HTTP method. Defaults to GET."},
+                    "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Optional request headers as string values"},
+                    "timeout_seconds": {"type": "integer", "description": "Optional request timeout capped by local_tools.execution_timeout_seconds"},
+                    "max_bytes": {"type": "integer", "description": "Maximum response body bytes to return, capped by local_tools.max_webfetch_bytes"},
+                    "body_format": {"type": "string", "enum": ["text", "base64"], "description": "Return body as UTF-8/lossy text or base64. Defaults to text."},
+                    "accept_invalid_certs": {"type": "boolean", "description": "Disable TLS certificate validation for this request. Use only for authorized diagnostics; warnings are included in metadata."},
+                    "include_certificate_der": {"type": "boolean", "description": "Include base64 DER leaf certificate in TLS metadata when available. Defaults to false."}
+                },
+                "required": ["url"]
             }),
         },
         LlmTool {

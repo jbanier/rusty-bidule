@@ -316,6 +316,7 @@ local_tools:
   max_file_read_bytes: 16384
   max_file_write_bytes: 1048576
   max_directory_entries: 1000
+  max_webfetch_bytes: 262144
   allowed_cli_tools:
     - nmap
     - vt

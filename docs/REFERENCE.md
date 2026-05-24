@@ -82,7 +82,7 @@ The config model is defined in `src/config.rs`. Main top-level keys:
 | `openai_compatible` | OpenAI Chat Completions compatible endpoint, model, optional API key, sampling settings, and tool budget. |
 | `mcp_servers` | Remote MCP server definitions. |
 | `mcp_runtime` | MCP connection timeout and parallelism settings. |
-| `local_tools` | Local execution timeout, file tool caps, and allowed CLI binaries. |
+| `local_tools` | Local execution timeout, file/web fetch caps, and allowed CLI binaries. |
 | `agent` | Agent iteration budgets and continuation increment defaults. |
 | `agent_permissions` | Default per-conversation network/filesystem/scope/yolo permissions. |
 | `tracing` | Log path and filtering settings. |

@@ -6,7 +6,7 @@ use adk_rust::{
     GenerateContentConfig, Llm as AdkLlm, LlmRequest as AdkLlmRequest,
     LlmResponse as AdkLlmResponse, Part as AdkPart, UsageMetadata as AdkUsageMetadata,
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_openai::{
     Client as AsyncOpenAiClient,
     config::AzureConfig,
@@ -1268,7 +1268,7 @@ fn parse_openai_chat_completion_payload(payload: &Value) -> Result<LlmCompletion
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("tool call missing function.name"))?
                 .to_string();
-            let input = parse_openai_tool_arguments(function.get("arguments"));
+            let input = parse_tool_input(&name, function.get("arguments").cloned());
             assistant_blocks.push(LlmAssistantBlock::ToolUse { id, name, input });
         }
     }
@@ -1287,16 +1287,6 @@ fn parse_openai_chat_completion_payload(payload: &Value) -> Result<LlmCompletion
         assistant_blocks,
         usage: parse_openai_usage(payload),
     })
-}
-
-fn parse_openai_tool_arguments(arguments: Option<&Value>) -> Value {
-    match arguments {
-        Some(Value::String(raw)) => {
-            serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.clone()))
-        }
-        Some(Value::Null) | None => json!({}),
-        Some(value) => value.clone(),
-    }
 }
 
 fn parse_openai_usage(payload: &Value) -> Option<LlmUsage> {
@@ -1325,6 +1315,207 @@ fn parse_openai_finish_reason(finish_reason: Option<&Value>) -> LlmStopReason {
         Some("tool_calls") | Some("function_call") => LlmStopReason::ToolUse,
         Some("length") => LlmStopReason::MaxTokens,
         Some(other) => LlmStopReason::Unknown(other.to_string()),
+    }
+}
+
+fn parse_tool_input(tool_name: &str, input: Option<Value>) -> Value {
+    let Some(input) = input else {
+        return json!({});
+    };
+    normalize_tool_input(tool_name, input)
+}
+
+fn normalize_tool_input(tool_name: &str, input: Value) -> Value {
+    match input {
+        Value::String(raw) => {
+            parse_tool_input_string(tool_name, &raw).unwrap_or_else(|| Value::String(raw))
+        }
+        Value::Object(mut map) => {
+            if map.len() == 1
+                && let Some(wrapped) = map
+                    .remove("arguments")
+                    .or_else(|| map.remove("input"))
+                    .or_else(|| map.remove("parameters"))
+            {
+                return normalize_tool_input(tool_name, wrapped);
+            }
+            Value::Object(map)
+        }
+        Value::Null => json!({}),
+        other => other,
+    }
+}
+
+fn parse_tool_input_string(tool_name: &str, raw: &str) -> Option<Value> {
+    serde_json::from_str(raw)
+        .ok()
+        .or_else(|| {
+            (tool_name == "local__write_file")
+                .then(|| parse_relaxed_json_object(raw).ok())
+                .flatten()
+        })
+        .map(|value| normalize_tool_input(tool_name, value))
+}
+
+fn parse_relaxed_json_object(raw: &str) -> Result<Value> {
+    let mut parser = RelaxedJsonObjectParser::new(raw);
+    parser.parse_object()
+}
+
+struct RelaxedJsonObjectParser {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl RelaxedJsonObjectParser {
+    fn new(raw: &str) -> Self {
+        Self {
+            chars: raw.chars().collect(),
+            pos: 0,
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<Value> {
+        self.skip_ws();
+        self.expect('{')?;
+        let mut map = serde_json::Map::new();
+        loop {
+            self.skip_ws();
+            if self.consume('}') {
+                break;
+            }
+            let key = self.parse_string()?;
+            self.skip_ws();
+            self.expect(':')?;
+            self.skip_ws();
+            let value = self.parse_value()?;
+            map.insert(key, value);
+            self.skip_ws();
+            if self.consume('}') {
+                break;
+            }
+            self.expect(',')?;
+        }
+        self.skip_ws();
+        if self.pos != self.chars.len() {
+            bail!("unexpected trailing content in tool arguments");
+        }
+        Ok(Value::Object(map))
+    }
+
+    fn parse_value(&mut self) -> Result<Value> {
+        self.skip_ws();
+        match self.peek() {
+            Some('"') => Ok(Value::String(self.parse_string()?)),
+            Some('{') => self.parse_object(),
+            Some('t') => {
+                self.expect_literal("true")?;
+                Ok(Value::Bool(true))
+            }
+            Some('f') => {
+                self.expect_literal("false")?;
+                Ok(Value::Bool(false))
+            }
+            Some('n') => {
+                self.expect_literal("null")?;
+                Ok(Value::Null)
+            }
+            Some('-' | '0'..='9') => self.parse_number(),
+            Some(other) => bail!("unexpected value start '{other}' in tool arguments"),
+            None => bail!("unexpected end of tool arguments"),
+        }
+    }
+
+    fn parse_string(&mut self) -> Result<String> {
+        self.expect('"')?;
+        let mut encoded = String::new();
+        while let Some(ch) = self.next() {
+            match ch {
+                '"' => {
+                    let quoted = format!("\"{encoded}\"");
+                    return serde_json::from_str(&quoted)
+                        .context("failed to decode relaxed JSON string");
+                }
+                '\\' => {
+                    encoded.push('\\');
+                    let escaped = self
+                        .next()
+                        .ok_or_else(|| anyhow!("unterminated escape in tool arguments"))?;
+                    encoded.push(escaped);
+                    if escaped == 'u' {
+                        for _ in 0..4 {
+                            let hex = self.next().ok_or_else(|| {
+                                anyhow!("unterminated unicode escape in tool arguments")
+                            })?;
+                            encoded.push(hex);
+                        }
+                    }
+                }
+                '\n' => encoded.push_str("\\n"),
+                '\r' => encoded.push_str("\\r"),
+                '\t' => encoded.push_str("\\t"),
+                ch if ch.is_control() => {
+                    bail!("unsupported control character in tool arguments")
+                }
+                other => encoded.push(other),
+            }
+        }
+        bail!("unterminated string in tool arguments")
+    }
+
+    fn parse_number(&mut self) -> Result<Value> {
+        let start = self.pos;
+        while let Some(ch) = self.peek() {
+            if ch == ',' || ch == '}' || ch.is_whitespace() {
+                break;
+            }
+            self.pos += 1;
+        }
+        let raw = self.chars[start..self.pos].iter().collect::<String>();
+        serde_json::from_str(&raw).with_context(|| format!("invalid number '{raw}'"))
+    }
+
+    fn expect_literal(&mut self, literal: &str) -> Result<()> {
+        for expected in literal.chars() {
+            self.expect(expected)?;
+        }
+        Ok(())
+    }
+
+    fn expect(&mut self, expected: char) -> Result<()> {
+        match self.next() {
+            Some(actual) if actual == expected => Ok(()),
+            Some(actual) => bail!(
+                "expected '{expected}' at character {}, got '{actual}' in tool arguments",
+                self.pos.saturating_sub(1)
+            ),
+            None => bail!("expected '{expected}', got end of tool arguments"),
+        }
+    }
+
+    fn consume(&mut self, expected: char) -> bool {
+        if self.peek() == Some(expected) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn next(&mut self) -> Option<char> {
+        let ch = self.peek()?;
+        self.pos += 1;
+        Some(ch)
     }
 }
 
@@ -1518,7 +1709,7 @@ fn parse_anthropic_tool_use(block: &Value) -> Result<LlmAssistantBlock> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("tool_use block missing name"))?
         .to_string();
-    let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+    let input = parse_tool_input(&name, block.get("input").cloned());
     Ok(LlmAssistantBlock::ToolUse { id, name, input })
 }
 
@@ -2000,6 +2191,105 @@ mod tests {
 
         assert_eq!(input["path"], "large.txt");
         assert_eq!(input["text"].as_str().unwrap().len(), 15_000);
+    }
+
+    #[test]
+    fn parses_openai_write_file_large_markdown_arguments_string() {
+        let large_markdown = (0..530)
+            .map(|line| {
+                format!("## Section {line}\n\n| columnA | columnB |\n| --- | --- |\n| valueforA | Value for B |\n\n")
+            })
+            .collect::<String>();
+        assert!(large_markdown.len() > 15_000);
+        let raw_arguments = serde_json::to_string(&json!({
+            "path": "large.md",
+            "mode": "overwrite",
+            "text": large_markdown,
+        }))
+        .unwrap();
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "local__write_file",
+                            "arguments": raw_arguments
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let completion = parse_openai_chat_completion_payload(&payload).unwrap();
+        let LlmAssistantBlock::ToolUse { input, .. } = &completion.assistant_blocks[0] else {
+            panic!("expected tool use");
+        };
+
+        assert_eq!(input["path"], "large.md");
+        assert!(input["text"].as_str().unwrap().len() > 15_000);
+        assert!(
+            input["text"]
+                .as_str()
+                .unwrap()
+                .contains("| columnA | columnB |")
+        );
+    }
+
+    #[test]
+    fn repairs_openai_write_file_arguments_with_literal_markdown_newlines() {
+        let raw_arguments = "{\"path\":\"report.md\",\"mode\":\"overwrite\",\"text\":\"# Report\n\n| columnA | columnB |\n| --- | --- |\n| valueforA | Value for B |\n\n```markdown\nbody\n```\"}";
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "local__write_file",
+                            "arguments": raw_arguments
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let completion = parse_openai_chat_completion_payload(&payload).unwrap();
+        let LlmAssistantBlock::ToolUse { input, .. } = &completion.assistant_blocks[0] else {
+            panic!("expected tool use");
+        };
+
+        assert_eq!(input["path"], "report.md");
+        assert_eq!(input["mode"], "overwrite");
+        assert!(
+            input["text"]
+                .as_str()
+                .unwrap()
+                .contains("```markdown\nbody\n```")
+        );
+    }
+
+    #[test]
+    fn parses_anthropic_write_file_input_when_returned_as_serialized_json() {
+        let large_markdown = "# Heading\n\n".repeat(2_000);
+        let raw_input = serde_json::to_string(&json!({
+            "path": "anthropic-large.md",
+            "text": large_markdown,
+        }))
+        .unwrap();
+        let payload = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "local__write_file", "input": raw_input}
+            ]
+        });
+
+        let completion = parse_anthropic_chat_completion_payload(&payload).unwrap();
+        let LlmAssistantBlock::ToolUse { input, .. } = &completion.assistant_blocks[0] else {
+            panic!("expected tool use");
+        };
+
+        assert_eq!(input["path"], "anthropic-large.md");
+        assert!(input["text"].as_str().unwrap().len() > 15_000);
     }
 
     #[test]

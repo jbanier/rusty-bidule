@@ -443,6 +443,9 @@ Workflow:
             "web-app-browser-evidence",
             "web-app-scanner-normalization",
             "web-app-ai-feature-review",
+            "web-app-client-side-review",
+            "web-app-error-crypto-posture",
+            "web-app-dependency-integrity",
         ];
 
         for name in expected {

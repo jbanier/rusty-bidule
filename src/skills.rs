@@ -1251,6 +1251,10 @@ Run `scripts/run.py`.
             "web-js-route-extractor",
             "web-payload-catalog",
             "web-ai-feature-review",
+            "web-client-side-audit",
+            "web-crypto-posture",
+            "web-dependency-sca",
+            "web-error-handling-review",
         ];
 
         for name in expected {
@@ -1435,6 +1439,54 @@ Run `scripts/run.py`.
                     "knowledge base",
                 ],
             ),
+            (
+                "skills/web-client-side-audit/scripts/client_side_audit.py",
+                vec![
+                    "--base-url",
+                    "https://example.com/app",
+                    "--target-urls",
+                    "https://example.com/app",
+                    "--allowed-hosts",
+                    "example.com",
+                    "--html-text",
+                    r#"<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.example"><script src="https://cdn.example/lib.js"></script><script>fetch('/api/users?id=1'); window.addEventListener('message', function(e) { el.innerHTML = location.hash; });</script>"#,
+                ],
+            ),
+            (
+                "skills/web-crypto-posture/scripts/crypto_posture.py",
+                vec![
+                    "--target-urls",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                    "--headers-json",
+                    r#"{"Strict-Transport-Security":"max-age=300","Content-Security-Policy":"default-src 'self' https://cdn.example"}"#,
+                    "--ct-hosts",
+                    "cdn.example,api.example.com",
+                ],
+            ),
+            (
+                "skills/web-dependency-sca/scripts/dependency_sca.py",
+                vec![
+                    "--asset-html-text",
+                    r#"<script src="https://cdn.example/lib.js"></script><link rel="stylesheet" href="https://cdn.example/app.css">"#,
+                    "--scanner-results-json",
+                    r#"[{"name":"lodash","severity":"high","id":"CVE-0000-0000"}]"#,
+                ],
+            ),
+            (
+                "skills/web-error-handling-review/scripts/error_handling_review.py",
+                vec![
+                    "--observations-json",
+                    r#"[{"body":"Traceback (most recent call last): File \"/app/views.py\", line 10, in handler"}]"#,
+                    "--routes-json",
+                    r#"["/api/users?id=1"]"#,
+                    "--target-urls",
+                    "https://example.com",
+                    "--allowed-hosts",
+                    "example.com",
+                ],
+            ),
         ];
 
         for (script, args) in scripts {
@@ -1509,7 +1561,151 @@ Run `scripts/run.py`.
         );
         assert_eq!(report["finding_count"], 1);
         assert_eq!(report["lead_count"], 1);
-        assert!(report["report_markdown"].as_str().unwrap().contains("## Leads And Gaps"));
+        assert!(
+            report["report_markdown"]
+                .as_str()
+                .unwrap()
+                .contains("## Leads And Gaps")
+        );
+
+        let client_audit = run_python_json(
+            &root.join("skills/web-client-side-audit/scripts/client_side_audit.py"),
+            &[
+                "--base-url",
+                "https://example.com/app",
+                "--target-urls",
+                "https://example.com/app",
+                "--allowed-hosts",
+                "example.com",
+                "--html-text",
+                r#"<script src="https://cdn.example/lib.js"></script><script>fetch('/api/users?id=1'); window.addEventListener('message', function(e) { el.innerHTML = location.hash; });</script>"#,
+                "--sitemap-text",
+                "<urlset><url><loc>https://example.com/api/report.json</loc></url></urlset>",
+                "--openapi-json",
+                r#"{"openapi":"3.0.0","paths":{"/v1/orders":{"get":{}}}}"#,
+                "--headers-json",
+                r#"{"Content-Security-Policy":"default-src 'self'; script-src 'self' https://cdn.example"}"#,
+            ],
+        );
+        assert!(
+            client_audit["api_candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item.as_str().unwrap().contains("/api/users"))
+        );
+        assert!(
+            client_audit["dom_risk_indicators"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["indicator"] == "post-message-listener")
+        );
+        assert!(
+            client_audit["shadow_api_candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["candidate"].as_str().unwrap().contains("/v1/orders"))
+        );
+
+        let crypto = run_python_json(
+            &root.join("skills/web-crypto-posture/scripts/crypto_posture.py"),
+            &[
+                "--target-urls",
+                "https://example.com",
+                "--allowed-hosts",
+                "example.com",
+                "--headers-json",
+                r#"{"Strict-Transport-Security":"max-age=300","Content-Security-Policy":"default-src 'self' https://cdn.example"}"#,
+                "--ct-hosts",
+                "cdn.example",
+            ],
+        );
+        assert!(
+            crypto["related_host_candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["host"] == "cdn.example" && item["in_scope"] == false)
+        );
+        assert!(
+            crypto["crypto_findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == "short-hsts-max-age")
+        );
+
+        let dependency_sca = run_python_json(
+            &root.join("skills/web-dependency-sca/scripts/dependency_sca.py"),
+            &[
+                "--asset-html-text",
+                r#"<script src="https://cdn.example/lib.js"></script>"#,
+                "--scanner-results-json",
+                r#"[{"name":"lodash","severity":"high","id":"CVE-0000-0000"}]"#,
+            ],
+        );
+        assert_eq!(dependency_sca["sri_coverage"]["missing_sri_count"], 1);
+        assert!(
+            dependency_sca["pinning_observations"]["floating_cdn_asset_count"]
+                .as_i64()
+                .unwrap()
+                >= 1
+        );
+        assert_eq!(
+            dependency_sca["normalized_sca_leads"][0]["package"],
+            "lodash"
+        );
+
+        let error_review = run_python_json(
+            &root.join("skills/web-error-handling-review/scripts/error_handling_review.py"),
+            &[
+                "--observations-json",
+                r#"[{"body":"Traceback (most recent call last): File \"/app/views.py\", line 10, in handler"}]"#,
+                "--routes-json",
+                r#"["/api/users?id=1"]"#,
+                "--target-urls",
+                "https://example.com",
+                "--allowed-hosts",
+                "example.com",
+            ],
+        );
+        assert!(
+            error_review["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == "stack-trace-python")
+        );
+        assert!(
+            error_review["prioritized_validation_targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["target"] == "/api/users?id=1")
+        );
+
+        let route_scope_failure = run_python_raw(
+            &root.join("skills/web-error-handling-review/scripts/error_handling_review.py"),
+            &[
+                "--urls",
+                "https://evil.example/api/users?id=1",
+                "--target-urls",
+                "https://example.com",
+                "--allowed-hosts",
+                "example.com",
+            ],
+        );
+        assert_ne!(route_scope_failure.status.code(), Some(0));
+        let parsed: Value = serde_json::from_slice(&route_scope_failure.stdout).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains("outside allowed_hosts")
+        );
     }
 
     fn run_python_json(script: &std::path::Path, args: &[&str]) -> Value {

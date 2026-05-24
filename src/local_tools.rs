@@ -722,6 +722,7 @@ impl LocalToolExecutor {
         let max_bytes = requested_max_bytes.min(self.max_webfetch_bytes);
         let max_body_len = usize::try_from(max_bytes)
             .map_err(|_| anyhow!("webfetch: max_bytes is too large for this platform"))?;
+        let proxy = webfetch_proxy_config(&arguments)?;
 
         let mut headers = webfetch_request_headers(&arguments)?;
         if !headers.contains_key(USER_AGENT) {
@@ -738,6 +739,12 @@ impl LocalToolExecutor {
             .redirect(reqwest::redirect::Policy::limited(10));
         if accept_invalid_certs {
             client_builder = client_builder.tls_danger_accept_invalid_certs(true);
+        }
+        if let Some(proxy) = &proxy {
+            client_builder =
+                client_builder.proxy(reqwest::Proxy::all(proxy.url.as_str()).with_context(
+                    || format!("webfetch: invalid proxy URL scheme '{}'", proxy.scheme),
+                )?);
         }
         let client = client_builder
             .build()
@@ -804,6 +811,7 @@ impl LocalToolExecutor {
             "status_text": status.canonical_reason().unwrap_or(""),
             "http_version": http_version_label(version),
             "elapsed_ms": elapsed_ms,
+            "proxy": webfetch_proxy_json(proxy.as_ref()),
             "headers": response_headers,
             "tls": tls,
             "warnings": warnings,
@@ -2211,6 +2219,46 @@ fn webfetch_request_headers(arguments: &Value) -> Result<HeaderMap> {
     Ok(headers)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebfetchProxyConfig {
+    url: String,
+    scheme: String,
+}
+
+fn webfetch_proxy_config(arguments: &Value) -> Result<Option<WebfetchProxyConfig>> {
+    let Some(raw_proxy) = optional_string_arg(arguments, "proxy", "webfetch")? else {
+        return Ok(None);
+    };
+    let proxy_url = url::Url::parse(&raw_proxy)
+        .with_context(|| format!("webfetch: invalid proxy URL '{raw_proxy}'"))?;
+    let scheme = proxy_url.scheme();
+    match scheme {
+        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h" => {}
+        other => bail!(
+            "webfetch: unsupported proxy scheme '{other}'; use http, https, socks4, socks4a, socks5, or socks5h"
+        ),
+    }
+    if proxy_url.host_str().is_none() {
+        bail!("webfetch: proxy URL must include a host");
+    }
+    Ok(Some(WebfetchProxyConfig {
+        url: proxy_url.to_string(),
+        scheme: scheme.to_string(),
+    }))
+}
+
+fn webfetch_proxy_json(proxy: Option<&WebfetchProxyConfig>) -> Value {
+    match proxy {
+        Some(proxy) => json!({
+            "used": true,
+            "scheme": proxy.scheme,
+        }),
+        None => json!({
+            "used": false,
+        }),
+    }
+}
+
 fn webfetch_headers_json(headers: &HeaderMap) -> Value {
     let items = headers
         .iter()
@@ -2590,7 +2638,11 @@ mod tests {
     use axum::{Router, routing::get};
     use serde_json::{Value, json};
     use tempfile::tempdir;
-    use tokio::{net::TcpListener, time::Duration};
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+        time::Duration,
+    };
 
     use crate::{
         config::{LocalToolsConfig, ToolEnvironmentConfig},
@@ -2600,7 +2652,8 @@ mod tests {
     };
 
     use super::{
-        LocalToolExecutor, SkillLaunchSpec, SkillProgram, local_tool_definitions, webfetch_tls_json,
+        LocalToolExecutor, SkillLaunchSpec, SkillProgram, local_tool_definitions,
+        webfetch_proxy_config, webfetch_tls_json,
     };
 
     fn file_tool_executor(root: &Path, permissions: AgentPermissions) -> LocalToolExecutor {
@@ -4159,6 +4212,90 @@ Tools:
     }
 
     #[test]
+    fn webfetch_proxy_config_accepts_tor_style_socks_and_rejects_unknown_schemes() {
+        let proxy = webfetch_proxy_config(&json!({"proxy": "socks5h://127.0.0.1:9050"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(proxy.scheme, "socks5h");
+
+        let err = webfetch_proxy_config(&json!({"proxy": "ftp://127.0.0.1:8080"})).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unsupported proxy scheme 'ftp'"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn webfetch_routes_request_through_http_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let mut request = Vec::new();
+            loop {
+                let n = stream.read(&mut buffer).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            request_tx
+                .send(String::from_utf8_lossy(&request).to_string())
+                .ok();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\nx-proxy: seen\r\nconnection: close\r\n\r\nproxied ok",
+                )
+                .await
+                .unwrap();
+        });
+
+        let dir = tempdir().unwrap();
+        let executor = file_tool_executor(
+            dir.path(),
+            AgentPermissions {
+                allow_network: true,
+                ..AgentPermissions::default()
+            },
+        );
+        let output = executor
+            .execute(
+                "local__webfetch",
+                json!({
+                    "url": "http://example.invalid/proxy-path",
+                    "proxy": format!("http://{proxy_addr}")
+                }),
+            )
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["status"], 200);
+        assert_eq!(parsed["proxy"]["used"], true);
+        assert_eq!(parsed["proxy"]["scheme"], "http");
+        assert_eq!(parsed["body"]["text"], "proxied ok");
+        assert!(
+            parsed["headers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|header| header["name"] == "x-proxy" && header["value"] == "seen")
+        );
+
+        let request = request_rx.await.unwrap();
+        assert!(
+            request.starts_with("GET http://example.invalid/proxy-path HTTP/1.1"),
+            "{request}"
+        );
+    }
+
+    #[test]
     fn webfetch_tls_meta_warns_when_invalid_certs_are_accepted() {
         let url = url::Url::parse("https://example.invalid/").unwrap();
         let (tls, warnings) = webfetch_tls_json(&url, None, true, false);
@@ -4417,6 +4554,7 @@ pub fn local_tool_definitions(
                     "url": {"type": "string", "description": "HTTP or HTTPS URL to fetch"},
                     "method": {"type": "string", "enum": ["GET", "HEAD"], "description": "HTTP method. Defaults to GET."},
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Optional request headers as string values"},
+                    "proxy": {"type": "string", "description": "Optional per-request proxy URL. Supports http://, https://, socks4://, socks4a://, socks5://, and socks5h://. Use socks5h://127.0.0.1:9050 for Tor DNS through the proxy; Burp commonly uses http://127.0.0.1:8080."},
                     "timeout_seconds": {"type": "integer", "description": "Optional request timeout capped by local_tools.execution_timeout_seconds"},
                     "max_bytes": {"type": "integer", "description": "Maximum response body bytes to return, capped by local_tools.max_webfetch_bytes"},
                     "body_format": {"type": "string", "enum": ["text", "base64"], "description": "Return body as UTF-8/lossy text or base64. Defaults to text."},

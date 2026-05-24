@@ -137,6 +137,7 @@ pub struct App {
     token_pricing: Option<TokenPricing>,
     messages: Vec<Message>,
     command_output: Vec<Message>,
+    transcript_cache: TranscriptRenderCache,
     message_scroll: u16,
     rendered_message_lines: u16,
     message_viewport_lines: u16,
@@ -153,6 +154,15 @@ pub struct App {
     ui_tx: UnboundedSender<UiEvent>,
     ui_rx: UnboundedReceiver<UiEvent>,
     should_quit: bool,
+    needs_redraw: bool,
+}
+
+#[derive(Debug, Default)]
+struct TranscriptRenderCache {
+    lines: Vec<Line<'static>>,
+    wrapped_width: u16,
+    wrapped_rows: u16,
+    dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +256,10 @@ impl App {
             token_pricing,
             messages,
             command_output: Vec::new(),
+            transcript_cache: TranscriptRenderCache {
+                dirty: true,
+                ..TranscriptRenderCache::default()
+            },
             message_scroll: 0,
             rendered_message_lines: 0,
             message_viewport_lines: 0,
@@ -262,6 +276,7 @@ impl App {
             ui_tx,
             ui_rx,
             should_quit: false,
+            needs_redraw: true,
         })
     }
 
@@ -278,21 +293,36 @@ impl App {
 
     async fn run_loop(&mut self, mut terminal: DefaultTerminal) -> Result<()> {
         while !self.should_quit {
+            let mut received_ui_event = false;
             while let Ok(event) = self.ui_rx.try_recv() {
                 self.handle_ui_event(event)?;
+                received_ui_event = true;
             }
-
-            terminal.draw(|frame| self.render(frame))?;
-
-            if event::poll(Duration::from_millis(100))?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.handle_key_event(key).await?;
+            if received_ui_event {
+                self.needs_redraw = true;
             }
 
             if self.inflight {
                 self.spinner_index = (self.spinner_index + 1) % SPINNER.len();
+                self.needs_redraw = true;
+            }
+
+            if self.needs_redraw {
+                terminal.draw(|frame| self.render(frame))?;
+                self.needs_redraw = false;
+            }
+
+            if event::poll(Duration::from_millis(100))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        self.handle_key_event(key).await?;
+                        self.needs_redraw = true;
+                    }
+                    Event::Resize(_, _) => {
+                        self.needs_redraw = true;
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -622,84 +652,47 @@ impl App {
     }
 
     fn render_transcript(&mut self, area_width: u16, area_height: u16) -> Paragraph<'static> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        let transcript_messages = ordered_transcript_messages(&self.messages, &self.command_output);
-
-        if transcript_messages.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "No messages yet. Use the input pane below to start a session.",
-                Style::default().fg(muted_synth()),
-            )));
-        } else {
-            lines.extend(transcript_messages.into_iter().flat_map(|message| {
-                let (role_label, role_style) = match message.role.as_str() {
-                    "user" => (
-                        "USER",
-                        Style::default()
-                            .fg(neon_cyan())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    "assistant" => (
-                        "ASSISTANT",
-                        Style::default()
-                            .fg(neon_pink())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    "command" => (
-                        "COMMAND",
-                        Style::default()
-                            .fg(neon_orange())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    _ => (
-                        "SYSTEM",
-                        Style::default()
-                            .fg(neon_gold())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                };
-                let timestamp = message
-                    .timestamp
-                    .with_timezone(&Local)
-                    .format("%H:%M:%S")
-                    .to_string();
-                let mut header = vec![
-                    Span::styled(role_label.to_string(), role_style),
-                    Span::raw("  "),
-                    Span::styled(timestamp, Style::default().fg(muted_synth())),
-                ];
-                if let Some(metadata) = &message.metadata {
-                    header.push(Span::raw("  "));
-                    header.push(Span::styled(
-                        format!(
-                            "#{}  {}t  {:.1}s",
-                            metadata.assistant_index,
-                            metadata.tool_call_count,
-                            metadata.timing.total_seconds
-                        ),
-                        Style::default().fg(neon_gold()),
-                    ));
-                }
-                let mut message_lines = vec![Line::from(header)];
-                message_lines.extend(render_markdown(&message.content));
-                message_lines.push(Line::raw(""));
-                message_lines
-            }));
+        self.refresh_transcript_cache();
+        if self.transcript_cache.wrapped_width != area_width {
+            self.transcript_cache.wrapped_width = area_width;
+            self.transcript_cache.wrapped_rows =
+                count_wrapped_rows(&self.transcript_cache.lines, area_width).min(u16::MAX as usize)
+                    as u16;
         }
 
-        self.rendered_message_lines =
-            count_wrapped_rows(&lines, area_width).min(u16::MAX as usize) as u16;
+        self.rendered_message_lines = self.transcript_cache.wrapped_rows;
         self.message_viewport_lines = area_height;
         self.message_scroll = self.message_scroll.min(max_message_scroll(
             self.rendered_message_lines,
             self.message_viewport_lines,
         ));
 
-        Paragraph::new(Text::from(lines))
-            .scroll((self.message_scroll, 0))
+        let (visible_lines, inner_scroll) = visible_wrapped_window(
+            &self.transcript_cache.lines,
+            area_width,
+            self.message_scroll,
+            self.message_viewport_lines,
+        );
+
+        Paragraph::new(Text::from(visible_lines))
+            .scroll((inner_scroll, 0))
             .style(Style::default().fg(synth_text()).bg(void_black()))
             .wrap(Wrap { trim: false })
+    }
+
+    fn refresh_transcript_cache(&mut self) {
+        if !self.transcript_cache.dirty {
+            return;
+        }
+
+        self.transcript_cache.lines = build_transcript_lines(&self.messages, &self.command_output);
+        self.transcript_cache.wrapped_width = 0;
+        self.transcript_cache.wrapped_rows = 0;
+        self.transcript_cache.dirty = false;
+    }
+
+    fn invalidate_transcript_cache(&mut self) {
+        self.transcript_cache.dirty = true;
     }
 
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
@@ -1839,6 +1832,7 @@ impl App {
                         self.messages = conversation.messages;
                         self.enabled_mcp_servers = conversation.enabled_mcp_servers;
                         self.agent_permissions = conversation.agent_permissions;
+                        self.invalidate_transcript_cache();
                         self.scroll_messages_to_latest();
                         self.status = format!("Reply ready // {} tool calls", run.tool_calls);
                         self.activities.push(format!(
@@ -1925,6 +1919,7 @@ impl App {
         self.agent_permissions = conversation.agent_permissions;
         self.message_scroll = 0;
         self.persistent_warning = None;
+        self.invalidate_transcript_cache();
     }
 
     fn push_command_output(&mut self, command: &str, body: impl Into<String>) {
@@ -1945,6 +1940,7 @@ impl App {
             let excess = self.command_output.len() - MAX_COMMAND_OUTPUT_ENTRIES;
             self.command_output.drain(0..excess);
         }
+        self.invalidate_transcript_cache();
         self.scroll_messages_to_latest();
     }
 
@@ -2140,12 +2136,84 @@ fn ordered_messages(messages: &[Message]) -> Vec<&Message> {
     messages.iter().rev().collect()
 }
 
-fn ordered_transcript_messages(messages: &[Message], command_output: &[Message]) -> Vec<Message> {
+fn ordered_transcript_messages<'a>(
+    messages: &'a [Message],
+    command_output: &'a [Message],
+) -> Vec<&'a Message> {
     let mut combined = Vec::with_capacity(messages.len() + command_output.len());
-    combined.extend(messages.iter().cloned());
-    combined.extend(command_output.iter().cloned());
+    combined.extend(messages.iter());
+    combined.extend(command_output.iter());
     combined.sort_by_key(|message| std::cmp::Reverse(message.timestamp));
     combined
+}
+
+fn build_transcript_lines(messages: &[Message], command_output: &[Message]) -> Vec<Line<'static>> {
+    let transcript_messages = ordered_transcript_messages(messages, command_output);
+
+    if transcript_messages.is_empty() {
+        return vec![Line::from(Span::styled(
+            "No messages yet. Use the input pane below to start a session.",
+            Style::default().fg(muted_synth()),
+        ))];
+    }
+
+    transcript_messages
+        .into_iter()
+        .flat_map(render_message_lines)
+        .collect()
+}
+
+fn render_message_lines(message: &Message) -> Vec<Line<'static>> {
+    let (role_label, role_style) = match message.role.as_str() {
+        "user" => (
+            "USER",
+            Style::default()
+                .fg(neon_cyan())
+                .add_modifier(Modifier::BOLD),
+        ),
+        "assistant" => (
+            "ASSISTANT",
+            Style::default()
+                .fg(neon_pink())
+                .add_modifier(Modifier::BOLD),
+        ),
+        "command" => (
+            "COMMAND",
+            Style::default()
+                .fg(neon_orange())
+                .add_modifier(Modifier::BOLD),
+        ),
+        _ => (
+            "SYSTEM",
+            Style::default()
+                .fg(neon_gold())
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+    let timestamp = message
+        .timestamp
+        .with_timezone(&Local)
+        .format("%H:%M:%S")
+        .to_string();
+    let mut header = vec![
+        Span::styled(role_label.to_string(), role_style),
+        Span::raw("  "),
+        Span::styled(timestamp, Style::default().fg(muted_synth())),
+    ];
+    if let Some(metadata) = &message.metadata {
+        header.push(Span::raw("  "));
+        header.push(Span::styled(
+            format!(
+                "#{}  {}t  {:.1}s",
+                metadata.assistant_index, metadata.tool_call_count, metadata.timing.total_seconds
+            ),
+            Style::default().fg(neon_gold()),
+        ));
+    }
+    let mut message_lines = vec![Line::from(header)];
+    message_lines.extend(render_markdown(&message.content));
+    message_lines.push(Line::raw(""));
+    message_lines
 }
 
 fn build_help_markdown() -> String {
@@ -2265,15 +2333,62 @@ fn count_wrapped_rows(lines: &[Line<'_>], width: u16) -> usize {
     let width = usize::from(width.max(1));
     lines
         .iter()
-        .map(|line| {
-            let line_width = line.width();
-            if line_width == 0 {
-                1
-            } else {
-                line_width.div_ceil(width)
-            }
-        })
+        .map(|line| wrapped_line_rows(line, width))
         .sum()
+}
+
+fn wrapped_line_rows(line: &Line<'_>, width: usize) -> usize {
+    let line_width = line.width();
+    if line_width == 0 {
+        1
+    } else {
+        line_width.div_ceil(width)
+    }
+}
+
+fn visible_wrapped_window(
+    lines: &[Line<'static>],
+    width: u16,
+    scroll: u16,
+    viewport_lines: u16,
+) -> (Vec<Line<'static>>, u16) {
+    if lines.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let width = usize::from(width.max(1));
+    let scroll = usize::from(scroll);
+    let viewport_rows = usize::from(viewport_lines.max(1));
+    let mut consumed_rows = 0usize;
+    let mut start_index = 0usize;
+    let mut inner_scroll = 0usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        let rows = wrapped_line_rows(line, width);
+        if consumed_rows + rows > scroll {
+            start_index = index;
+            inner_scroll = scroll - consumed_rows;
+            break;
+        }
+        consumed_rows += rows;
+        start_index = index.saturating_add(1).min(lines.len().saturating_sub(1));
+    }
+
+    let target_rows = inner_scroll + viewport_rows + 1;
+    let mut included_rows = 0usize;
+    let mut end_index = start_index;
+    while end_index < lines.len() && included_rows < target_rows {
+        included_rows += wrapped_line_rows(&lines[end_index], width);
+        end_index += 1;
+    }
+    if end_index == start_index {
+        end_index = (start_index + 1).min(lines.len());
+    }
+
+    (
+        lines[start_index..end_index].to_vec(),
+        inner_scroll.min(u16::MAX as usize) as u16,
+    )
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2856,7 +2971,7 @@ mod tests {
 
     use axum::{Json, Router, routing::post};
     use chrono::{TimeZone, Utc};
-    use ratatui::style::Modifier;
+    use ratatui::{style::Modifier, text::Line};
     use serde_json::json;
     use tempfile::{TempDir, tempdir};
     use tokio::net::TcpListener;
@@ -2878,7 +2993,7 @@ mod tests {
         App, McpServerStatus, TokenPricing, build_mcp_server_statuses,
         build_scroll_indicator_lines, canonicalize_mcp_filter, count_wrapped_rows,
         max_message_scroll, neon_cyan, neon_gold, neon_pink, ordered_messages, render_markdown,
-        synth_text,
+        synth_text, visible_wrapped_window,
     };
 
     fn line_text(line: &ratatui::text::Line<'_>) -> String {
@@ -3184,6 +3299,17 @@ mod tests {
         let lines = render_markdown("12345\n\n123456");
 
         assert_eq!(count_wrapped_rows(&lines, 5), 5);
+    }
+
+    #[test]
+    fn visible_wrapped_window_limits_rendered_transcript_lines() {
+        let lines = vec![Line::raw("123456"), Line::raw("abc"), Line::raw("xyz")];
+
+        let (visible, inner_scroll) = visible_wrapped_window(&lines, 3, 2, 1);
+
+        assert_eq!(inner_scroll, 0);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(line_text(&visible[0]), "abc");
     }
 
     #[test]

@@ -1610,6 +1610,7 @@ mod tests {
         assert_eq!(result, "world");
         assert_eq!(state.initialize_count.load(Ordering::SeqCst), 1);
         assert_eq!(state.missing_session_count.load(Ordering::SeqCst), 0);
+        manager.reset_server_session(0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1642,6 +1643,7 @@ mod tests {
         assert_eq!(manager.servers[0].transport, Transport::Sse);
         assert_eq!(state.initialize_count.load(Ordering::SeqCst), 1);
         assert_eq!(state.missing_session_count.load(Ordering::SeqCst), 1);
+        manager.reset_server_session(0);
     }
 
     #[tokio::test(flavor = "current_thread")]

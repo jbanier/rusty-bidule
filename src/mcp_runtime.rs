@@ -730,7 +730,7 @@ impl McpManager {
             .into());
         }
 
-        if text.trim().is_empty() {
+        if status == StatusCode::ACCEPTED || text.trim().is_empty() {
             return Ok((headers, None));
         }
 
@@ -987,6 +987,11 @@ impl SseEventParser {
         let value = value.strip_prefix(' ').unwrap_or(value);
         match field {
             "event" => self.current_event = Some(value.to_string()),
+            "data" if self.current_event.as_deref() == Some("endpoint") => {
+                self.current_event = None;
+                self.data_lines.clear();
+                events.push(SseEvent::Endpoint(value.trim().to_string()));
+            }
             "data" => self.data_lines.push(value.to_string()),
             _ => {}
         }
@@ -1440,6 +1445,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parses_sse_endpoint_event_without_blank_delimiter() {
+        let body = "event: endpoint\ndata: ?sessionId=abc123";
+
+        assert_eq!(
+            parse_sse_endpoint_event(body).as_deref(),
+            Some("?sessionId=abc123")
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn parses_stdio_framed_jsonrpc_result() {
         let payload =
@@ -1758,7 +1773,7 @@ mod tests {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
 
-        StatusCode::ACCEPTED.into_response()
+        (StatusCode::ACCEPTED, "Accepted").into_response()
     }
 
     async fn spawn_legacy_sse_server(state: Arc<LegacySseState>) -> std::net::SocketAddr {

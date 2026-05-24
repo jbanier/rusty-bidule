@@ -977,6 +977,26 @@ impl RememberedJob {
                 .map(|lease| lease <= now)
                 .unwrap_or(true)
     }
+
+    pub fn is_clearable(&self) -> bool {
+        matches!(
+            self.status
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some(
+                "completed"
+                    | "done"
+                    | "success"
+                    | "finished"
+                    | "failed"
+                    | "error"
+                    | "cancelled"
+                    | "canceled"
+            )
+        )
+    }
 }
 
 fn validate_non_empty_job_field(label: &str, value: String) -> Result<String> {

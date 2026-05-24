@@ -2112,6 +2112,27 @@
     return sourceTool || '—';
   }
 
+  function isClearableJob(job) {
+    const status = String(job && job.status || '').trim().toLowerCase();
+    return ['completed', 'done', 'success', 'finished', 'failed', 'error', 'cancelled', 'canceled'].includes(status);
+  }
+
+  async function clearRememberedJob(alias) {
+    if (!state.activeConversationId || !alias) return;
+    const response = await fetch(
+      `/api/conversations/${state.activeConversationId}/jobs?alias=${encodeURIComponent(alias)}`,
+      { method: 'DELETE' }
+    );
+    const payload = await readResponseJson(response) || {};
+    if (!response.ok) {
+      setRunStatus('error', payload.description || payload.error || 'Failed to clear job.');
+      return;
+    }
+    delete state.jobSnapshot[alias];
+    showToast(`Job <strong>${escapeHtml(alias)}</strong> cleared`, 'job-change');
+    await refreshJobs();
+  }
+
   function renderJobs(jobs) {
     const runningStatuses = ['running', 'pending', 'submitted', 'in_progress'];
     const runningJobs = jobs.filter((job) => runningStatuses.includes(String(job.status || '').toLowerCase()));
@@ -2129,13 +2150,14 @@
     jobsRunningCountEl.textContent = `${runningJobs.length} running`;
     const table = document.createElement('table');
     table.className = 'jobs-table';
-    table.innerHTML = '<thead><tr><th>Alias</th><th>Status</th><th>Retrieval</th><th>Tool</th><th>Transaction ID</th><th>Artifacts</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th>Alias</th><th>Status</th><th>Retrieval</th><th>Tool</th><th>Transaction ID</th><th>Artifacts</th><th>Action</th></tr></thead>';
     const tbody = document.createElement('tbody');
     jobs.forEach((job) => {
       const tr = document.createElement('tr');
       const status = job.status || '';
       const statusLower = status.toLowerCase();
       const isRunning = runningStatuses.includes(statusLower);
+      const canClear = isClearableJob(job) && Boolean(job.alias);
       let badgeClass = 'job-badge-default';
       if (['completed', 'done', 'success', 'finished'].includes(statusLower)) badgeClass = 'job-badge-success';
       else if (['failed', 'error', 'cancelled', 'canceled'].includes(statusLower)) badgeClass = 'job-badge-error';
@@ -2159,7 +2181,18 @@
         <td>${escapeHtml(toolLabel)}</td>
         <td title="${escapeHtml(txId)}">${escapeHtml(txShort)}</td>
         <td title="${escapeHtml(artifacts.map((item) => item.path || item.name || '').join(', '))}">${escapeHtml(artifactLabel)}</td>
+        <td class="jobs-action-cell"></td>
       `;
+      const clearButton = document.createElement('button');
+      clearButton.className = 'job-clear-button';
+      clearButton.type = 'button';
+      clearButton.textContent = 'Clear';
+      clearButton.disabled = !canClear;
+      clearButton.title = canClear
+        ? 'Clear this reviewed job from the conversation'
+        : 'Only completed, failed, or cancelled jobs can be cleared';
+      clearButton.addEventListener('click', () => clearRememberedJob(job.alias || ''));
+      tr.querySelector('.jobs-action-cell').appendChild(clearButton);
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);

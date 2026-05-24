@@ -23,8 +23,8 @@ use crate::{
     schedules::{ScheduleCreateRequest, build_schedule_record, run_schedule_by_id},
     types::{
         AgentBudgetOverride, ConversationSummary, FilesystemAccess, FilesystemScope,
-        FindingRecordDetails, FindingValidationGate, ProgressEvent, RetentionPolicy,
-        RunTurnResult, UiEvent,
+        FindingRecordDetails, FindingValidationGate, ProgressEvent, RetentionPolicy, RunTurnResult,
+        UiEvent,
     },
 };
 
@@ -106,6 +106,11 @@ impl From<ConversationSummary> for ConvoSummaryResponse {
 #[derive(Deserialize)]
 struct ConversationListQuery {
     include_archived: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct JobAliasQuery {
+    alias: String,
 }
 
 #[derive(Deserialize)]
@@ -901,6 +906,19 @@ async fn list_conversation_jobs(
     Ok(axum::Json(json!(jobs)))
 }
 
+async fn delete_conversation_job(
+    State(state): State<WebAppState>,
+    Path(id): Path<String>,
+    Query(query): Query<JobAliasQuery>,
+) -> AppResult<StatusCode> {
+    validate_resource_id(&id, "conversation")?;
+    state
+        .orchestrator
+        .store()
+        .clear_remembered_job(&id, &query.alias)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_conversation_evidence(
     State(state): State<WebAppState>,
     Path(id): Path<String>,
@@ -1390,7 +1408,10 @@ pub async fn run_web_server(
             "/api/conversations/{id}/mcp-statuses",
             get(get_mcp_statuses),
         )
-        .route("/api/conversations/{id}/jobs", get(list_conversation_jobs))
+        .route(
+            "/api/conversations/{id}/jobs",
+            get(list_conversation_jobs).delete(delete_conversation_job),
+        )
         .route(
             "/api/conversations/{id}/evidence",
             get(list_conversation_evidence),
@@ -1554,17 +1575,21 @@ mod tests {
         config::{AppConfig, LocalToolsConfig, McpRuntimeConfig, SkillsConfig},
         orchestrator::Orchestrator,
         recipes::RecipeRegistry,
-        types::{AgentPermissions, FilesystemAccess, FilesystemScope, FindingValidationGate},
+        types::{
+            AgentPermissions, FilesystemAccess, FilesystemScope, FindingValidationGate,
+            RememberedJob,
+        },
     };
 
     use super::{
         AgentBudgetBody, COMPLETED_JOB_TTL, ConversationListQuery, ConversationTitleBody,
-        FindingBody, JobState, McpStatusesQuery, PermissionsUpdateBody, PostMessageBody,
-        ScratchpadBody, SearchQuery, WebAppState, archive_conversation, create_finding,
-        delete_agent_budget, evict_expired_jobs, export_summary, get_conversation_permissions,
-        get_export_summary, get_mcp_statuses, get_scratchpad, list_conversations, list_findings,
-        post_message, put_agent_budget, put_conversation_permissions, put_conversation_title,
-        put_scratchpad, search_local, unarchive_conversation, update_finding,
+        FindingBody, JobAliasQuery, JobState, McpStatusesQuery, PermissionsUpdateBody,
+        PostMessageBody, ScratchpadBody, SearchQuery, WebAppState, archive_conversation,
+        create_finding, delete_agent_budget, delete_conversation_job, evict_expired_jobs,
+        export_summary, get_conversation_permissions, get_export_summary, get_mcp_statuses,
+        get_scratchpad, list_conversations, list_findings, post_message, put_agent_budget,
+        put_conversation_permissions, put_conversation_title, put_scratchpad, search_local,
+        unarchive_conversation, update_finding,
     };
 
     fn test_config(data_dir: std::path::PathBuf) -> AppConfig {
@@ -1661,6 +1686,62 @@ mod tests {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         );
         assert!(state.jobs.lock().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_conversation_job_clears_only_finished_remembered_jobs() {
+        let dir = tempdir().unwrap();
+        let orchestrator = Orchestrator::new(test_config(dir.path().to_path_buf())).unwrap();
+        let conversation = orchestrator.store().create_conversation().unwrap();
+        let state = WebAppState {
+            orchestrator,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            recipes: Arc::new(RecipeRegistry::default()),
+        };
+        let mut completed =
+            RememberedJob::new("finished-scan".to_string(), "tx-1".to_string()).unwrap();
+        completed.status = Some("completed".to_string());
+        let mut running =
+            RememberedJob::new("active-scan".to_string(), "tx-2".to_string()).unwrap();
+        running.status = Some("running".to_string());
+        state
+            .orchestrator
+            .store()
+            .save_job_state(&conversation.conversation_id, &[completed, running])
+            .unwrap();
+
+        let cleared = delete_conversation_job(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+            Query(JobAliasQuery {
+                alias: "finished-scan".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cleared, StatusCode::NO_CONTENT);
+        let jobs = state
+            .orchestrator
+            .store()
+            .load_job_state(&conversation.conversation_id)
+            .unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].alias, "active-scan");
+
+        let err = delete_conversation_job(
+            State(state.clone()),
+            Path(conversation.conversation_id.clone()),
+            Query(JobAliasQuery {
+                alias: "active-scan".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

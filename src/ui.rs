@@ -1045,34 +1045,87 @@ impl App {
                 self.activities
                     .push("Logging configuration opened in transcript.".to_string());
             }
-            "/jobs" => {
-                let jobs = self
-                    .orchestrator
-                    .store()
-                    .load_job_state(&self.current_conversation_id)?;
-                let body = if jobs.is_empty() {
-                    "No remembered jobs for this conversation.".to_string()
-                } else {
-                    jobs.iter()
-                        .map(|job| {
-                            format!(
-                                "- `{}`: tx=`{}` status=`{}` mode=`{}` next_poll_at=`{}`",
-                                job.alias,
-                                job.transaction_id,
-                                job.status.as_deref().unwrap_or("unknown"),
-                                job.mode.as_deref().unwrap_or("manual"),
-                                job.next_poll_at
-                                    .map(|value| value.to_rfc3339())
-                                    .unwrap_or_else(|| "-".to_string())
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-                self.push_command_output("/jobs", body);
-                self.activities
-                    .push("Remembered jobs opened in transcript.".to_string());
-            }
+            "/jobs" => match parts.next() {
+                Some("clear" | "forget") => {
+                    let alias = parts.collect::<Vec<_>>().join(" ");
+                    if alias.trim().is_empty() {
+                        self.activities
+                            .push("Usage: /jobs clear <alias>".to_string());
+                        return Ok(());
+                    }
+                    let removed = self
+                        .orchestrator
+                        .store()
+                        .clear_remembered_job(&self.current_conversation_id, &alias)?;
+                    self.push_command_output(
+                        "/jobs clear",
+                        format!(
+                            "Cleared remembered job `{}` (tx=`{}`).",
+                            removed.alias, removed.transaction_id
+                        ),
+                    );
+                    self.activities
+                        .push(format!("Remembered job '{}' cleared.", removed.alias));
+                }
+                Some("clear-completed" | "clear-finished") => {
+                    let removed = self
+                        .orchestrator
+                        .store()
+                        .clear_clearable_jobs(&self.current_conversation_id)?;
+                    let body = if removed.is_empty() {
+                        "No completed, failed, or cancelled jobs to clear.".to_string()
+                    } else {
+                        format!(
+                            "Cleared {} remembered job(s): {}",
+                            removed.len(),
+                            removed
+                                .iter()
+                                .map(|job| format!("`{}`", job.alias))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    self.push_command_output("/jobs clear-completed", body);
+                    self.activities.push(format!(
+                        "Cleared {} completed remembered job(s).",
+                        removed.len()
+                    ));
+                }
+                Some("list") | None => {
+                    let jobs = self
+                        .orchestrator
+                        .store()
+                        .load_job_state(&self.current_conversation_id)?;
+                    let body = if jobs.is_empty() {
+                        "No remembered jobs for this conversation.".to_string()
+                    } else {
+                        jobs.iter()
+                            .map(|job| {
+                                format!(
+                                    "- `{}`: tx=`{}` status=`{}` mode=`{}` next_poll_at=`{}`",
+                                    job.alias,
+                                    job.transaction_id,
+                                    job.status.as_deref().unwrap_or("unknown"),
+                                    job.mode.as_deref().unwrap_or("manual"),
+                                    job.next_poll_at
+                                        .map(|value| value.to_rfc3339())
+                                        .unwrap_or_else(|| "-".to_string())
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    self.push_command_output("/jobs", body);
+                    self.activities
+                        .push("Remembered jobs opened in transcript.".to_string());
+                }
+                Some(_) => {
+                    self.activities.push(
+                        "Usage: /jobs [list] | /jobs clear <alias> | /jobs clear-completed"
+                            .to_string(),
+                    );
+                }
+            },
             "/scratch" => {
                 let sub = parts.next().unwrap_or_default();
                 match sub {
@@ -2111,7 +2164,8 @@ fn build_help_markdown() -> String {
         "- `/compact`: Compact the current conversation",
         "- `/continue [rounds]`: Resume an active turn continuation",
         "- `/budget set <rounds>` / `/budget reset`: Override the conversation iteration budget",
-        "- `/jobs`: Show remembered jobs for the current conversation",
+        "- `/jobs [list]`: Show remembered jobs for the current conversation",
+        "- `/jobs clear <alias>` / `/jobs clear-completed`: Clear reviewed remembered jobs",
         "- `/scratch [show|set|append|clear]`: Manage the local scratchpad for this conversation",
         "- `/findings [list|add|update|remove]`: Manage structured findings for this conversation",
         "- `/search <query>`: Search conversations, scratchpads, and findings locally",
@@ -2816,7 +2870,7 @@ mod tests {
         prompt_expansion::expand_prompt_file_references,
         types::{
             AgentPermissions, FilesystemAccess, FilesystemScope, LlmUsage, Message,
-            MessageMetadata, MessageTiming, UiEvent,
+            MessageMetadata, MessageTiming, RememberedJob, UiEvent,
         },
     };
 
@@ -3246,6 +3300,40 @@ mod tests {
         let help = &app.command_output.last().unwrap().content;
         assert!(help.contains("`/mcp` or `/mcp status`: Show MCP server status"));
         assert!(help.contains("`/permissions reset`: Restore config defaults"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jobs_clear_command_removes_finished_job() {
+        let (_dir, mut app) = test_app(&[]).await;
+        let mut completed =
+            RememberedJob::new("finished-scan".to_string(), "tx-1".to_string()).unwrap();
+        completed.status = Some("completed".to_string());
+        let mut running =
+            RememberedJob::new("active-scan".to_string(), "tx-2".to_string()).unwrap();
+        running.status = Some("running".to_string());
+        app.orchestrator
+            .store()
+            .save_job_state(&app.current_conversation_id, &[completed, running])
+            .unwrap();
+
+        app.handle_command("/jobs clear finished-scan")
+            .await
+            .unwrap();
+
+        let jobs = app
+            .orchestrator
+            .store()
+            .load_job_state(&app.current_conversation_id)
+            .unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].alias, "active-scan");
+        assert!(
+            app.command_output
+                .last()
+                .unwrap()
+                .content
+                .contains("Cleared remembered job `finished-scan`")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

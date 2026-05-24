@@ -1063,6 +1063,47 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub fn clear_remembered_job(
+        &self,
+        conversation_id: &str,
+        alias: &str,
+    ) -> Result<RememberedJob> {
+        let alias = alias.trim();
+        if alias.is_empty() {
+            bail!("job alias must not be empty");
+        }
+        let mut jobs = self.load_job_state(conversation_id)?;
+        let index = jobs
+            .iter()
+            .position(|job| job.alias == alias)
+            .ok_or_else(|| anyhow::anyhow!("Job '{alias}' not found."))?;
+        if !jobs[index].is_clearable() {
+            bail!(
+                "Job '{alias}' is still active; only completed, failed, or cancelled jobs can be cleared."
+            );
+        }
+        let removed = jobs.remove(index);
+        self.save_job_state(conversation_id, &jobs)?;
+        Ok(removed)
+    }
+
+    pub fn clear_clearable_jobs(&self, conversation_id: &str) -> Result<Vec<RememberedJob>> {
+        let jobs = self.load_job_state(conversation_id)?;
+        let mut kept = Vec::new();
+        let mut removed = Vec::new();
+        for job in jobs {
+            if job.is_clearable() {
+                removed.push(job);
+            } else {
+                kept.push(job);
+            }
+        }
+        if !removed.is_empty() {
+            self.save_job_state(conversation_id, &kept)?;
+        }
+        Ok(removed)
+    }
+
     pub fn save_workflow_run(&self, run: &WorkflowRun) -> Result<()> {
         self.ensure_layout(&run.conversation_id)?;
         let path = self.workflow_run_path(&run.conversation_id, &run.workflow_id)?;

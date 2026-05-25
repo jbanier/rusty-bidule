@@ -26,6 +26,16 @@ use crate::{
 };
 
 const SPINNER: &[&str] = &["|", "/", "-", "\\"];
+const HEADER_ROWS: u16 = 2;
+const SEPARATOR_ROWS: u16 = 1;
+const ACTIVITY_ROWS: u16 = 1;
+const FOOTER_ROWS: u16 = 1;
+const DEFAULT_TRANSCRIPT_MIN_ROWS: u16 = 10;
+const MULTILINE_TRANSCRIPT_MIN_ROWS: u16 = 6;
+const MAX_INPUT_ROWS: u16 = 10;
+const INPUT_PROMPT: &str = "Input ===> ";
+const INPUT_CONTINUATION_PREFIX: &str = "          ";
+
 fn void_black() -> Color {
     Color::Rgb(7, 11, 10)
 }
@@ -329,22 +339,26 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        let input_height = self.input_view_height(area.width, area.height);
+        let transcript_min_height = self.transcript_min_height();
+
         frame.render_widget(
             Block::default().style(Style::default().bg(void_black())),
-            frame.area(),
+            area,
         );
 
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),
-                Constraint::Length(1),
-                Constraint::Min(10),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(HEADER_ROWS),
+                Constraint::Length(SEPARATOR_ROWS),
+                Constraint::Min(transcript_min_height),
+                Constraint::Length(ACTIVITY_ROWS),
+                Constraint::Length(input_height),
+                Constraint::Length(FOOTER_ROWS),
             ])
-            .split(frame.area());
+            .split(area);
 
         frame.render_widget(self.render_header(), layout[0]);
         frame.render_widget(self.render_separator(Some("TRANSCRIPT")), layout[1]);
@@ -366,7 +380,10 @@ impl App {
         frame.render_widget(indicator, transcript_layout[1]);
 
         frame.render_widget(self.render_activity_line(), layout[3]);
-        frame.render_widget(self.render_input_line(), layout[4]);
+        frame.render_widget(
+            self.render_input_line(layout[4].width, layout[4].height),
+            layout[4],
+        );
         frame.render_widget(self.render_footer(), layout[5]);
     }
 
@@ -490,31 +507,67 @@ impl App {
             .style(Style::default().fg(synth_text()).bg(void_black()))
     }
 
-    fn render_input_line(&self) -> Paragraph<'static> {
-        let preview = self.input_preview();
-        let input = if preview.is_empty() {
-            "Type a prompt or run /help.".to_string()
-        } else {
-            preview.replace('\n', " ")
-        };
+    fn render_input_line(&self, area_width: u16, area_height: u16) -> Paragraph<'static> {
+        let lines = self.render_input_lines();
+        let rendered_rows = count_wrapped_rows(&lines, area_width).min(u16::MAX as usize) as u16;
+        let vertical_scroll = rendered_rows.saturating_sub(area_height.max(1));
 
-        Paragraph::new(Text::from(vec![Line::from(vec![
-            Span::styled(
-                "Input ===> ",
-                Style::default()
-                    .fg(neon_orange())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                input,
-                Style::default().fg(if preview.is_empty() {
-                    muted_synth()
+        Paragraph::new(Text::from(lines))
+            .scroll((vertical_scroll, 0))
+            .style(Style::default().bg(input_ink()))
+            .wrap(Wrap { trim: false })
+    }
+
+    fn render_input_lines(&self) -> Vec<Line<'static>> {
+        let preview = self.input_preview();
+        let prompt_style = Style::default()
+            .fg(neon_orange())
+            .add_modifier(Modifier::BOLD);
+
+        if preview.is_empty() {
+            return vec![Line::from(vec![
+                Span::styled(INPUT_PROMPT.to_string(), prompt_style),
+                Span::styled(
+                    "Type a prompt or run /help.".to_string(),
+                    Style::default().fg(muted_synth()),
+                ),
+            ])];
+        }
+
+        preview
+            .split('\n')
+            .enumerate()
+            .map(|(index, line)| {
+                let prefix = if index == 0 {
+                    INPUT_PROMPT
                 } else {
-                    synth_text()
-                }),
-            ),
-        ])]))
-        .style(Style::default().bg(input_ink()))
+                    INPUT_CONTINUATION_PREFIX
+                };
+                Line::from(vec![
+                    Span::styled(prefix.to_string(), prompt_style),
+                    Span::styled(line.to_string(), Style::default().fg(synth_text())),
+                ])
+            })
+            .collect()
+    }
+
+    fn input_view_height(&self, area_width: u16, area_height: u16) -> u16 {
+        let lines = self.render_input_lines();
+        let desired = count_wrapped_rows(&lines, area_width).min(u16::MAX as usize) as u16;
+        let fixed_rows = HEADER_ROWS + SEPARATOR_ROWS + ACTIVITY_ROWS + FOOTER_ROWS;
+        let max_by_area = area_height
+            .saturating_sub(fixed_rows + self.transcript_min_height())
+            .max(1);
+
+        desired.max(1).min(MAX_INPUT_ROWS).min(max_by_area)
+    }
+
+    fn transcript_min_height(&self) -> u16 {
+        if self.multiline_buffer.is_some() {
+            MULTILINE_TRANSCRIPT_MIN_ROWS
+        } else {
+            DEFAULT_TRANSCRIPT_MIN_ROWS
+        }
     }
 
     fn footer_line(&self) -> Line<'static> {
@@ -3299,6 +3352,36 @@ mod tests {
         let lines = render_markdown("12345\n\n123456");
 
         assert_eq!(count_wrapped_rows(&lines, 5), 5);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn multiline_input_render_lines_preserve_line_breaks() {
+        let (_dir, mut app) = test_app(&[]).await;
+        app.multiline_buffer = Some(vec!["first".to_string(), "".to_string()]);
+        app.input = "third".to_string();
+
+        let lines = app.render_input_lines();
+
+        assert_eq!(line_text(&lines[0]), "Input ===> first");
+        assert_eq!(line_text(&lines[1]), "          ");
+        assert_eq!(line_text(&lines[2]), "          third");
+        assert_eq!(line_text(&lines[3]), "          ");
+        assert_eq!(line_text(&lines[4]), "          >>> to send");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn multiline_input_height_expands_for_wrapped_current_line() {
+        let (_dir, mut app) = test_app(&[]).await;
+        app.multiline_buffer = Some(vec!["first".to_string()]);
+        app.input = "abcdefghijklmnopqrstuvwxyz".to_string();
+
+        let wide_height = app.input_view_height(80, 24);
+        let narrow_height = app.input_view_height(20, 24);
+
+        assert!(
+            narrow_height > wide_height,
+            "narrow height {narrow_height} should exceed wide height {wide_height}"
+        );
     }
 
     #[test]

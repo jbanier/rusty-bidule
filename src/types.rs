@@ -861,8 +861,24 @@ impl RunTurnResult {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     Progress(ProgressEvent),
+    StreamChunk(StreamChunkEvent),
     Finished(Result<RunTurnResult, String>),
     CompactionFinished(Result<String, String>),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamChunkEvent {
+    pub chunk_type: StreamChunkType,
+    pub text: String,
+    pub assistant_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamChunkType {
+    TextDelta,
+    ToolUseStart,
+    Complete,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -492,6 +492,9 @@ async fn post_message(
                             job.events.push(p);
                         }
                     }
+                    UiEvent::StreamChunk(_chunk) => {
+                        // TODO: Collect streaming chunks
+                    }
                     UiEvent::Finished(_) | UiEvent::CompactionFinished(_) => {}
                 }
             }

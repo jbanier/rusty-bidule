@@ -789,8 +789,44 @@ impl Orchestrator {
                 Some(tool_call_count),
             );
 
+            // Calculate assistant message index for streaming chunk tracking
+            let convo = self.inner.store.load(conversation_id)?;
+            let assistant_index = convo.messages.iter()
+                .filter(|m| m.role == "assistant")
+                .count() + 1;
+
+            // Set up streaming chunk relay
+            let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<crate::llm::StreamChunk>();
+            let ui_tx_chunks = ui_tx.clone();
+            tokio::spawn(async move {
+                use crate::types::{StreamChunkEvent, StreamChunkType};
+                while let Some(chunk) = chunk_rx.recv().await {
+                    if let Some(text) = chunk.delta_text {
+                        let _ = ui_tx_chunks.send(UiEvent::StreamChunk(StreamChunkEvent {
+                            chunk_type: StreamChunkType::TextDelta,
+                            text,
+                            assistant_index,
+                        }));
+                    }
+                    if let Some((id, name)) = chunk.tool_use_start {
+                        let _ = ui_tx_chunks.send(UiEvent::StreamChunk(StreamChunkEvent {
+                            chunk_type: StreamChunkType::ToolUseStart,
+                            text: format!("Tool: {} (id: {})", name, id),
+                            assistant_index,
+                        }));
+                    }
+                    if chunk.finish_reason.is_some() {
+                        let _ = ui_tx_chunks.send(UiEvent::StreamChunk(StreamChunkEvent {
+                            chunk_type: StreamChunkType::Complete,
+                            text: String::new(),
+                            assistant_index,
+                        }));
+                    }
+                }
+            });
+
             let llm_start = std::time::Instant::now();
-            let completion = match self.inner.llm.chat_completion(&messages, &llm_tools).await {
+            let completion = match self.inner.llm.chat_completion_stream(&messages, &llm_tools, chunk_tx).await {
                 Ok(completion) => completion,
                 Err(err) => {
                     if iteration == 0 {

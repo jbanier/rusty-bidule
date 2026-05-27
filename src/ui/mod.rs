@@ -164,6 +164,14 @@ pub struct App {
     should_quit: bool,
     needs_redraw: bool,
     layout_state: LayoutState,
+    streaming_message: Option<StreamingMessage>,
+}
+
+#[derive(Debug, Clone)]
+struct StreamingMessage {
+    assistant_index: usize,
+    accumulated_text: String,
+    started_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Default)]
@@ -299,6 +307,7 @@ impl App {
             should_quit: false,
             needs_redraw: true,
             layout_state: LayoutState::default(),
+            streaming_message: None,
         })
     }
 
@@ -766,7 +775,11 @@ impl App {
             return;
         }
 
-        self.transcript_cache.lines = build_transcript_lines(&self.messages, &self.command_output);
+        self.transcript_cache.lines = build_transcript_lines(
+            &self.messages,
+            &self.command_output,
+            self.streaming_message.as_ref(),
+        );
         self.transcript_cache.wrapped_width = 0;
         self.transcript_cache.wrapped_rows = 0;
         self.transcript_cache.dirty = false;
@@ -1916,8 +1929,33 @@ impl App {
                     .push(format!("{}{}", tool_prefix, progress.message));
                 self.status = progress.kind;
             }
+            UiEvent::StreamChunk(chunk) => {
+                use crate::types::StreamChunkType;
+                match chunk.chunk_type {
+                    StreamChunkType::TextDelta => {
+                        if let Some(streaming) = &mut self.streaming_message {
+                            streaming.accumulated_text.push_str(&chunk.text);
+                        } else {
+                            self.streaming_message = Some(StreamingMessage {
+                                assistant_index: chunk.assistant_index,
+                                accumulated_text: chunk.text,
+                                started_at: chrono::Utc::now(),
+                            });
+                        }
+                        self.invalidate_transcript_cache();
+                    }
+                    StreamChunkType::ToolUseStart => {
+                        self.activities.push(chunk.text);
+                    }
+                    StreamChunkType::Complete => {
+                        self.streaming_message = None;
+                        self.invalidate_transcript_cache();
+                    }
+                }
+            }
             UiEvent::Finished(result) => {
                 self.inflight = false;
+                self.streaming_message = None;  // Clear any lingering streaming state
                 match result {
                     Ok(run) => {
                         let conversation = self
@@ -2242,20 +2280,44 @@ fn ordered_transcript_messages<'a>(
     combined
 }
 
-fn build_transcript_lines(messages: &[Message], command_output: &[Message]) -> Vec<Line<'static>> {
+fn build_transcript_lines(
+    messages: &[Message],
+    command_output: &[Message],
+    streaming_message: Option<&StreamingMessage>,
+) -> Vec<Line<'static>> {
     let transcript_messages = ordered_transcript_messages(messages, command_output);
 
-    if transcript_messages.is_empty() {
+    if transcript_messages.is_empty() && streaming_message.is_none() {
         return vec![Line::from(Span::styled(
             "No messages yet. Use the input pane below to start a session.",
             Style::default().fg(muted_synth()),
         ))];
     }
 
-    transcript_messages
+    let mut lines: Vec<Line<'static>> = transcript_messages
         .into_iter()
         .flat_map(render_message_lines)
-        .collect()
+        .collect();
+
+    // Append streaming message if present
+    if let Some(streaming) = streaming_message {
+        lines.push(rule_line(Some("STREAMING")));
+        lines.push(Line::from(vec![Span::styled(
+            "ASSISTANT (in progress)",
+            Style::default()
+                .fg(neon_pink())
+                .add_modifier(Modifier::BOLD),
+        )]));
+
+        // Add blinking cursor to indicate streaming
+        let text_with_cursor = format!("{}\u{2588}", streaming.accumulated_text);
+        for md_line in render_markdown(&text_with_cursor) {
+            lines.push(md_line);
+        }
+        lines.push(Line::from(""));
+    }
+
+    lines
 }
 
 fn render_message_lines(message: &Message) -> Vec<Line<'static>> {

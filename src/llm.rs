@@ -76,6 +76,15 @@ pub struct LlmCompletion {
     pub usage: Option<LlmUsage>,
 }
 
+/// Streaming chunk type emitted by LLM providers
+#[derive(Debug, Clone)]
+pub struct StreamChunk {
+    pub delta_text: Option<String>,
+    pub tool_use_start: Option<(String, String)>, // (id, name)
+    pub finish_reason: Option<LlmStopReason>,
+    pub usage: Option<LlmUsage>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelCapabilities {
     pub tool_calling: bool,
@@ -111,6 +120,19 @@ trait ModelBackend: Send + Sync {
         messages: &'a [LlmMessage],
         tools: &'a [LlmTool],
     ) -> ModelBackendFuture<'a>;
+
+    /// Streaming variant of chat_completion
+    /// Emits chunks via chunk_tx channel as they arrive, returns final LlmCompletion at end
+    fn chat_completion_stream<'a>(
+        &'a self,
+        messages: &'a [LlmMessage],
+        tools: &'a [LlmTool],
+        chunk_tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>,
+    ) -> ModelBackendFuture<'a> {
+        // Default implementation: call blocking method and return without streaming
+        let _ = chunk_tx; // Suppress unused warning
+        self.chat_completion(messages, tools)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +253,17 @@ impl LlmClient {
     ) -> Result<LlmCompletion> {
         self.active_backend()?
             .chat_completion(messages, tools)
+            .await
+    }
+
+    pub async fn chat_completion_stream(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[LlmTool],
+        chunk_tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<LlmCompletion> {
+        self.active_backend()?
+            .chat_completion_stream(messages, tools, chunk_tx)
             .await
     }
 
@@ -578,6 +611,7 @@ impl AzureAnthropicClient {
             self.temperature,
             self.top_p,
             self.max_output_tokens,
+            false,  // stream
         )?;
         let url = format!("{}/v1/messages", self.endpoint);
 
@@ -648,6 +682,240 @@ impl AzureAnthropicClient {
 
         parse_anthropic_chat_completion_payload(&payload)
     }
+
+    async fn chat_completion_stream(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[LlmTool],
+        chunk_tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<LlmCompletion> {
+        use adk_rust::futures::StreamExt;
+
+        let body = build_anthropic_chat_request_body(
+            messages,
+            tools,
+            &self.deployment,
+            self.temperature,
+            self.top_p,
+            self.max_output_tokens,
+            true,  // stream
+        )?;
+        let url = format!("{}/v1/messages", self.endpoint);
+
+        debug!(
+            endpoint = %self.endpoint,
+            deployment = %self.deployment,
+            anthropic_version = %self.anthropic_version,
+            message_count = messages.len(),
+            tool_count = tools.len(),
+            "sending Azure Anthropic streaming chat completion request"
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| {
+                error!(
+                    endpoint = %self.endpoint,
+                    deployment = %self.deployment,
+                    anthropic_version = %self.anthropic_version,
+                    error = %err,
+                    "failed to reach Azure Anthropic endpoint"
+                );
+                anyhow!("failed to reach Azure Anthropic endpoint: {err}")
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let payload = response.text().await.map_err(|err| {
+                error!(
+                    endpoint = %self.endpoint,
+                    deployment = %self.deployment,
+                    error = %err,
+                    "failed to read Azure Anthropic error response"
+                );
+                anyhow!("failed to read error response: {err}")
+            })?;
+            error!(
+                endpoint = %self.endpoint,
+                deployment = %self.deployment,
+                status = %status,
+                response_body = %truncate_for_log(&payload),
+                "Azure Anthropic streaming request failed"
+            );
+            return Err(anyhow!(
+                "Azure Anthropic request failed with status {}: {}",
+                status,
+                truncate_for_log(&payload)
+            ));
+        }
+
+        // Parse SSE stream
+        let mut stream = response.bytes_stream();
+        let mut assistant_blocks: Vec<LlmAssistantBlock> = Vec::new();
+        let mut current_text_block: Option<String> = None;
+        let mut current_tool_use: Option<(String, String, String)> = None;  // (id, name, input_json)
+        let mut stop_reason = LlmStopReason::EndTurn;
+        let mut usage: Option<LlmUsage> = None;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk_bytes = chunk_result.map_err(|err| {
+                error!(
+                    endpoint = %self.endpoint,
+                    deployment = %self.deployment,
+                    error = %err,
+                    "failed to read streaming chunk"
+                );
+                anyhow!("failed to read streaming chunk: {err}")
+            })?;
+
+            let chunk_str = std::str::from_utf8(&chunk_bytes).map_err(|err| {
+                error!(
+                    endpoint = %self.endpoint,
+                    deployment = %self.deployment,
+                    error = %err,
+                    "invalid UTF-8 in streaming chunk"
+                );
+                anyhow!("invalid UTF-8 in chunk: {err}")
+            })?;
+
+            // Parse SSE format: "event: <type>\ndata: <json>\n\n"
+            for line in chunk_str.lines() {
+                if line.starts_with("data: ") {
+                    let data = &line[6..];
+
+                    // Parse JSON event
+                    let event: Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(_) => continue,  // Skip unparseable events
+                    };
+
+                    let event_type = event["type"].as_str().unwrap_or("");
+
+                    match event_type {
+                        "content_block_start" => {
+                            let block_type = event["content_block"]["type"].as_str();
+                            match block_type {
+                                Some("text") => {
+                                    // Start a new text block
+                                    current_text_block = Some(String::new());
+                                }
+                                Some("tool_use") => {
+                                    // Start a new tool use block
+                                    if let (Some(id), Some(name)) = (
+                                        event["content_block"]["id"].as_str(),
+                                        event["content_block"]["name"].as_str(),
+                                    ) {
+                                        current_tool_use = Some((id.to_string(), name.to_string(), String::new()));
+                                        let _ = chunk_tx.send(StreamChunk {
+                                            delta_text: None,
+                                            tool_use_start: Some((id.to_string(), name.to_string())),
+                                            finish_reason: None,
+                                            usage: None,
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        "content_block_delta" => {
+                            // Text delta
+                            if let Some(text) = event["delta"]["text"].as_str() {
+                                if let Some(ref mut block) = current_text_block {
+                                    block.push_str(text);
+                                }
+                                let _ = chunk_tx.send(StreamChunk {
+                                    delta_text: Some(text.to_string()),
+                                    tool_use_start: None,
+                                    finish_reason: None,
+                                    usage: None,
+                                });
+                            }
+                            // Tool input JSON delta
+                            if let Some(partial_json) = event["delta"]["partial_json"].as_str() {
+                                if let Some((_, _, ref mut input_json)) = current_tool_use {
+                                    input_json.push_str(partial_json);
+                                }
+                            }
+                        }
+                        "content_block_stop" => {
+                            // Finalize current block
+                            if let Some(text) = current_text_block.take() {
+                                if !text.is_empty() {
+                                    assistant_blocks.push(LlmAssistantBlock::Text { text });
+                                }
+                            }
+                            if let Some((id, name, input_json)) = current_tool_use.take() {
+                                // Parse the accumulated JSON input
+                                let input = if input_json.is_empty() {
+                                    Value::Object(Default::default())
+                                } else {
+                                    serde_json::from_str(&input_json).unwrap_or_else(|_| Value::Object(Default::default()))
+                                };
+                                assistant_blocks.push(LlmAssistantBlock::ToolUse { id, name, input });
+                            }
+                        }
+                        "message_delta" => {
+                            if let Some(reason) = event["delta"]["stop_reason"].as_str() {
+                                stop_reason = match reason {
+                                    "end_turn" => LlmStopReason::EndTurn,
+                                    "max_tokens" => LlmStopReason::MaxTokens,
+                                    "tool_use" => LlmStopReason::ToolUse,
+                                    other => LlmStopReason::Unknown(other.to_string()),
+                                };
+                            }
+                            if let Some(usage_obj) = event["usage"].as_object() {
+                                let input = usage_obj.get("input_tokens").and_then(|v| v.as_u64());
+                                let output = usage_obj.get("output_tokens").and_then(|v| v.as_u64());
+                                let total = input.and_then(|i| output.map(|o| i + o));
+
+                                usage = Some(LlmUsage {
+                                    input_tokens: input,
+                                    output_tokens: output,
+                                    total_tokens: total,
+                                    estimated_cost_micros: None,
+                                    estimated_cost_currency: None,
+                                });
+                            }
+                        }
+                        "message_stop" => {
+                            let _ = chunk_tx.send(StreamChunk {
+                                delta_text: None,
+                                tool_use_start: None,
+                                finish_reason: Some(stop_reason.clone()),
+                                usage: usage.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Finalize any remaining block
+        if let Some(text) = current_text_block {
+            if !text.is_empty() {
+                assistant_blocks.push(LlmAssistantBlock::Text { text });
+            }
+        }
+        if let Some((id, name, input_json)) = current_tool_use {
+            let input = if input_json.is_empty() {
+                Value::Object(Default::default())
+            } else {
+                serde_json::from_str(&input_json).unwrap_or_else(|_| Value::Object(Default::default()))
+            };
+            assistant_blocks.push(LlmAssistantBlock::ToolUse { id, name, input });
+        }
+
+        Ok(LlmCompletion {
+            assistant_blocks,
+            stop_reason,
+            usage,
+        })
+    }
 }
 
 impl ModelBackend for AzureAnthropicClient {
@@ -661,6 +929,17 @@ impl ModelBackend for AzureAnthropicClient {
         tools: &'a [LlmTool],
     ) -> ModelBackendFuture<'a> {
         Box::pin(async move { AzureAnthropicClient::chat_completion(self, messages, tools).await })
+    }
+
+    fn chat_completion_stream<'a>(
+        &'a self,
+        messages: &'a [LlmMessage],
+        tools: &'a [LlmTool],
+        chunk_tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>,
+    ) -> ModelBackendFuture<'a> {
+        Box::pin(async move {
+            AzureAnthropicClient::chat_completion_stream(self, messages, tools, chunk_tx).await
+        })
     }
 }
 
@@ -1526,12 +1805,14 @@ fn build_anthropic_chat_request_body(
     temperature: f32,
     top_p: Option<f32>,
     max_output_tokens: u32,
+    stream: bool,
 ) -> Result<Value> {
     let (system, anthropic_messages) = anthropic_messages(messages)?;
     let mut body = json!({
         "model": deployment,
         "messages": anthropic_messages,
         "max_tokens": max_output_tokens,
+        "stream": stream,
     });
     if let Some(top_p) = top_p {
         body["top_p"] = json!(top_p);
@@ -2342,6 +2623,7 @@ mod tests {
             0.2,
             None,
             1200,
+            false,  // stream
         )
         .unwrap();
 
@@ -2368,6 +2650,7 @@ mod tests {
             0.2,
             Some(0.9),
             1200,
+            false,  // stream
         )
         .unwrap();
 

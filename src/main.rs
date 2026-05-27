@@ -118,6 +118,9 @@ async fn run_once(
                     UiEvent::Progress(progress) => {
                         eprintln!("{}: {}", progress.kind, progress.message);
                     }
+                    UiEvent::StreamChunk(_chunk) => {
+                        // TODO: Print streaming chunks
+                    }
                     UiEvent::Finished(_) | UiEvent::CompactionFinished(_) => {}
                 }
             }

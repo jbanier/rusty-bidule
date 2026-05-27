@@ -1,3 +1,5 @@
+mod layout;
+
 use std::time::Duration;
 
 use anyhow::Result;
@@ -25,16 +27,11 @@ use crate::{
     types::{AgentPermissions, Conversation, FilesystemAccess, FilesystemScope, Message, UiEvent},
 };
 
+pub(crate) use layout::{LayoutMode, LayoutState};
+
 const SPINNER: &[&str] = &["|", "/", "-", "\\"];
-const HEADER_ROWS: u16 = 2;
-const SEPARATOR_ROWS: u16 = 1;
-const ACTIVITY_ROWS: u16 = 1;
-const FOOTER_ROWS: u16 = 1;
-const DEFAULT_TRANSCRIPT_MIN_ROWS: u16 = 10;
-const MULTILINE_TRANSCRIPT_MIN_ROWS: u16 = 6;
-const MAX_INPUT_ROWS: u16 = 10;
 const INPUT_PROMPT: &str = "Input ===> ";
-const INPUT_CONTINUATION_PREFIX: &str = "          ";
+const INPUT_CONTINUATION_PREFIX: &str = "           "; // 11 spaces to match INPUT_PROMPT length
 
 fn void_black() -> Color {
     Color::Rgb(7, 11, 10)
@@ -165,6 +162,7 @@ pub struct App {
     ui_rx: UnboundedReceiver<UiEvent>,
     should_quit: bool,
     needs_redraw: bool,
+    layout_state: LayoutState,
 }
 
 #[derive(Debug, Default)]
@@ -287,6 +285,7 @@ impl App {
             ui_rx,
             should_quit: false,
             needs_redraw: true,
+            layout_state: LayoutState::default(),
         })
     }
 
@@ -329,6 +328,7 @@ impl App {
                         self.needs_redraw = true;
                     }
                     Event::Resize(_, _) => {
+                        self.layout_state.invalidate();
                         self.needs_redraw = true;
                     }
                     _ => {}
@@ -340,8 +340,13 @@ impl App {
 
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let input_height = self.input_view_height(area.width, area.height);
-        let transcript_min_height = self.transcript_min_height();
+
+        // Compute input lines once to avoid redundant allocation and computation
+        let input_lines = self.render_input_lines();
+
+        // Refresh layout state if terminal size or mode changed
+        self.refresh_layout_state(area, &input_lines);
+        let regions = &self.layout_state.regions;
 
         frame.render_widget(
             Block::default().style(Style::default().bg(void_black())),
@@ -351,12 +356,12 @@ impl App {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(HEADER_ROWS),
-                Constraint::Length(SEPARATOR_ROWS),
-                Constraint::Min(transcript_min_height),
-                Constraint::Length(ACTIVITY_ROWS),
-                Constraint::Length(input_height),
-                Constraint::Length(FOOTER_ROWS),
+                Constraint::Length(regions.header_height),
+                Constraint::Length(regions.separator_height),
+                Constraint::Min(regions.transcript_min_height),
+                Constraint::Length(regions.activity_height),
+                Constraint::Length(regions.input_height),
+                Constraint::Length(regions.footer_height),
             ])
             .split(area);
 
@@ -381,10 +386,22 @@ impl App {
 
         frame.render_widget(self.render_activity_line(), layout[3]);
         frame.render_widget(
-            self.render_input_line(layout[4].width, layout[4].height),
+            self.render_input_paragraph(&input_lines, layout[4].width, layout[4].height),
             layout[4],
         );
         frame.render_widget(self.render_footer(), layout[5]);
+    }
+
+    fn refresh_layout_state(&mut self, area: ratatui::layout::Rect, input_lines: &[Line<'_>]) {
+        let mode = if self.multiline_buffer.is_some() {
+            LayoutMode::Multiline
+        } else {
+            LayoutMode::Normal
+        };
+
+        if self.layout_state.needs_refresh(area.width, area.height, mode) {
+            self.layout_state = LayoutState::compute(area.width, area.height, mode, input_lines);
+        }
     }
 
     fn render_header(&self) -> Paragraph<'static> {
@@ -507,12 +524,11 @@ impl App {
             .style(Style::default().fg(synth_text()).bg(void_black()))
     }
 
-    fn render_input_line(&self, area_width: u16, area_height: u16) -> Paragraph<'static> {
-        let lines = self.render_input_lines();
-        let rendered_rows = count_wrapped_rows(&lines, area_width).min(u16::MAX as usize) as u16;
+    fn render_input_paragraph(&self, lines: &[Line<'static>], area_width: u16, area_height: u16) -> Paragraph<'static> {
+        let rendered_rows = count_wrapped_rows(lines, area_width).min(u16::MAX as usize) as u16;
         let vertical_scroll = rendered_rows.saturating_sub(area_height.max(1));
 
-        Paragraph::new(Text::from(lines))
+        Paragraph::new(Text::from(lines.to_vec()))
             .scroll((vertical_scroll, 0))
             .style(Style::default().bg(input_ink()))
             .wrap(Wrap { trim: false })
@@ -526,9 +542,9 @@ impl App {
 
         if preview.is_empty() {
             return vec![Line::from(vec![
-                Span::styled(INPUT_PROMPT.to_string(), prompt_style),
+                Span::styled(INPUT_PROMPT, prompt_style),
                 Span::styled(
-                    "Type a prompt or run /help.".to_string(),
+                    "Type a prompt or run /help.",
                     Style::default().fg(muted_synth()),
                 ),
             ])];
@@ -544,30 +560,11 @@ impl App {
                     INPUT_CONTINUATION_PREFIX
                 };
                 Line::from(vec![
-                    Span::styled(prefix.to_string(), prompt_style),
-                    Span::styled(line.to_string(), Style::default().fg(synth_text())),
+                    Span::styled(prefix, prompt_style),
+                    Span::styled(line.to_owned(), Style::default().fg(synth_text())),
                 ])
             })
             .collect()
-    }
-
-    fn input_view_height(&self, area_width: u16, area_height: u16) -> u16 {
-        let lines = self.render_input_lines();
-        let desired = count_wrapped_rows(&lines, area_width).min(u16::MAX as usize) as u16;
-        let fixed_rows = HEADER_ROWS + SEPARATOR_ROWS + ACTIVITY_ROWS + FOOTER_ROWS;
-        let max_by_area = area_height
-            .saturating_sub(fixed_rows + self.transcript_min_height())
-            .max(1);
-
-        desired.max(1).min(MAX_INPUT_ROWS).min(max_by_area)
-    }
-
-    fn transcript_min_height(&self) -> u16 {
-        if self.multiline_buffer.is_some() {
-            MULTILINE_TRANSCRIPT_MIN_ROWS
-        } else {
-            DEFAULT_TRANSCRIPT_MIN_ROWS
-        }
     }
 
     fn footer_line(&self) -> Line<'static> {
@@ -2382,7 +2379,7 @@ fn build_scroll_indicator_lines(
         .collect()
 }
 
-fn count_wrapped_rows(lines: &[Line<'_>], width: u16) -> usize {
+pub(crate) fn count_wrapped_rows(lines: &[Line<'_>], width: u16) -> usize {
     let width = usize::from(width.max(1));
     lines
         .iter()
@@ -3029,6 +3026,8 @@ mod tests {
     use tempfile::{TempDir, tempdir};
     use tokio::net::TcpListener;
 
+    use super::{LayoutMode, LayoutState};
+
     use crate::{
         config::{
             AppConfig, AzureAnthropicConfig, AzureOpenAiConfig, LlmProvider, LocalToolsConfig,
@@ -3363,10 +3362,10 @@ mod tests {
         let lines = app.render_input_lines();
 
         assert_eq!(line_text(&lines[0]), "Input ===> first");
-        assert_eq!(line_text(&lines[1]), "          ");
-        assert_eq!(line_text(&lines[2]), "          third");
-        assert_eq!(line_text(&lines[3]), "          ");
-        assert_eq!(line_text(&lines[4]), "          >>> to send");
+        assert_eq!(line_text(&lines[1]), "           ");
+        assert_eq!(line_text(&lines[2]), "           third");
+        assert_eq!(line_text(&lines[3]), "           ");
+        assert_eq!(line_text(&lines[4]), "           >>> to send");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3375,12 +3374,15 @@ mod tests {
         app.multiline_buffer = Some(vec!["first".to_string()]);
         app.input = "abcdefghijklmnopqrstuvwxyz".to_string();
 
-        let wide_height = app.input_view_height(80, 24);
-        let narrow_height = app.input_view_height(20, 24);
+        let lines = app.render_input_lines();
+        let wide_layout = LayoutState::compute(80, 24, LayoutMode::Multiline, &lines);
+        let narrow_layout = LayoutState::compute(20, 24, LayoutMode::Multiline, &lines);
 
         assert!(
-            narrow_height > wide_height,
-            "narrow height {narrow_height} should exceed wide height {wide_height}"
+            narrow_layout.regions.input_height > wide_layout.regions.input_height,
+            "narrow height {} should exceed wide height {}",
+            narrow_layout.regions.input_height,
+            wide_layout.regions.input_height
         );
     }
 

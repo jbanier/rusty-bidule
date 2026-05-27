@@ -145,6 +145,7 @@ pub struct App {
     messages: Vec<Message>,
     command_output: Vec<Message>,
     transcript_cache: TranscriptRenderCache,
+    input_cache: InputRenderCache,
     message_scroll: u16,
     rendered_message_lines: u16,
     message_viewport_lines: u16,
@@ -170,6 +171,14 @@ struct TranscriptRenderCache {
     lines: Vec<Line<'static>>,
     wrapped_width: u16,
     wrapped_rows: u16,
+    dirty: bool,
+}
+
+#[derive(Debug, Default)]
+struct InputRenderCache {
+    lines: Vec<Line<'static>>,
+    cached_input: String,
+    cached_multiline: Option<Vec<String>>,
     dirty: bool,
 }
 
@@ -267,6 +276,10 @@ impl App {
             transcript_cache: TranscriptRenderCache {
                 dirty: true,
                 ..TranscriptRenderCache::default()
+            },
+            input_cache: InputRenderCache {
+                dirty: true,
+                ..InputRenderCache::default()
             },
             message_scroll: 0,
             rendered_message_lines: 0,
@@ -534,37 +547,55 @@ impl App {
             .wrap(Wrap { trim: false })
     }
 
-    fn render_input_lines(&self) -> Vec<Line<'static>> {
+    fn render_input_lines(&mut self) -> Vec<Line<'static>> {
+        // Check if cache is valid
+        let cache_valid = !self.input_cache.dirty
+            && self.input_cache.cached_input == self.input
+            && self.input_cache.cached_multiline == self.multiline_buffer;
+
+        if cache_valid {
+            return self.input_cache.lines.clone();
+        }
+
+        // Cache miss - recompute
         let preview = self.input_preview();
         let prompt_style = Style::default()
             .fg(neon_orange())
             .add_modifier(Modifier::BOLD);
 
-        if preview.is_empty() {
-            return vec![Line::from(vec![
+        let lines = if preview.is_empty() {
+            vec![Line::from(vec![
                 Span::styled(INPUT_PROMPT, prompt_style),
                 Span::styled(
                     "Type a prompt or run /help.",
                     Style::default().fg(muted_synth()),
                 ),
-            ])];
-        }
+            ])]
+        } else {
+            preview
+                .split('\n')
+                .enumerate()
+                .map(|(index, line)| {
+                    let prefix = if index == 0 {
+                        INPUT_PROMPT
+                    } else {
+                        INPUT_CONTINUATION_PREFIX
+                    };
+                    Line::from(vec![
+                        Span::styled(prefix, prompt_style),
+                        Span::styled(line.to_owned(), Style::default().fg(synth_text())),
+                    ])
+                })
+                .collect()
+        };
 
-        preview
-            .split('\n')
-            .enumerate()
-            .map(|(index, line)| {
-                let prefix = if index == 0 {
-                    INPUT_PROMPT
-                } else {
-                    INPUT_CONTINUATION_PREFIX
-                };
-                Line::from(vec![
-                    Span::styled(prefix, prompt_style),
-                    Span::styled(line.to_owned(), Style::default().fg(synth_text())),
-                ])
-            })
-            .collect()
+        // Update cache
+        self.input_cache.lines = lines.clone();
+        self.input_cache.cached_input = self.input.clone();
+        self.input_cache.cached_multiline = self.multiline_buffer.clone();
+        self.input_cache.dirty = false;
+
+        lines
     }
 
     fn footer_line(&self) -> Line<'static> {
@@ -745,6 +776,10 @@ impl App {
         self.transcript_cache.dirty = true;
     }
 
+    fn invalidate_input_cache(&mut self) {
+        self.input_cache.dirty = true;
+    }
+
     async fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -771,15 +806,18 @@ impl App {
             KeyCode::Char(ch) => {
                 self.detach_input_history_navigation();
                 self.input.push(ch);
+                self.invalidate_input_cache();
             }
             KeyCode::Backspace => {
                 self.detach_input_history_navigation();
                 self.input.pop();
+                self.invalidate_input_cache();
             }
             KeyCode::Enter => {
                 let submitted = std::mem::take(&mut self.input);
                 self.input_history_cursor = None;
                 self.input_history_draft = None;
+                self.invalidate_input_cache();
                 self.handle_submission(submitted).await?;
             }
             KeyCode::Esc => {
@@ -787,6 +825,7 @@ impl App {
                 self.input_history_cursor = None;
                 self.input_history_draft = None;
                 self.multiline_buffer = None;
+                self.invalidate_input_cache();
                 self.status = "Input cleared".to_string();
             }
             _ => {}
@@ -809,9 +848,11 @@ impl App {
             if submitted == ">>>" {
                 let payload = buffer.join("\n");
                 self.multiline_buffer = None;
+                self.invalidate_input_cache();
                 self.dispatch_message(payload).await?;
             } else {
                 buffer.push(submitted.to_string());
+                self.invalidate_input_cache();
             }
             return Ok(());
         }
@@ -825,6 +866,7 @@ impl App {
 
         if trimmed == "<<<" {
             self.multiline_buffer = Some(Vec::new());
+            self.invalidate_input_cache();
             self.status = "Multiline capture armed".to_string();
             return Ok(());
         }
@@ -876,12 +918,14 @@ impl App {
             (false, Some(_)) => {
                 self.input = self.input_history_draft.take().unwrap_or_default();
                 self.input_history_cursor = None;
+                self.invalidate_input_cache();
                 return;
             }
         }
 
         if let Some(cursor) = self.input_history_cursor {
             self.input = self.input_history[cursor].clone();
+            self.invalidate_input_cache();
         }
     }
 
@@ -1765,6 +1809,7 @@ impl App {
                                 self.activities.push(format!("Recipe '{name}' activated."));
                                 if let Some(prompt) = recipe.initial_prompt.clone() {
                                     self.input = prompt;
+                                    self.invalidate_input_cache();
                                     self.status = format!("Recipe '{name}' prompt loaded");
                                     self.activities
                                         .push(format!("Recipe '{name}' prompt loaded into input."));

@@ -145,6 +145,29 @@ You can override the path with either:
 - `RUSTY_BIDULE_CONFIG=/path/to/config.yaml`
 - `cargo run -- --config /path/to/config.yaml`
 
+### Data Directory
+
+By default, the agent stores all working files in `~/.rusty/`:
+
+- `~/.rusty/conversations/` - Conversation history and message logs
+- `~/.rusty/oauth/` - OAuth tokens for MCP server authentication
+- `~/.rusty/audit.jsonl` - Audit log of all agent actions
+- `~/.rusty/` - Tool output files (when the agent writes data)
+
+You can override this location in the config file:
+
+```yaml
+data_dir: ~/.rusty  # Default - uses home directory
+# or
+data_dir: /custom/path/data  # Absolute path
+# or
+data_dir: data  # Relative to project root (old behavior)
+```
+
+**Migration Note**: If you have existing data in the project-local `data/` directory, 
+see [docs/data-directory-migration.md](docs/data-directory-migration.md) for migration 
+instructions, or run `./scripts/migrate-to-home-dir.sh` to migrate automatically.
+
 ### Minimal Local-Only Configuration
 
 If you want to start without MCP servers, keep `mcp_servers` empty or omit it:

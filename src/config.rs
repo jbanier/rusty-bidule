@@ -412,15 +412,33 @@ impl AppConfig {
             .with_context(|| format!("failed to read config file {}", path.display()))?;
         let mut config: AppConfig =
             serde_yaml::from_str(&raw).context("failed to parse YAML configuration")?;
+        config.expand_paths()?;
         config.resolve_secrets()?;
         config.validate()?;
         Ok(config)
     }
 
+    fn expand_paths(&mut self) -> Result<()> {
+        if let Some(data_dir) = &self.data_dir {
+            let path_str = data_dir.to_string_lossy();
+            let expanded = shellexpand::tilde(&path_str);
+            self.data_dir = Some(PathBuf::from(expanded.as_ref()));
+        }
+        for trusted_root in &mut self.skills.trusted_project_roots {
+            let path_str = trusted_root.to_string_lossy();
+            let expanded = shellexpand::tilde(&path_str);
+            *trusted_root = PathBuf::from(expanded.as_ref());
+        }
+        Ok(())
+    }
+
     pub fn data_dir(&self) -> PathBuf {
-        self.data_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("data"))
+        self.data_dir.clone().unwrap_or_else(|| {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".rusty")
+        })
     }
 
     fn resolve_secrets(&mut self) -> Result<()> {
@@ -1774,5 +1792,49 @@ mcp_servers:
             vec!["-y", "chrome-devtools-mcp@latest"]
         );
         assert!(config.mcp_servers[0].url.is_empty());
+    }
+
+    #[test]
+    fn expands_tilde_in_data_dir() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+data_dir: ~/test-data
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        let data_dir = config.data_dir();
+        assert!(!data_dir.to_string_lossy().contains('~'));
+        assert!(data_dir.is_absolute() || data_dir.starts_with(std::env::var("HOME").unwrap()));
+    }
+
+    #[test]
+    fn defaults_to_home_rusty_when_data_dir_omitted() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(
+            &path,
+            r#"
+azure_openai:
+  api_key: test
+  api_version: 2025-03-01-preview
+  endpoint: https://example.invalid/
+  deployment: gpt-4.1
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(&path).unwrap();
+        let data_dir = config.data_dir();
+        assert!(data_dir.ends_with(".rusty"));
     }
 }

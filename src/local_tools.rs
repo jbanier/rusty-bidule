@@ -4582,7 +4582,7 @@ pub fn local_tool_definitions(
         LlmTool {
             name: "local__read_file".to_string(),
             description: format!(
-                "Read a bounded chunk from a local file as strict UTF-8 text or lowercase hex. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem read permission. Length is capped at {} bytes.",
+                "Read a bounded chunk from a local file as strict UTF-8 text or lowercase hex. Use this ONLY when you need to inspect or modify file content within the LLM context. For binary files (zip, tar, images, etc.), use local__exec_cli with commands like cp, unzip, tar instead - do not read/write binary files through text/hex encoding. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem read permission. Length is capped at {} bytes.",
                 local_tools_config.max_file_read_bytes
             ),
             parameters: json!({
@@ -4599,7 +4599,7 @@ pub fn local_tool_definitions(
         LlmTool {
             name: "local__write_file".to_string(),
             description: format!(
-                "Create, overwrite, or append to a local file from UTF-8 text or hex-encoded bytes. Provide exactly one of text or hex. For large files, write smaller chunks across multiple calls: first create_new or overwrite, then append. Parent directories must already exist. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem write permission. Payloads are capped at {} bytes per call.",
+                "Create, overwrite, or append to a local file from UTF-8 text or hex-encoded bytes. Use this ONLY for text files you need to create/edit, or small binary files where you need programmatic generation. For copying or manipulating binary files (zip, tar, images, executables), use local__exec_cli with cp, mv, unzip, tar, etc. instead - do not encode/decode binary files unnecessarily. Provide exactly one of text or hex. For large files, write smaller chunks across multiple calls: first create_new or overwrite, then append. Parent directories must already exist. Paths are scoped to the workspace unless filesystem_scope is full. Requires filesystem write permission. Payloads are capped at {} bytes per call.",
                 local_tools_config.max_file_write_bytes
             ),
             parameters: json!({

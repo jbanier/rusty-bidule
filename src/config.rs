@@ -873,6 +873,9 @@ fn default_allowed_cli_tools() -> Vec<String> {
         "wpscan",
         "wscat",
         "websocat",
+        "unzip",
+        "rg",
+        "python3",
     ]
     .into_iter()
     .map(str::to_string)

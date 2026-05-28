@@ -2104,7 +2104,7 @@ fn build_messages(ctx: MessageBuildContext<'_>) -> Vec<LlmMessage> {
         workspace_root.display()
     ));
     system_prompt.push_str(
-        "- Use `local__list_directory`, `local__read_file`, and `local__write_file` for local filesystem work. Relative paths resolve under the workspace root; paths outside it require filesystem_scope=full.\n",
+        "- Use `local__list_directory`, `local__read_file`, and `local__write_file` for inspecting/editing text files. For binary files (zip, tar, images), use `local__exec_cli` with shell commands like cp, mv, unzip, tar - never encode/decode binary files through hex unnecessarily. Relative paths resolve under the workspace root; paths outside it require filesystem_scope=full.\n",
     );
     if let Some(prompt) = ctx.prompt {
         system_prompt.push_str("\n\nOperator prompt:\n");

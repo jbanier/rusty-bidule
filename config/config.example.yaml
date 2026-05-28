@@ -3,7 +3,9 @@ prompt: |
   Stay grounded in MCP tool output, cite concrete evidence when tools run,
   and be explicit about failures or uncertainty.
 
-data_dir: data
+# Data directory for conversations, OAuth tokens, and agent work files.
+# Defaults to ~/.rusty when omitted. Use a relative path for project-local data.
+data_dir: ~/.rusty
 
 llm_provider: azure_openai
 
@@ -129,6 +131,12 @@ mcp_servers:
     timeout: 30
     sse_read_timeout: 300
     client_session_timeout_seconds: 30
+
+  - name: irc-server
+    transport: streamable_http
+    url: http://127.0.0.1:5001/mcp
+    timeout: 30
+    client_session_timeout_seconds: 300
 
   - name: chrome-devtools
     transport: stdio

@@ -77,3 +77,78 @@ def build_feroxbuster_command(target_url: str, wordlist: str, threads: int, dept
         "--timeout", "10",
         "--time-limit", "1h",
     ]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--target-url", required=True)
+    parser.add_argument("--scope-json")
+    parser.add_argument("--allowed-hosts", default="")
+    parser.add_argument("--active-authorized", default="false")
+    parser.add_argument("--threads", type=int, default=3)
+    parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--wordlist")
+    args = parser.parse_args()
+
+    # Enforce hard caps
+    threads = min(args.threads, 10)
+    depth = min(args.depth, 6)
+
+    # Validate scope
+    scope = scope_from_args(
+        scope_json=args.scope_json,
+        target_urls=args.target_url,
+        allowed_hosts=args.allowed_hosts,
+        active_authorized=args.active_authorized,
+    )
+    target_url = require_url_in_scope(args.target_url, scope)
+
+    # Find wordlist
+    wordlist_info = find_wordlist(args.wordlist)
+    if not wordlist_info["exists"]:
+        json_dump({
+            "status": "error",
+            "error": wordlist_info.get("error", "Wordlist not found"),
+            "suggestions": wordlist_info.get("suggestions", [])
+        })
+        return
+
+    wordlist = wordlist_info["path"]
+
+    # Check tool availability
+    tools = tool_status(["ffuf", "feroxbuster"])
+
+    # Build commands
+    commands = []
+    if tools.get("ffuf", {}).get("available"):
+        commands.append({
+            "tool": "ffuf",
+            "phase": "directory_enumeration",
+            "argv": build_ffuf_command(target_url, wordlist, threads, depth)
+        })
+
+    if tools.get("feroxbuster", {}).get("available"):
+        commands.append({
+            "tool": "feroxbuster",
+            "phase": "directory_enumeration",
+            "argv": build_feroxbuster_command(target_url, wordlist, threads, depth)
+        })
+
+    json_dump({
+        "status": "ok",
+        "scope": scope,
+        "target_url": target_url,
+        "tool_availability": tools,
+        "wordlist": wordlist_info,
+        "commands": commands,
+        "execution_policy": "Execute ONE command after scope validation. Pick based on tool availability and preference. Respect thread and depth limits.",
+        "safety_constraints": {
+            "max_threads": threads,
+            "max_depth": depth,
+            "rate_limit_note": "Tools run with conservative defaults to avoid service disruption"
+        }
+    })
+
+
+if __name__ == "__main__":
+    main_wrapper(main)

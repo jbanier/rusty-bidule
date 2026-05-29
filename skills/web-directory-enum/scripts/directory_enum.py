@@ -101,7 +101,7 @@ def main() -> None:
         allowed_hosts=args.allowed_hosts,
         active_authorized=args.active_authorized,
     )
-    target_url = require_url_in_scope(args.target_url, scope)
+    target_url = require_url_in_scope(args.target_url, scope, active=True)
 
     # Find wordlist
     wordlist_info = find_wordlist(args.wordlist)

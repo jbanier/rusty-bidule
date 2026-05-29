@@ -47,3 +47,33 @@ def find_wordlist(custom_path: str | None) -> dict:
         "error": "No default wordlist found. Install dirb, seclists, or dirbuster wordlists.",
         "suggestions": WORDLIST_CANDIDATES
     }
+
+
+def build_ffuf_command(target_url: str, wordlist: str, threads: int, depth: int) -> list[str]:
+    """Build ffuf command with safe defaults."""
+    return [
+        "ffuf",
+        "-u", f"{target_url}/FUZZ",
+        "-w", wordlist,
+        "-t", str(threads),
+        "-recursion",
+        "-recursion-depth", str(depth),
+        "-mc", "200,204,301,302,307,401,403",
+        "-fc", "404",
+        "-timeout", "10",
+        "-maxtime", "3600",
+    ]
+
+
+def build_feroxbuster_command(target_url: str, wordlist: str, threads: int, depth: int) -> list[str]:
+    """Build feroxbuster command with safe defaults."""
+    return [
+        "feroxbuster",
+        "-u", target_url,
+        "-w", wordlist,
+        "-t", str(threads),
+        "-d", str(depth),
+        "--auto-bail",
+        "--timeout", "10",
+        "--time-limit", "1h",
+    ]

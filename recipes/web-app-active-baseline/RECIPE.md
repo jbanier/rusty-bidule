@@ -10,6 +10,7 @@ Confirm validated scope and active testing authorization before running any acti
 
 Use:
 - `web-crawler-inventory` for bounded same-scope crawling,
+- `web-directory-enum` for directory and content discovery with ffuf or feroxbuster,
 - `web-discovery-recon` for tool availability and command planning,
 - `web-scanner-safe` for conservative nuclei/ZAP baseline plans.
 
@@ -44,6 +45,18 @@ Workflow:
       local_tools:
         - local__activate_skill
         - local__run_skill
+        - local__get_investigation_memory
+        - local__update_investigation_memory
+        - local__write_file
+    - name: Directory enumeration
+      prompt: |
+        Activate and run web-directory-enum for validated targets to discover hidden directories and non-referenced paths. Pick ONE enumeration command based on tool availability (prefer feroxbuster if both are available). Run using local__exec_cli with execution_mode managed_job and wait_for_result true. Summarize discovered paths and status codes; keep output under 60 lines. Do not paste full directory listings.
+      local_tools:
+        - local__activate_skill
+        - local__run_skill
+        - local__exec_cli
+        - local__get_job
+        - local__list_jobs
         - local__get_investigation_memory
         - local__update_investigation_memory
         - local__write_file

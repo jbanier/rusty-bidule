@@ -876,6 +876,15 @@ fn default_allowed_cli_tools() -> Vec<String> {
         "unzip",
         "rg",
         "python3",
+        "arjun",
+        "parameth",
+        "gau",
+        "waybackurls",
+        "hakrawler",
+        "subjs",
+        "gospider",
+        "puredns",
+        "getallurls",
     ]
     .into_iter()
     .map(str::to_string)

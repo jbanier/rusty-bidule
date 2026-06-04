@@ -99,6 +99,7 @@ APT_PACKAGES=(
   curl
   git
   python3
+  python3-pip
   tar
   unzip
   build-essential
@@ -197,6 +198,11 @@ install_extra_go_tools() {
   install_go_tool dalfox github.com/hahwul/dalfox/v2@latest
   install_go_tool gospider github.com/jaeles-project/gospider@latest
   install_go_tool ffuf github.com/ffuf/ffuf/v2@latest
+  install_go_tool hakrawler github.com/hakluke/hakrawler@latest
+  install_go_tool waybackurls github.com/tomnomnom/waybackurls@latest
+  install_go_tool gau github.com/lc/gau/v2/cmd/gau@latest
+  install_go_tool puredns github.com/d3mondev/puredns/v2@latest
+  install_go_tool subjs github.com/lc/subjs@latest
 }
 
 install_wscat() {
@@ -248,11 +254,58 @@ install_testssl() {
   run_root ln -sf "$dest/testssl.sh" "$INSTALL_DIR/testssl.sh"
 }
 
+install_python_tools() {
+  if ! command_exists pip3; then
+    echo "pip3 is required to install Python tools" >&2
+    return 1
+  fi
+
+  # arjun - parameter discovery
+  if ! command_exists arjun; then
+    echo "Installing arjun (parameter discovery)..."
+    run_root pip3 install arjun
+  else
+    echo "arjun is already installed: $(command -v arjun)"
+  fi
+
+  # parameth - parameter discovery
+  if ! command_exists parameth; then
+    echo "Installing parameth (parameter discovery)..."
+    if ! command_exists git; then
+      echo "git is required to install parameth" >&2
+      return 1
+    fi
+    local dest="/opt/parameth"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "dry-run: would clone https://github.com/maK-/parameth.git at $dest"
+      echo "dry-run: would install parameth via pip3"
+      return
+    fi
+    if [[ ! -d "$dest" ]]; then
+      run_root git clone https://github.com/maK-/parameth.git "$dest"
+    fi
+    run_root pip3 install -r "$dest/requirements.txt"
+    run_root ln -sf "$dest/parameth.py" "$INSTALL_DIR/parameth"
+    run_root chmod +x "$INSTALL_DIR/parameth"
+  else
+    echo "parameth is already installed: $(command -v parameth)"
+  fi
+
+  # getallurls (alternative to gau)
+  if ! command_exists getallurls; then
+    echo "Installing getallurls (archive URL fetcher)..."
+    run_root pip3 install getallurls
+  else
+    echo "getallurls is already installed: $(command -v getallurls)"
+  fi
+}
+
 install_projectdiscovery_tools
 install_extra_go_tools
 install_wscat
 install_wpscan
 install_testssl
+install_python_tools
 
 cat <<EOF
 
@@ -262,10 +315,13 @@ Expected web assessment binaries:
   curl nmap wafw00f testssl.sh httpx subfinder dnsx naabu nuclei katana
   ffuf feroxbuster dalfox wpscan wscat websocat gospider
 
+Phase 1 additions (parameter & historical discovery):
+  arjun parameth gau waybackurls hakrawler subjs puredns getallurls
+
 Missing binaries, if any:
 EOF
 
-for binary in curl nmap wafw00f testssl.sh httpx subfinder dnsx naabu nuclei katana ffuf feroxbuster dalfox wpscan wscat websocat gospider; do
+for binary in curl nmap wafw00f testssl.sh httpx subfinder dnsx naabu nuclei katana ffuf feroxbuster dalfox wpscan wscat websocat gospider arjun parameth gau waybackurls hakrawler subjs puredns getallurls; do
   if command_exists "$binary"; then
     printf '  ok      %s -> %s\n' "$binary" "$(command -v "$binary")"
   else

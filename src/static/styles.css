@@ -2499,3 +2499,419 @@ select:-webkit-autofill {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+/* ══════════════════════════════════════════════════════════════════════
+   RUSTY-BIDULE FRONTEND UX IMPROVEMENTS
+   ══════════════════════════════════════════════════════════════════════
+
+   Improvements:
+   1. Lighter conversation list items with smooth hover
+   2. Streamlined permissions control with popover
+   3. Auto-expanding composer textarea
+   4. Slide-in panels for settings/tools
+   5. Unified status badges in header
+   6. Micro-interactions and spring animations
+   7. Icon buttons in conversation header
+
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── 1. LIGHTER CONVERSATION LIST ────────────────────────────────── */
+.conversation-list li {
+  position: relative;
+  padding: 10px 12px;
+  border: 1px solid rgba(252, 238, 10, 0.18);
+  border-radius: 2px;
+  cursor: pointer;
+  display: block;
+  background:
+    linear-gradient(135deg, rgba(252, 238, 10, 0.03), transparent 52%),
+    linear-gradient(180deg, rgba(16, 17, 18, 0.76), rgba(11, 12, 14, 0.68));
+  box-shadow: inset 2px 0 0 rgba(252, 238, 10, 0.16), 0 4px 12px rgba(0, 0, 0, 0.18);
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 8px 100%, 0 calc(100% - 8px));
+  transition: all 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.conversation-list li:hover {
+  background:
+    linear-gradient(135deg, rgba(252, 238, 10, 0.09), rgba(255, 0, 60, 0.04)),
+    linear-gradient(180deg, rgba(24, 23, 18, 0.88), rgba(15, 16, 18, 0.82));
+  border-color: rgba(252, 238, 10, 0.48);
+  box-shadow: inset 3px 0 0 rgba(0, 240, 255, 0.58), 0 8px 20px rgba(0, 0, 0, 0.26);
+  transform: translateX(2px);
+}
+
+.conversation-list li strong {
+  font-size: 0.94rem;
+  line-height: 1.4;
+}
+
+.conversation-list li p {
+  font-size: 0.82rem;
+  -webkit-line-clamp: 1;
+}
+
+.conversation-badges {
+  gap: 0.3rem;
+}
+
+.conversation-badge {
+  padding: 0.06rem 0.38rem;
+  font-size: 0.6rem;
+}
+
+/* ── 2. CONVERSATION HEADER WITH ACTIONS ─────────────────────────── */
+.conversation-header {
+  align-items: center;
+}
+
+.conversation-header-main h2 {
+  margin: 0.2rem 0 0.4rem;
+}
+
+.conversation-title-row {
+  gap: 8px;
+}
+
+.conversation-header-actions {
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.conversation-header-actions .icon-button {
+  width: 36px;
+  height: 36px;
+  font-size: 0.95rem;
+}
+
+.conversation-header-actions .timestamp {
+  margin-left: 8px;
+}
+
+.icon-button-danger {
+  border-color: rgba(255, 0, 60, 0.4);
+  color: #ff9daf;
+}
+
+.icon-button-danger:hover {
+  border-color: var(--accent-alt);
+  background: rgba(255, 0, 60, 0.12);
+  color: #ffdce4;
+}
+
+/* ── 3. STREAMLINED BOTTOM CONTROL DECK ──────────────────────────── */
+.bottom-control-deck {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(252, 238, 10, 0.28);
+  border-radius: 2px;
+  background:
+    linear-gradient(135deg, rgba(252, 238, 10, 0.06), transparent 48%),
+    linear-gradient(180deg, rgba(12, 12, 14, 0.92), rgba(17, 16, 14, 0.86));
+  box-shadow: inset 3px 0 0 rgba(0, 240, 255, 0.38), 0 8px 20px rgba(0, 0, 0, 0.2);
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+.permissions-summary-group {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.permissions-chip-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  border: 1px solid rgba(252, 238, 10, 0.26);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.permissions-chip-compact:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(252, 238, 10, 0.1);
+  transform: translateY(-1px);
+}
+
+.permissions-chip-compact:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.permissions-expand-icon {
+  font-size: 1rem;
+  color: var(--accent-muted);
+}
+
+.permissions-popover {
+  position: fixed;
+  min-width: 420px;
+  max-width: 90vw;
+  z-index: 9999;
+  pointer-events: none;
+  visibility: visible;
+  opacity: 1;
+}
+
+.permissions-popover.hidden {
+  display: none;
+  visibility: hidden;
+  opacity: 0;
+}
+
+.permissions-popover-content {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(252, 238, 10, 0.42);
+  border-radius: 2px;
+  background: rgba(15, 15, 27, 0.98);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.48), inset 3px 0 0 rgba(0, 240, 255, 0.42);
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  pointer-events: all;
+  animation: permissions-popover-in 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes permissions-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── 4. AUTO-EXPANDING COMPOSER ──────────────────────────────────── */
+.composer {
+  margin-top: 0;
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  padding-top: 10px;
+}
+
+#message-input {
+  flex: 1;
+  background: rgba(11, 12, 14, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 14px 16px;
+  color: var(--text-primary);
+  min-height: 52px;
+  max-height: 50vh;
+  resize: none;
+  overflow-y: auto;
+  font-family: var(--font-family);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  transition: border-color 0.24s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.24s ease, background 0.24s ease, height 0.2s ease;
+}
+
+#message-input:focus {
+  outline: none;
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px rgba(252, 238, 10, 0.14), 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+
+#message-input:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+#send-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 120px;
+  min-height: 52px;
+  border: none;
+  border-radius: 2px;
+  background: linear-gradient(135deg, var(--accent), #d7c900);
+  color: #11100b;
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+#send-button::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.2), transparent);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+#send-button:hover::before {
+  opacity: 1;
+}
+
+#send-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(252, 238, 10, 0.3);
+}
+
+#send-button:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(252, 238, 10, 0.2);
+}
+
+.send-icon {
+  font-size: 0.85rem;
+}
+
+.send-text {
+  text-transform: uppercase;
+}
+
+/* ── 5. SLIDE-IN PANELS ──────────────────────────────────────────── */
+.slide-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.slide-panel.hidden {
+  display: none;
+}
+
+.slide-panel::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 8, 16, 0.68);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.slide-panel:not(.hidden)::before {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.slide-panel-card {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(60vw, 1100px);
+  max-width: calc(100vw - 80px);
+  height: 100vh;
+  background: rgba(22, 26, 43, 0.98);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -16px 0 48px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  pointer-events: all;
+}
+
+.slide-panel:not(.hidden) .slide-panel-card {
+  transform: translateX(0);
+}
+
+/* ── 6. IMPROVED HISTORY MODAL ───────────────────────────────────── */
+.history-panel {
+  animation: overlay-fade-in 0.2s ease;
+}
+
+.history-card {
+  animation: modal-slide-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes overlay-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modal-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ── 7. SMOOTH SCROLLING & TRANSITIONS ──────────────────────────── */
+.conversation-stream {
+  scroll-behavior: smooth;
+}
+
+.message {
+  animation: message-slide-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes message-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── 8. RESPONSIVE ADJUSTMENTS ───────────────────────────────────── */
+@media (max-width: 960px) {
+  .permissions-popover {
+    left: auto;
+    right: 0;
+    min-width: 320px;
+  }
+
+  .slide-panel-card {
+    width: 100vw;
+  }
+
+  .conversation-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .conversation-header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 640px) {
+  .permissions-popover-content {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .permissions-popover-content > * {
+    width: 100%;
+  }
+}

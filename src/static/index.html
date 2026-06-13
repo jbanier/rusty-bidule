@@ -76,9 +76,20 @@
           <div class="conversation-title-row">
             <h2 id="active-convo-title">None selected</h2>
             <span id="active-run-indicator" class="conversation-badge hidden">Idle</span>
+            <span id="header-jobs-badge" class="conversation-badge hidden">0 jobs</span>
+            <span id="header-schedules-badge" class="conversation-badge hidden">0 schedules</span>
           </div>
         </div>
         <div class="conversation-header-actions">
+          <button id="history-button" class="icon-button" type="button" title="Show history" disabled>
+            <span aria-hidden="true">📜</span>
+          </button>
+          <button id="compact-conversation" class="icon-button" type="button" title="Compact conversation" disabled>
+            <span aria-hidden="true">⚡</span>
+          </button>
+          <button id="delete-convo" class="icon-button icon-button-danger" type="button" title="Delete conversation" disabled>
+            <span aria-hidden="true">🗑</span>
+          </button>
           <p id="active-updated" class="timestamp">—</p>
         </div>
       </div>
@@ -97,49 +108,55 @@
         <div id="jobs-list" class="jobs-list"></div>
       </section>
       <section class="bottom-control-deck" aria-label="Conversation controls">
-        <div class="bottom-control-group conversation-control-actions" aria-label="Conversation actions">
-          <button id="compact-conversation" class="control-button" type="button">Compact</button>
-          <button id="history-button" class="control-button" type="button">History</button>
-          <button id="delete-convo" class="control-button control-button-danger" type="button">Delete</button>
-        </div>
-        <div class="bottom-control-group permission-controls" aria-label="Conversation permissions">
+        <div class="permissions-summary-group">
           <span class="control-label">Permissions</span>
-          <button
-            id="permission-network"
-            class="permission-chip"
-            type="button"
-            aria-pressed="false"
-            title="Toggle network access for this conversation"
-          >Net off</button>
-          <label class="filesystem-control" for="permission-filesystem">
-            <span>FS</span>
-            <select id="permission-filesystem" title="Set filesystem access for this conversation">
-              <option value="none">None</option>
-              <option value="read_only">Read</option>
-              <option value="read_write">Write</option>
-            </select>
-          </label>
-          <label class="filesystem-control" for="permission-filesystem-scope">
-            <span>Scope</span>
-            <select id="permission-filesystem-scope" title="Set filesystem path scope for this conversation">
-              <option value="workspace">Workspace</option>
-              <option value="full">Full</option>
-            </select>
-          </label>
-          <button
-            id="permission-yolo"
-            class="permission-chip permission-chip-danger"
-            type="button"
-            aria-pressed="false"
-            title="Toggle all internal permission checks for this conversation"
-          >All off</button>
-          <button id="permission-reset" class="control-button control-button-subtle" type="button">Reset</button>
+          <button id="permissions-toggle" class="permissions-chip-compact" type="button" title="Configure permissions" disabled>
+            <span id="permissions-summary-text">net:off • fs:read • scope:ws</span>
+            <span class="permissions-expand-icon" aria-hidden="true">⚙</span>
+          </button>
+          <div id="permissions-popover" class="permissions-popover hidden">
+            <div class="permissions-popover-content">
+              <button
+                id="permission-network"
+                class="permission-chip"
+                type="button"
+                aria-pressed="false"
+                title="Toggle network access for this conversation"
+              >Net off</button>
+              <label class="filesystem-control" for="permission-filesystem">
+                <span>FS</span>
+                <select id="permission-filesystem" title="Set filesystem access for this conversation">
+                  <option value="none">None</option>
+                  <option value="read_only">Read</option>
+                  <option value="read_write">Write</option>
+                </select>
+              </label>
+              <label class="filesystem-control" for="permission-filesystem-scope">
+                <span>Scope</span>
+                <select id="permission-filesystem-scope" title="Set filesystem path scope for this conversation">
+                  <option value="workspace">Workspace</option>
+                  <option value="full">Full</option>
+                </select>
+              </label>
+              <button
+                id="permission-yolo"
+                class="permission-chip permission-chip-danger"
+                type="button"
+                aria-pressed="false"
+                title="Toggle all internal permission checks for this conversation"
+              >All off</button>
+              <button id="permission-reset" class="control-button control-button-subtle" type="button">Reset</button>
+            </div>
+          </div>
         </div>
         <div id="conversation-usage" class="bottom-control-group conversation-usage hidden" aria-label="Conversation usage"></div>
       </section>
       <div class="composer">
-        <textarea id="message-input" placeholder="Select or start a conversation to begin." disabled></textarea>
-        <button id="send-button" disabled title="Send with Ctrl/Cmd+Enter">Send</button>
+        <textarea id="message-input" placeholder="Select or start a conversation to begin." disabled rows="1"></textarea>
+        <button id="send-button" disabled title="Send with Ctrl/Cmd+Enter">
+          <span class="send-icon" aria-hidden="true">▶</span>
+          <span class="send-text">Send</span>
+        </button>
       </div>
       <p id="composer-hint" class="composer-hint">Select or start a conversation to begin.</p>
       <section id="continuation-panel" class="continuation-panel hidden" aria-label="Turn continuation">
@@ -152,8 +169,8 @@
 
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <section id="settings-panel" class="settings-panel hidden" aria-hidden="true">
-    <div class="settings-card">
+  <section id="settings-panel" class="settings-panel slide-panel hidden" aria-hidden="true">
+    <div class="settings-card slide-panel-card">
       <div class="settings-header">
         <div>
           <p class="conversation-label">Settings</p>
@@ -226,8 +243,8 @@
     </div>
   </section>
 
-  <section id="tools-panel" class="tools-panel hidden" aria-hidden="true">
-    <div class="tools-card">
+  <section id="tools-panel" class="tools-panel slide-panel hidden" aria-hidden="true">
+    <div class="tools-card slide-panel-card">
       <div class="settings-header">
         <div>
           <p class="conversation-label">Tools</p>
@@ -1609,7 +1626,7 @@
       renderMcpServers([]);
       return;
     }
-    const response = await fetch(`/api/conversations/${state.activeConversationId}/mcp-statuses?include_counts=1`);
+    const response = await fetch(`/api/conversations/${state.activeConversationId}/mcp-statuses`);
     if (!response.ok) {
       renderMcpServers([]);
       return;
@@ -2755,7 +2772,16 @@
     continuationRoundsEl.disabled = !hasConversation || !hasContinuation || jobRunning;
     resetMcpButtonEl.disabled = !hasConversation || jobRunning;
     sendButtonEl.disabled = !canSend;
-    sendButtonEl.textContent = jobRunning ? 'Working…' : 'Send';
+
+    // Update send button content
+    const sendIcon = sendButtonEl.querySelector('.send-icon');
+    const sendText = sendButtonEl.querySelector('.send-text');
+    if (sendIcon && sendText) {
+      sendText.textContent = jobRunning ? 'Working…' : 'Send';
+      sendIcon.style.display = jobRunning ? 'none' : 'inline';
+    } else {
+      sendButtonEl.textContent = jobRunning ? 'Working…' : 'Send';
+    }
     if (conversationActionsToggleEl) {
       conversationActionsToggleEl.disabled = !hasConversation;
     }
@@ -2792,6 +2818,230 @@
     return escapeHtml(text).replace(/'/g, '&#39;');
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // UX IMPROVEMENTS: Permissions popover, auto-expanding textarea, etc.
+  // ═══════════════════════════════════════════════════════════════════
+
+  const permissionsToggleEl = document.getElementById('permissions-toggle');
+  const permissionsPopoverEl = document.getElementById('permissions-popover');
+  const permissionsSummaryTextEl = document.getElementById('permissions-summary-text');
+  const headerJobsBadgeEl = document.getElementById('header-jobs-badge');
+  const headerSchedulesBadgeEl = document.getElementById('header-schedules-badge');
+
+  // Move popover to body to escape stacking context from conversation-pane's backdrop-filter
+  if (permissionsPopoverEl && permissionsPopoverEl.parentElement) {
+    document.body.appendChild(permissionsPopoverEl);
+  }
+
+  // Permissions popover toggle with dynamic positioning
+  function positionPermissionsPopover() {
+    if (!permissionsToggleEl || !permissionsPopoverEl) return;
+
+    // First make popover visible but off-screen to measure it
+    permissionsPopoverEl.style.visibility = 'hidden';
+    permissionsPopoverEl.classList.remove('hidden');
+
+    const rect = permissionsToggleEl.getBoundingClientRect();
+    const popoverRect = permissionsPopoverEl.getBoundingClientRect();
+    const margin = 10;
+
+    console.log('Positioning popover:', {
+      buttonRect: { top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height },
+      popoverRect: { width: popoverRect.width, height: popoverRect.height },
+      windowSize: { width: window.innerWidth, height: window.innerHeight }
+    });
+
+    // Vertical positioning - position ABOVE the button
+    // Calculate top position: button top - popover height - margin
+    const topPosition = rect.top - popoverRect.height - margin;
+
+    permissionsPopoverEl.style.top = `${Math.max(margin, topPosition)}px`;
+    permissionsPopoverEl.style.bottom = 'auto';
+
+    // Horizontal positioning - align with button, but ensure it doesn't go off screen
+    let leftPosition = rect.left;
+    const popoverWidth = Math.max(popoverRect.width, 420);
+
+    // Check if popover would go off the right edge
+    if (leftPosition + popoverWidth > window.innerWidth - margin) {
+      leftPosition = Math.max(margin, window.innerWidth - popoverWidth - margin);
+    }
+
+    // Ensure minimum margin from left edge
+    leftPosition = Math.max(margin, leftPosition);
+
+    permissionsPopoverEl.style.left = `${leftPosition}px`;
+    permissionsPopoverEl.style.right = 'auto';
+
+    // Now make it visible
+    permissionsPopoverEl.style.visibility = 'visible';
+
+    console.log('Final position:', {
+      top: topPosition,
+      left: leftPosition,
+      computed: { top: permissionsPopoverEl.style.top, left: permissionsPopoverEl.style.left }
+    });
+  }
+
+  if (permissionsToggleEl && permissionsPopoverEl) {
+    permissionsToggleEl.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const isOpen = !permissionsPopoverEl.classList.contains('hidden');
+
+      if (isOpen) {
+        permissionsPopoverEl.classList.add('hidden');
+      } else {
+        positionPermissionsPopover();
+        permissionsPopoverEl.classList.remove('hidden');
+      }
+    });
+
+    // Close popover when clicking outside
+    document.addEventListener('click', (event) => {
+      if (!permissionsPopoverEl.classList.contains('hidden') &&
+          !permissionsToggleEl.contains(event.target) &&
+          !permissionsPopoverEl.contains(event.target)) {
+        permissionsPopoverEl.classList.add('hidden');
+      }
+    });
+
+    // Close on Escape key
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !permissionsPopoverEl.classList.contains('hidden')) {
+        permissionsPopoverEl.classList.add('hidden');
+      }
+    });
+  }
+
+  // Close slide panels when clicking backdrop
+  const closePanelOnBackdrop = (panelEl) => {
+    if (!panelEl) return;
+    panelEl.addEventListener('click', (event) => {
+      if (event.target === panelEl) {
+        panelEl.classList.add('hidden');
+        panelEl.setAttribute('aria-hidden', 'true');
+        const expandButton = panelEl.id === 'settings-panel' ? openSettingsButton : openToolsButton;
+        if (expandButton) expandButton.setAttribute('aria-expanded', 'false');
+      }
+    });
+  };
+  closePanelOnBackdrop(settingsPanel);
+  closePanelOnBackdrop(toolsPanel);
+
+  // Auto-expanding textarea
+  function autoExpandTextarea() {
+    messageInputEl.style.height = '52px';
+    const scrollHeight = messageInputEl.scrollHeight;
+    const maxHeight = window.innerHeight * 0.5; // 50vh
+    messageInputEl.style.height = Math.min(scrollHeight, maxHeight) + 'px';
+  }
+
+  messageInputEl.addEventListener('input', () => {
+    autoExpandTextarea();
+    updateActionState();
+  });
+
+  // Update header badges with job/schedule counts
+  function updateHeaderBadges() {
+    if (headerJobsBadgeEl && state.activeConversationId) {
+      const jobs = document.querySelectorAll('#jobs-list tbody tr');
+      const runningJobs = Array.from(jobs).filter(tr =>
+        tr.classList.contains('job-row-running')
+      ).length;
+
+      if (jobs.length > 0) {
+        headerJobsBadgeEl.textContent = runningJobs > 0
+          ? `${runningJobs} job${runningJobs !== 1 ? 's' : ''} running`
+          : `${jobs.length} job${jobs.length !== 1 ? 's' : ''}`;
+        headerJobsBadgeEl.classList.remove('hidden');
+        headerJobsBadgeEl.classList.toggle('conversation-badge-running', runningJobs > 0);
+      } else {
+        headerJobsBadgeEl.classList.add('hidden');
+      }
+    } else if (headerJobsBadgeEl) {
+      headerJobsBadgeEl.classList.add('hidden');
+    }
+
+    if (headerSchedulesBadgeEl && !state.schedulesUnavailable) {
+      const runningSchedules = state.schedules.filter(s =>
+        String(s.last_status || '').toLowerCase() === 'running'
+      ).length;
+
+      if (state.schedules.length > 0) {
+        headerSchedulesBadgeEl.textContent = runningSchedules > 0
+          ? `${runningSchedules} schedule${runningSchedules !== 1 ? 's' : ''} running`
+          : `${state.schedules.length} schedule${state.schedules.length !== 1 ? 's' : ''}`;
+        headerSchedulesBadgeEl.classList.remove('hidden');
+        headerSchedulesBadgeEl.classList.toggle('conversation-badge-running', runningSchedules > 0);
+      } else {
+        headerSchedulesBadgeEl.classList.add('hidden');
+      }
+    } else if (headerSchedulesBadgeEl) {
+      headerSchedulesBadgeEl.classList.add('hidden');
+    }
+  }
+
+  // Update permissions summary text
+  function updatePermissionsSummaryText(permissions) {
+    if (!permissionsSummaryTextEl) return;
+
+    const normalized = normalizePermissions(permissions);
+    const netLabel = normalized.allow_network || normalized.yolo ? 'net:on' : 'net:off';
+    const fsLabels = {
+      none: 'fs:none',
+      read_only: 'fs:read',
+      read_write: 'fs:write',
+    };
+    const fsLabel = normalized.yolo ? 'fs:all' : fsLabels[normalized.filesystem];
+    const scopeLabel = normalized.yolo ? 'scope:full' : `scope:${normalized.filesystem_scope === 'workspace' ? 'ws' : 'full'}`;
+
+    permissionsSummaryTextEl.textContent = `${netLabel} • ${fsLabel} • ${scopeLabel}`;
+  }
+
+  // Override renderPermissionControls to update summary text
+  const originalRenderPermissionControls = renderPermissionControls;
+  renderPermissionControls = function(permissions) {
+    originalRenderPermissionControls(permissions);
+    updatePermissionsSummaryText(permissions);
+
+    // Update permissions toggle state
+    if (permissionsToggleEl) {
+      const hasConversation = Boolean(state.activeConversationId);
+      const jobRunning = Boolean(state.activeJobId);
+      permissionsToggleEl.disabled = !hasConversation || jobRunning;
+    }
+  };
+
+  // Override renderJobs to update header badges
+  const originalRenderJobs = renderJobs;
+  renderJobs = function(jobs) {
+    originalRenderJobs(jobs);
+    updateHeaderBadges();
+  };
+
+  // Override renderSchedules to update header badges
+  const originalRenderSchedules = renderSchedules;
+  renderSchedules = function(schedules) {
+    originalRenderSchedules(schedules);
+    updateHeaderBadges();
+  };
+
+  // Smooth scroll to bottom with animation
+  function smoothScrollToBottom() {
+    streamEl.scrollTo({
+      top: streamEl.scrollHeight,
+      behavior: 'smooth'
+    });
+  }
+
+  // Override scrollConversationToBottom for smooth animation
+  scrollConversationToBottom = function() {
+    window.requestAnimationFrame(() => {
+      smoothScrollToBottom();
+    });
+  };
+
+  // Initialize
   refreshConversations();
   refreshConfig();
   refreshOAuthServers();
@@ -2800,13 +3050,22 @@
   initializeSidebarPanels();
   renderScheduleFormState();
   updateActionState();
+  updateHeaderBadges();
+
   window.setInterval(async () => {
     await refreshConversations();
     await refreshSchedules();
+    updateHeaderBadges();
   }, 5000);
+
   window.addEventListener('resize', () => {
     document.querySelectorAll('.table-scroll').forEach(updateTableScrollCue);
-    scrollConversationToBottom();
+    autoExpandTextarea();
+
+    // Reposition permissions popover if it's open
+    if (permissionsPopoverEl && !permissionsPopoverEl.classList.contains('hidden')) {
+      positionPermissionsPopover();
+    }
   });
   </script>
 </body>

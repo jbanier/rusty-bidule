@@ -2845,12 +2845,6 @@
     const popoverRect = permissionsPopoverEl.getBoundingClientRect();
     const margin = 10;
 
-    console.log('Positioning popover:', {
-      buttonRect: { top: rect.top, left: rect.left, bottom: rect.bottom, right: rect.right, width: rect.width, height: rect.height },
-      popoverRect: { width: popoverRect.width, height: popoverRect.height },
-      windowSize: { width: window.innerWidth, height: window.innerHeight }
-    });
-
     // Vertical positioning - position ABOVE the button
     // Calculate top position: button top - popover height - margin
     const topPosition = rect.top - popoverRect.height - margin;
@@ -2875,12 +2869,6 @@
 
     // Now make it visible
     permissionsPopoverEl.style.visibility = 'visible';
-
-    console.log('Final position:', {
-      top: topPosition,
-      left: leftPosition,
-      computed: { top: permissionsPopoverEl.style.top, left: permissionsPopoverEl.style.left }
-    });
   }
 
   if (permissionsToggleEl && permissionsPopoverEl) {

@@ -231,8 +231,8 @@ Planner actions:
 This is a meta-skill (no dedicated tools). It orchestrates:
 
 - `local__activate_skill` - Load skill instructions
-- Subagent spawning (via rusty-bidule Agent tool or equivalent)
-- Todo creation/tracking (via rusty-bidule todo system)
+- Subagent spawning (via Agent tool or equivalent)
+- Todo creation/tracking (via todo system)
 - `local__get_investigation_memory` / `local__update_investigation_memory`
 
 ## Success Criteria

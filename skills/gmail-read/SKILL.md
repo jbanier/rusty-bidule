@@ -44,7 +44,7 @@ python3 scripts/gmail_auth.py login \
   --credentials-file /path/to/google-oauth-client.json
 ```
 
-Saved token path defaults to `~/.config/rusty-bidule/gmail_token.json`.
+Saved token path defaults to `~/.config/rusty-bidule/gmail_token.json` (or `~/.rusty-bidule/` as an alternative location).
 Override it with `GMAIL_TOKEN_FILE=/path/to/token.json`.
 
 ## Read messages directly

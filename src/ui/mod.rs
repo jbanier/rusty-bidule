@@ -1138,7 +1138,7 @@ impl App {
                 self.push_command_output(
                     "/logging",
                     format!(
-                        "Tracing provider: `{:?}`\nApplication log: `var/bidule.log`\nConversation audit log: `data/conversations/<id>/logs/conversation.log`",
+                        "Tracing provider: `{:?}`\nApplication log: `var/rusty-bidule.log`\nConversation audit log: `data/conversations/<id>/logs/conversation.log`",
                         provider.unwrap_or_default()
                     ),
                 );

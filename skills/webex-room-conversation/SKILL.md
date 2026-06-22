@@ -53,7 +53,7 @@ python3 scripts/webex_auth.py login \
   --client-secret <your-client-secret>
 ```
 
-Token is saved to `~/.config/rusty-bidule/webex_token.json` (permissions `0600`).  
+Token is saved to `~/.config/rusty-bidule/webex_token.json` (or `~/.rusty-bidule/`, permissions `0600`).  
 The fetch script loads it automatically — no env var needed.
 
 3. Refresh when expired (uses the stored refresh token):

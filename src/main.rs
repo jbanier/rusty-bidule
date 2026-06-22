@@ -286,7 +286,7 @@ EXAMPLES:
     rusty-bidule --once \"Scan host 10.0.0.1\"
 
     # Use a custom config file
-    rusty-bidule --config /etc/csirt/bidule.yaml
+    rusty-bidule --config /etc/csirt/rusty-bidule.yaml
 "
     );
 }

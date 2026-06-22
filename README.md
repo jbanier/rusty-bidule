@@ -397,7 +397,7 @@ tool_environment:
     - /usr/local/bin
 ```
 
-- `pass_through` copies required variables from the Rusty Bidule process and fails startup if any are missing or empty
+- `pass_through` copies required variables from the rusty-bidule process and fails startup if any are missing or empty
 - `variables` sets explicit child-process values; `env:NAME` is resolved at startup
 - `path_prepend` places directories before the effective child `PATH`
 - Configured variable names are case-sensitive
@@ -486,7 +486,7 @@ Login can be triggered from the TUI with `/login <server>`.
 - `skills/` local skill definitions and scripts
 - `recipes/` prompt/config bundles for investigations
 - `data/` conversations, OAuth state, and tool evidence
-- `var/bidule.log` application log file
+- `var/rusty-bidule.log` application log file
 
 ## TUI Commands
 
@@ -607,7 +607,7 @@ status until scope, evidence, impact, reproducibility, and redaction checks pass
 
 Durable output is split by purpose:
 
-- `var/bidule.log` stores application-level logs
+- `var/rusty-bidule.log` stores application-level logs
 - `data/conversations/...` stores messages, per-conversation logs, compactions,
   tool artifacts, scratchpads, jobs, and investigation memory
 - `data/oauth/...` stores OAuth state, tokens, and client registration data
@@ -640,5 +640,5 @@ Engineering details, architecture, runtime behavior, and interface references
 live in [`docs/REFERENCE.md`](docs/REFERENCE.md).
 
 [`docs/REFERENCE_goal.md`](docs/REFERENCE_goal.md) is retained only as a
-historical reference for the earlier Python `bidule2` design and is not the
+historical reference for an earlier Python design iteration and is not the
 current implementation reference.

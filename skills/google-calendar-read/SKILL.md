@@ -44,7 +44,7 @@ python3 scripts/google_calendar_auth.py login \
   --credentials-file /path/to/google-oauth-client.json
 ```
 
-Saved token path defaults to `~/.config/rusty-bidule/google_calendar_token.json`.
+Saved token path defaults to `~/.config/rusty-bidule/google_calendar_token.json` (or `~/.rusty-bidule/` as an alternative location).
 Override it with `GOOGLE_CALENDAR_TOKEN_FILE=/path/to/token.json`.
 
 ## Fetch events directly

@@ -1,11 +1,11 @@
-# Historical bidule2 Reference Goal
+# Historical Python Design Reference
 
-This document is retained as historical design context for the earlier Python
-`bidule2` codebase. It is not the current `rusty-bidule` implementation
+This document is retained as historical design context for an earlier Python
+iteration of the codebase. It is not the current `rusty-bidule` implementation
 reference. For current Rust behavior, use [`REFERENCE.md`](REFERENCE.md) and the
 repository [`README.md`](../README.md).
 
-The legacy Python `bidule2` design described below combines:
+The legacy Python design described below combines:
 
 - an Azure OpenAI-backed agent,
 - MCP servers that expose security tools,
@@ -36,8 +36,8 @@ design and should not be used as current implementation guidance.
 ## Repository Layout
 
 ```text
-bidule2/
-├── bidule2/
+legacy-python/
+├── legacy-python/
 │   ├── __main__.py              # click entrypoint
 │   ├── agent/                   # orchestrator, agent bootstrap, skills, recipes
 │   ├── config/                  # validated config loader and model helpers
@@ -62,7 +62,7 @@ bidule2/
 └── README.md
 ```
 
-Important runtime paths from [bidule2/paths.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/paths.py):
+Important runtime paths from [legacy-python/paths.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/paths.py):
 
 - `CONFIG_DIR = ROOT_DIR / "config"`
 - `DATA_DIR = ROOT_DIR / "data"`
@@ -74,7 +74,7 @@ Important runtime paths from [bidule2/paths.py](/Users/jbanier/Documents/work/co
 
 ## Runtime Architecture
 
-The runtime is centered on `AgentOrchestrator` in [bidule2/agent/orchestrator.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/agent/orchestrator.py).
+The runtime is centered on `AgentOrchestrator` in [legacy-python/agent/orchestrator.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/agent/orchestrator.py).
 
 Main components:
 
@@ -88,7 +88,7 @@ Main components:
 
 High-level flow:
 
-1. The process starts from [bidule2/__main__.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/__main__.py).
+1. The process starts from [legacy-python/__main__.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/__main__.py).
 2. Logging is initialized.
 3. The selected interface creates or reuses an `AgentOrchestrator`.
 4. The orchestrator loads config, skills, recipes, local tools, and MCP metadata.
@@ -99,7 +99,7 @@ High-level flow:
 
 ### CLI path
 
-The CLI in [bidule2/interfaces/cli.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/interfaces/cli.py):
+The CLI in [legacy-python/interfaces/cli.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/interfaces/cli.py):
 
 - starts `AutoPullRuntime`,
 - picks the latest conversation by default when one exists,
@@ -110,7 +110,7 @@ The CLI is synchronous from the user's perspective, but the orchestrator still r
 
 ### Web path
 
-The Flask app in [bidule2/interfaces/web.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/interfaces/web.py):
+The Flask app in [legacy-python/interfaces/web.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/interfaces/web.py):
 
 - creates one orchestrator instance,
 - starts `AutoPullRuntime`,
@@ -145,7 +145,7 @@ The orchestrator caps the agent loop at `_MAX_TURNS = 10`.
 
 ## Configuration Model
 
-The validated configuration model is defined in [bidule2/config/loader.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/config/loader.py). The active file is `config/config.yaml`.
+The validated configuration model is defined in [legacy-python/config/loader.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/config/loader.py). The active file is `config/config.yaml`.
 
 Top-level keys:
 
@@ -226,7 +226,7 @@ Fields:
 
 ## Conversations, Evidence, And Jobs
 
-The filesystem store is implemented in [bidule2/data/storage.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/data/storage.py).
+The filesystem store is implemented in [legacy-python/data/storage.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/data/storage.py).
 
 ### Conversation directory layout
 
@@ -277,7 +277,7 @@ Assistant metadata includes:
 
 There are two evidence-save paths in the code:
 
-- `save_tool_evidence()` in [bidule2/agent/blocks.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/agent/blocks.py) for agent-executed tool calls
+- `save_tool_evidence()` in [legacy-python/agent/blocks.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/agent/blocks.py) for agent-executed tool calls
 - `run_tool_and_save_output()` in the same file for skill execution results
 
 Current behavior:
@@ -316,14 +316,14 @@ The local job tools support:
 - manual tracking of remote transaction IDs
 - automated follow-up when `mode` is set for auto-pull
 
-`AutoPullRuntime` in [bidule2/auto_pull.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/auto_pull.py):
+`AutoPullRuntime` in [legacy-python/auto_pull.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/auto_pull.py):
 
 - scans due jobs every second by default
 - claims a per-job lock in the store
 - runs `orchestrator.run_automation_turn(...)`
 - updates retrieval state or last error
 
-This is how bidule2 can continue polling a remote system after the original user turn has finished.
+This is how legacy Python implementation can continue polling a remote system after the original user turn has finished.
 
 ## Skills
 
@@ -442,7 +442,7 @@ Recipes are selected per conversation and then consumed by the next normal turn.
 
 ## Local Tools
 
-Local tools are defined in [bidule2/agent/local_tools.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/agent/local_tools.py).
+Local tools are defined in [legacy-python/agent/local_tools.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/agent/local_tools.py).
 
 Base local tools:
 
@@ -499,12 +499,12 @@ The change affects subsequent turns, not the currently running tool set.
 
 ## MCP Integration
 
-bidule2 uses MCP in two related ways:
+legacy Python implementation uses MCP in two related ways:
 
 1. the main agent can call MCP-exposed tools directly
 2. skills can route specific skill tools through an MCP server
 
-The lower-level MCP helper code lives in [bidule2/mcp_support/client.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/mcp_support/client.py).
+The lower-level MCP helper code lives in [legacy-python/mcp_support/client.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/mcp_support/client.py).
 
 ### Startup and discovery
 
@@ -536,7 +536,7 @@ The orchestrator catches MCP preparation and run failures and persists a user-vi
 
 ## Authentication And OAuth
 
-OAuth support is implemented in [bidule2/auth.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/auth.py).
+OAuth support is implemented in [legacy-python/auth.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/auth.py).
 
 ### Storage
 
@@ -552,7 +552,7 @@ data/oauth_tokens/<server-name>.json
 
 For CLI-driven OAuth:
 
-- bidule2 can open the system browser
+- legacy Python implementation can open the system browser
 - a temporary loopback HTTP listener receives the callback
 - PKCE verifier/state are used during the flow
 - refresh tokens are reused when available
@@ -571,7 +571,7 @@ The web route starts the authorization URL generation, then the callback complet
 
 ## CLI Interface
 
-The CLI command surface in [bidule2/interfaces/cli.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/interfaces/cli.py) includes:
+The CLI command surface in [legacy-python/interfaces/cli.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/interfaces/cli.py) includes:
 
 - `/help`
 - `/list`
@@ -605,7 +605,7 @@ Behavior notes:
 
 ## Web Interface And API
 
-The Flask app is created by `create_app()` in [bidule2/interfaces/web.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/interfaces/web.py).
+The Flask app is created by `create_app()` in [legacy-python/interfaces/web.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/interfaces/web.py).
 
 ### Safety behavior
 
@@ -668,7 +668,7 @@ API errors are normalized into JSON for `/api/*` routes.
 
 ## Tracing And Logging
 
-Tracing setup is controlled through the orchestrator and [bidule2/agent/tracing_setup.py](/Users/jbanier/Documents/work/code/bidule2/bidule2/agent/tracing_setup.py).
+Tracing setup is controlled through the orchestrator and [legacy-python/agent/tracing_setup.py](/Users/jbanier/Documents/work/code/legacy-python/legacy-python/agent/tracing_setup.py).
 
 Supported providers:
 
@@ -678,7 +678,7 @@ Supported providers:
 
 Logging exists at two levels:
 
-- process-level logs under `logs/bidule.log`
+- process-level logs under `logs/` directory
 - per-conversation audit logs under `data/conversations/<id>/logs/conversation.log`
 
 The per-conversation log is the better source for reconstructing what happened in a specific investigation.

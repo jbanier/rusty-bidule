@@ -11,8 +11,8 @@
 - TUI, one-shot CLI, and web/API interfaces over the same orchestrator.
 
 This document describes the Rust client as implemented in this repository.
-`docs/REFERENCE_goal.md` is a historical reference for the earlier Python
-`bidule2` design and is not authoritative for current Rust behavior.
+`docs/REFERENCE_goal.md` is a historical reference for an earlier Python
+design iteration and is not authoritative for current Rust behavior.
 
 ## Repository Layout
 
@@ -40,7 +40,7 @@ data/
   oauth/                  MCP OAuth registration and token state
   findings.json           global finding records
 var/
-  bidule.log              process log by default
+  rusty-bidule.log        process log by default
 ```
 
 `config/config.local.yaml`, `data/`, and `var/` are local runtime state and are not required to exist before first run.

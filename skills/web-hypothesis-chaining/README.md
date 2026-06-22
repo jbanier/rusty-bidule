@@ -284,14 +284,14 @@ From `./scripts/demo_hypothesis_loop.sh`:
 
 **Result**: 2 critical chains discovered from 3 medium findings
 
-## Integration with Rusty Bidule
+## Integration
 
-These tools are designed to be called from rusty-bidule skills:
+These tools are designed to be called from agent skills:
 
 1. Agent activates `web-hypothesis-chaining` skill
 2. Skill calls `generate_hypotheses.py` via `local__run_skill`
 3. Output is parsed and used to select next test
-4. Loop continues within rusty-bidule agent workflow
+4. Loop continues within agent workflow
 
 See `recipes/web-app-hypothesis-loop/RECIPE.md` for integration.
 

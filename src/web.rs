@@ -19,7 +19,6 @@ use crate::{
     orchestrator::Orchestrator,
     paths::discover_project_root,
     prompt_expansion::expand_prompt_file_references,
-    recipes::RecipeRegistry,
     schedules::{ScheduleCreateRequest, build_schedule_record, run_schedule_by_id},
     types::{
         AgentBudgetOverride, ConversationSummary, FilesystemAccess, FilesystemScope,
@@ -63,7 +62,6 @@ fn new_job_id() -> String {
 pub struct WebAppState {
     pub orchestrator: Orchestrator,
     pub jobs: JobRegistry,
-    pub recipes: Arc<RecipeRegistry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +92,7 @@ impl From<ConversationSummary> for ConvoSummaryResponse {
             title: s.title,
             archived_at: s.archived_at.map(|value| value.to_rfc3339()),
             preview: s.preview,
-            pending_recipe: s.pending_recipe,
+            pending_recipe: None,
             active_compaction: s.active_compaction,
             enabled_mcp_servers: s.enabled_mcp_servers,
             pinned: s.pinned,
@@ -127,11 +125,6 @@ struct ContinueBody {
 struct AgentBudgetBody {
     max_iterations_per_turn: Option<usize>,
     continuation_increment: Option<usize>,
-}
-
-#[derive(Deserialize)]
-struct RecipeUseBody {
-    name: String,
 }
 
 #[derive(Deserialize)]
@@ -693,29 +686,6 @@ async fn compact_conversation(
     ))
 }
 
-async fn list_recipes(
-    State(state): State<WebAppState>,
-) -> AppResult<axum::Json<serde_json::Value>> {
-    let recipes = state
-        .recipes
-        .list()
-        .iter()
-        .map(|r| {
-            json!({
-                "name": r.name,
-                "title": r.title,
-                "description": r.description,
-                "keywords": r.keywords,
-                "initial_prompt": r.initial_prompt,
-                "config": {
-                    "mcp_servers": r.config_mcp_servers,
-                    "local_tools": r.config_local_tools,
-                },
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(axum::Json(json!(recipes)))
-}
 
 async fn list_schedules(
     State(state): State<WebAppState>,
@@ -807,30 +777,6 @@ async fn delete_schedule(
     }
 }
 
-async fn use_recipe(
-    State(state): State<WebAppState>,
-    Path(id): Path<String>,
-    axum::Json(body): axum::Json<RecipeUseBody>,
-) -> AppResult<axum::Json<serde_json::Value>> {
-    validate_resource_id(&id, "conversation")?;
-    let store = state.orchestrator.store();
-    let mut convo = store.load(&id)?;
-    convo.pending_recipe = Some(body.name);
-    store.save(&convo)?;
-    Ok(axum::Json(serde_json::to_value(&convo)?))
-}
-
-async fn clear_recipe(
-    State(state): State<WebAppState>,
-    Path(id): Path<String>,
-) -> AppResult<axum::Json<serde_json::Value>> {
-    validate_resource_id(&id, "conversation")?;
-    let store = state.orchestrator.store();
-    let mut convo = store.load(&id)?;
-    convo.pending_recipe = None;
-    store.save(&convo)?;
-    Ok(axum::Json(serde_json::to_value(&convo)?))
-}
 
 async fn get_mcp_servers(
     State(state): State<WebAppState>,
@@ -1331,14 +1277,12 @@ async fn delete_job(
 
 pub async fn run_web_server(
     orchestrator: Orchestrator,
-    recipes: RecipeRegistry,
     host: &str,
     port: u16,
 ) -> Result<()> {
     let state = WebAppState {
         orchestrator,
         jobs: Arc::new(Mutex::new(HashMap::new())),
-        recipes: Arc::new(recipes),
     };
     spawn_job_registry_sweeper(state.jobs.clone());
 
@@ -1396,10 +1340,6 @@ pub async fn run_web_server(
         .route(
             "/api/conversations/{id}/compact",
             post(compact_conversation),
-        )
-        .route(
-            "/api/conversations/{id}/recipe",
-            post(use_recipe).delete(clear_recipe),
         )
         .route(
             "/api/conversations/{id}/mcp-servers",
@@ -1472,7 +1412,6 @@ pub async fn run_web_server(
             "/api/mcp/oauth-servers/{server_name}/start",
             post(start_oauth_server),
         )
-        .route("/api/recipes", get(list_recipes))
         .route("/api/schedules", get(list_schedules).post(create_schedule))
         .route("/api/schedules/{schedule_id}/run", post(run_schedule))
         .route("/api/schedules/{schedule_id}/pause", post(pause_schedule))
@@ -1577,7 +1516,6 @@ mod tests {
     use crate::{
         config::{AppConfig, LocalToolsConfig, McpRuntimeConfig, SkillsConfig},
         orchestrator::Orchestrator,
-        recipes::RecipeRegistry,
         types::{
             AgentPermissions, FilesystemAccess, FilesystemScope, FindingValidationGate,
             RememberedJob,
@@ -1670,7 +1608,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let err = post_message(
@@ -1699,7 +1636,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
         let mut completed =
             RememberedJob::new("finished-scan".to_string(), "tx-1".to_string()).unwrap();
@@ -1755,7 +1691,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let response = put_scratchpad(
@@ -1784,7 +1719,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let updated = put_conversation_title(
@@ -1819,7 +1753,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let updated = put_conversation_permissions(
@@ -1859,7 +1792,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let updated = put_agent_budget(
@@ -1932,7 +1864,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let statuses = get_mcp_statuses(
@@ -1960,7 +1891,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let response = create_finding(
@@ -2017,7 +1947,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let _ = archive_conversation(
@@ -2068,7 +1997,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let exported = export_summary(
@@ -2112,7 +2040,6 @@ mod tests {
         let state = WebAppState {
             orchestrator,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            recipes: Arc::new(RecipeRegistry::default()),
         };
 
         let updated = update_finding(

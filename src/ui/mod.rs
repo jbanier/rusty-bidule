@@ -1721,26 +1721,6 @@ impl App {
                     let _ = ui_tx.send(UiEvent::CompactionFinished(result));
                 });
             }
-            "/recipes" => {
-                let recipes = self.orchestrator.recipes().list();
-                if recipes.is_empty() {
-                    self.push_command_output("/recipes", "No recipes found.");
-                    self.activities
-                        .push("Recipe list opened in transcript.".to_string());
-                } else {
-                    let body = recipes
-                        .iter()
-                        .map(|recipe| {
-                            let desc = recipe.description.as_deref().unwrap_or("No description.");
-                            format!("- `{}`: {}", recipe.name, desc)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    self.push_command_output("/recipes", body);
-                    self.activities
-                        .push("Recipe list opened in transcript.".to_string());
-                }
-            }
             "/continue" => {
                 let rounds = parts
                     .next()
@@ -1805,70 +1785,6 @@ impl App {
                     _ => {
                         self.activities
                             .push("Usage: /budget set <rounds> | /budget reset".to_string());
-                    }
-                }
-            }
-            "/recipe" => {
-                let sub = parts.next().unwrap_or_default();
-                match sub {
-                    "use" => {
-                        if let Some(name) = parts.next() {
-                            let name = name.to_string();
-                            if let Some(recipe) = self.orchestrator.recipes().find(&name) {
-                                let store = self.orchestrator.store();
-                                let mut convo = store.load(&self.current_conversation_id)?;
-                                convo.pending_recipe = Some(name.clone());
-                                store.save(&convo)?;
-                                self.activities.push(format!("Recipe '{name}' activated."));
-                                if let Some(prompt) = recipe.initial_prompt.clone() {
-                                    self.input = prompt;
-                                    self.invalidate_input_cache();
-                                    self.status = format!("Recipe '{name}' prompt loaded");
-                                    self.activities
-                                        .push(format!("Recipe '{name}' prompt loaded into input."));
-                                }
-                            } else {
-                                self.activities.push(format!("Recipe '{name}' not found."));
-                            }
-                        } else {
-                            self.activities
-                                .push("Usage: /recipe use <name>".to_string());
-                        }
-                    }
-                    "show" => {
-                        if let Some(name) = parts.next() {
-                            if let Some(recipe) = self.orchestrator.recipes().find(name) {
-                                let recipe_name = recipe.name.clone();
-                                let recipe_instructions = recipe.instructions.clone();
-                                self.push_command_output(
-                                    &format!("/recipe show {}", recipe_name),
-                                    format!(
-                                        "## Recipe: {}\n\n{}",
-                                        recipe_name, recipe_instructions
-                                    ),
-                                );
-                                self.activities.push(format!(
-                                    "Recipe '{}' opened in transcript.",
-                                    recipe_name
-                                ));
-                            } else {
-                                self.activities.push(format!("Recipe '{name}' not found."));
-                            }
-                        } else {
-                            self.activities
-                                .push("Usage: /recipe show <name>".to_string());
-                        }
-                    }
-                    "clear" => {
-                        let store = self.orchestrator.store();
-                        let mut convo = store.load(&self.current_conversation_id)?;
-                        convo.pending_recipe = None;
-                        store.save(&convo)?;
-                        self.activities.push("Recipe cleared.".to_string());
-                    }
-                    _ => {
-                        self.activities
-                            .push("Usage: /recipe use|show|clear [name]".to_string());
                     }
                 }
             }
@@ -3757,27 +3673,6 @@ mod tests {
         assert_eq!(app.agent_permissions, AgentPermissions::default());
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn recipe_use_prefills_input_without_dispatching() {
-        let (_dir, mut app) = test_app(&[]).await;
-
-        app.handle_command("/recipe use ip-reputation")
-            .await
-            .unwrap();
-
-        assert_eq!(
-            app.input.trim(),
-            "I need a background check on the following IP addresses:"
-        );
-        assert!(!app.inflight);
-        assert_eq!(app.status, "Recipe 'ip-reputation' prompt loaded");
-        let convo = app
-            .orchestrator
-            .store()
-            .load(&app.current_conversation_id)
-            .unwrap();
-        assert_eq!(convo.pending_recipe.as_deref(), Some("ip-reputation"));
-    }
 
     #[test]
     fn prompt_expansion_is_available_to_tui_flow() {

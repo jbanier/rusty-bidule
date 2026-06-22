@@ -160,9 +160,6 @@ pub struct Conversation {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<DateTime<Utc>>,
-    /// Name of the recipe currently loaded into this conversation (if any).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_recipe: Option<String>,
     /// Per-conversation MCP server allowlist. `None` means all configured servers are active.
     /// `Some([])` means all configured servers are filtered out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -252,7 +249,6 @@ pub struct ConversationSummary {
     pub title: Option<String>,
     pub archived_at: Option<DateTime<Utc>>,
     pub preview: Option<String>,
-    pub pending_recipe: Option<String>,
     pub active_compaction: Option<String>,
     pub enabled_mcp_servers: Option<Vec<String>>,
     pub pinned: bool,

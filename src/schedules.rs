@@ -21,8 +21,6 @@ pub struct ScheduleCreateRequest {
     pub cadence_kind: String,
     pub cadence_value: String,
     #[serde(default)]
-    pub recipe_name: Option<String>,
-    #[serde(default)]
     pub prompt: Option<String>,
 }
 
@@ -73,21 +71,14 @@ pub fn build_schedule_record(
         bail!("schedule name is required");
     }
     let run_type = request.run_type.trim();
-    if run_type != "recipe" && run_type != "prompt" {
-        bail!("schedule run_type must be 'recipe' or 'prompt'");
+    if run_type != "prompt" {
+        bail!("schedule run_type must be 'prompt' (recipe scheduling is deprecated)");
     }
-    let recipe_name = request
-        .recipe_name
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     let prompt = request
         .prompt
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    if run_type == "recipe" && recipe_name.is_none() {
-        bail!("recipe schedules require recipe_name");
-    }
-    if run_type == "prompt" && prompt.is_none() {
+    if prompt.is_none() {
         bail!("prompt schedules require prompt");
     }
     let cadence = parse_schedule_cadence(&request.cadence_kind, &request.cadence_value)?;
@@ -101,7 +92,7 @@ pub fn build_schedule_record(
         name: name.to_string(),
         title: request.title.filter(|value| !value.trim().is_empty()),
         run_type: run_type.to_string(),
-        recipe_name,
+        recipe_name: None,
         prompt,
         conversation_id,
         cadence,
@@ -159,30 +150,14 @@ pub async fn run_schedule_by_id(
     Ok(updated)
 }
 
-fn schedule_prompt(orchestrator: &Orchestrator, schedule: &ScheduleRecord) -> Result<String> {
+fn schedule_prompt(_orchestrator: &Orchestrator, schedule: &ScheduleRecord) -> Result<String> {
     match schedule.run_type.as_str() {
         "prompt" => schedule
             .prompt
             .clone()
             .filter(|prompt| !prompt.trim().is_empty())
             .ok_or_else(|| anyhow!("schedule '{}' has no prompt", schedule.id)),
-        "recipe" => {
-            let recipe_name = schedule
-                .recipe_name
-                .as_deref()
-                .ok_or_else(|| anyhow!("schedule '{}' has no recipe_name", schedule.id))?;
-            let recipe = orchestrator
-                .recipes()
-                .find(recipe_name)
-                .ok_or_else(|| anyhow!("recipe '{recipe_name}' not found"))?;
-            let mut conversation = orchestrator.store().load(&schedule.conversation_id)?;
-            conversation.pending_recipe = Some(recipe.name.clone());
-            orchestrator.store().save(&conversation)?;
-            Ok(recipe
-                .initial_prompt
-                .clone()
-                .unwrap_or_else(|| format!("Run scheduled recipe '{}'.", recipe.name)))
-        }
+        "recipe" => Err(anyhow!("recipe scheduling is deprecated; schedule '{}' cannot run", schedule.id)),
         other => Err(anyhow!("unsupported schedule run_type '{other}'")),
     }
 }

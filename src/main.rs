@@ -10,7 +10,6 @@ mod oauth;
 mod orchestrator;
 mod paths;
 mod prompt_expansion;
-mod recipes;
 mod redaction;
 mod schedules;
 mod skills;
@@ -68,8 +67,7 @@ async fn main() -> Result<()> {
             info!("launching web interface");
             AutoPullRuntime::new(orchestrator.clone()).start();
             schedules::ScheduleRuntime::new(orchestrator.clone()).start();
-            let recipes = orchestrator.recipes().clone();
-            web::run_web_server(orchestrator, recipes, &options.host, options.port).await
+            web::run_web_server(orchestrator, &options.host, options.port).await
         }
         Interface::Tui => {
             if let Some(message) = options.once_message {

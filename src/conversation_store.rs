@@ -56,7 +56,6 @@ impl ConversationStore {
             updated_at: now,
             title: None,
             archived_at: None,
-            pending_recipe: None,
             enabled_mcp_servers: None,
             active_compaction: None,
             enabled_local_tools: None,
@@ -111,7 +110,6 @@ impl ConversationStore {
                     .last()
                     .map(|message| message.content.replace('\n', " "))
                     .map(|content| content.chars().take(160).collect()),
-                pending_recipe: conversation.pending_recipe,
                 active_compaction: conversation.active_compaction,
                 enabled_mcp_servers: conversation.enabled_mcp_servers,
                 pinned: conversation.pinned,
